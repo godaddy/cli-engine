@@ -1,0 +1,380 @@
+use std::collections::BTreeSet;
+
+use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
+
+/// Parsed framework-global flags.
+///
+/// Applications can add their own global flags, but these are the built-in
+/// controls understood by middleware and the output pipeline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalFlags {
+    /// Output format: `json`, `human`, or `toon`.
+    pub output_format: String,
+    /// Metadata verbosity selector.
+    pub verbose: String,
+    /// Whether mutating commands should short-circuit.
+    pub dry_run: bool,
+    /// Field projection.
+    pub fields: String,
+    /// JMESPath per-item filter.
+    pub filter: String,
+    /// JMESPath whole-result expression.
+    pub expr: String,
+    /// Client-side page size.
+    pub limit: i64,
+    /// Client-side page offset.
+    pub offset: i64,
+    /// Whether schema rendering was requested.
+    pub schema: bool,
+    /// User-provided command reason.
+    pub reason: String,
+    /// Raw timeout string.
+    pub timeout: String,
+    /// Debug selector.
+    pub debug: String,
+    /// Search query.
+    pub search: String,
+}
+
+impl Default for GlobalFlags {
+    fn default() -> Self {
+        Self {
+            output_format: "json".to_owned(),
+            verbose: String::new(),
+            dry_run: false,
+            fields: String::new(),
+            filter: String::new(),
+            expr: String::new(),
+            limit: 0,
+            offset: 0,
+            schema: false,
+            reason: String::new(),
+            timeout: "60s".to_owned(),
+            debug: String::new(),
+            search: String::new(),
+        }
+    }
+}
+
+/// Registers framework-global flags on a `clap` command.
+pub fn register_global_flags(command: Command) -> Command {
+    command
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .short('o')
+                .global(true)
+                .value_name("FORMAT")
+                .default_value("json")
+                .help("Output format: toon|json|human"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .long("verbose")
+                .global(true)
+                .num_args(0..=1)
+                .default_missing_value("all")
+                .value_name("FIELDS")
+                .help("Include metadata in output (all, or comma-separated: system,duration,args,env,identity,command,effective_args,timestamp)"),
+        )
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .global(true)
+                .num_args(0..=1)
+                .require_equals(true)
+                .default_missing_value("true")
+                .default_value("false")
+                .value_parser(compat_bool_value_parser())
+                .help("Preview mutations without executing"),
+        )
+        .arg(
+            Arg::new("fields")
+                .long("fields")
+                .global(true)
+                .value_name("FIELDS")
+                .help("Comma-separated fields to include in output (use 'all' or '*' for everything)"),
+        )
+        .arg(
+            Arg::new("filter")
+                .long("filter")
+                .global(true)
+                .value_name("EXPR")
+                .help("Per-item JMESPath predicate for list data"),
+        )
+        .arg(
+            Arg::new("expr")
+                .long("expr")
+                .global(true)
+                .value_name("EXPR")
+                .help("JMESPath query applied to the whole result"),
+        )
+        .arg(
+            Arg::new("limit")
+                .long("limit")
+                .global(true)
+                .value_parser(value_parser!(i64))
+                .allow_hyphen_values(true)
+                .default_value("0")
+                .help("Max items to return (client-side, 0=all)"),
+        )
+        .arg(
+            Arg::new("offset")
+                .long("offset")
+                .global(true)
+                .value_parser(value_parser!(i64))
+                .allow_hyphen_values(true)
+                .default_value("0")
+                .help("Skip N items before applying limit"),
+        )
+        .arg(
+            Arg::new("schema")
+                .long("schema")
+                .global(true)
+                .num_args(0..=1)
+                .require_equals(true)
+                .default_missing_value("true")
+                .default_value("false")
+                .value_parser(compat_bool_value_parser())
+                .help("Dump output field metadata instead of running the command"),
+        )
+        .arg(
+            Arg::new("reason")
+                .long("reason")
+                .global(true)
+                .value_name("TEXT")
+                .help("Short explanation of why this command is being run (required for destructive commands)"),
+        )
+        .arg(
+            Arg::new("timeout")
+                .long("timeout")
+                .global(true)
+                .allow_hyphen_values(true)
+                .default_value("60s")
+                .value_name("DURATION")
+                .help("Overall command timeout (e.g. 60s, 5m); use 0s to disable"),
+        )
+        .arg(
+            Arg::new("debug")
+                .long("debug")
+                .global(true)
+                .num_args(0..=1)
+                .default_missing_value("*")
+                .value_name("PATTERN")
+                .help("Enable debug logging (comma-separated component patterns, e.g. *, transport, *,-auth)"),
+        )
+        .arg(
+            Arg::new("search")
+                .long("search")
+                .global(true)
+                .value_name("KEYWORD")
+                .help("Search commands and guides by keyword"),
+        )
+}
+
+#[must_use]
+/// Extracts framework-global flags from parsed `clap` matches.
+pub fn global_flags_from_matches(matches: &ArgMatches) -> GlobalFlags {
+    GlobalFlags {
+        output_format: matches
+            .get_one::<String>("output")
+            .cloned()
+            .unwrap_or_else(|| "json".to_owned()),
+        verbose: matches
+            .get_one::<String>("verbose")
+            .cloned()
+            .unwrap_or_default(),
+        dry_run: matches.get_one::<bool>("dry-run").copied().unwrap_or(false),
+        fields: matches
+            .get_one::<String>("fields")
+            .cloned()
+            .unwrap_or_default(),
+        filter: matches
+            .get_one::<String>("filter")
+            .cloned()
+            .unwrap_or_default(),
+        expr: matches
+            .get_one::<String>("expr")
+            .cloned()
+            .unwrap_or_default(),
+        limit: matches.get_one::<i64>("limit").copied().unwrap_or(0),
+        offset: matches.get_one::<i64>("offset").copied().unwrap_or(0),
+        schema: matches.get_one::<bool>("schema").copied().unwrap_or(false),
+        reason: matches
+            .get_one::<String>("reason")
+            .cloned()
+            .unwrap_or_default(),
+        timeout: matches
+            .get_one::<String>("timeout")
+            .cloned()
+            .unwrap_or_else(|| "60s".to_owned()),
+        debug: matches
+            .get_one::<String>("debug")
+            .cloned()
+            .unwrap_or_default(),
+        search: matches
+            .get_one::<String>("search")
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+#[must_use]
+/// Extracts `--search` from raw args before normal parsing.
+pub fn extract_search_query(args: &[impl AsRef<str>]) -> String {
+    for index in 0..args.len() {
+        let arg = args[index].as_ref();
+        if arg == "--search" {
+            return args
+                .get(index + 1)
+                .map_or_else(String::new, |value| value.as_ref().to_owned());
+        }
+        if let Some(value) = arg.strip_prefix("--search=") {
+            return value.to_owned();
+        }
+    }
+    String::new()
+}
+
+#[must_use]
+/// Extracts `--output`/`-o` from raw args before normal parsing.
+pub fn extract_output_format(args: &[impl AsRef<str>]) -> String {
+    for index in 0..args.len() {
+        let arg = args[index].as_ref();
+        if arg == "--output" || arg == "-o" {
+            return args
+                .get(index + 1)
+                .map_or_else(|| "json".to_owned(), |value| value.as_ref().to_owned());
+        }
+        if let Some(value) = arg.strip_prefix("--output=") {
+            return value.to_owned();
+        }
+    }
+    "json".to_owned()
+}
+
+#[must_use]
+/// Extracts a colon-separated command path from raw args.
+pub fn extract_command_path(
+    args: &[impl AsRef<str>],
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+) -> String {
+    let mut parts = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        let arg = args[index].as_ref();
+        if arg == "--schema" {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            if bool_flags.contains(arg) || arg.contains('=') {
+                index += 1;
+                continue;
+            }
+            if value_flags.contains(arg)
+                || (index + 1 < args.len() && !args[index + 1].as_ref().starts_with('-'))
+            {
+                index += 2;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        parts.push(arg.to_owned());
+        index += 1;
+    }
+    parts.join(":")
+}
+
+#[must_use]
+/// Reports whether raw args contain a true `--schema` flag.
+pub fn has_true_schema_flag(args: &[impl AsRef<str>]) -> bool {
+    for arg in args {
+        let arg = arg.as_ref();
+        if arg == "--schema" {
+            return true;
+        }
+        if let Some(value) = arg.strip_prefix("--schema=") {
+            return parse_compat_bool(value).unwrap_or(false);
+        }
+    }
+    false
+}
+
+fn compat_bool_value_parser() -> ValueParser {
+    ValueParser::new(parse_compat_bool)
+}
+
+fn parse_compat_bool(raw: &str) -> Result<bool, String> {
+    match raw {
+        "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
+        _ => Err(format!("invalid boolean value {raw:?}")),
+    }
+}
+
+#[must_use]
+/// Derives flag names that do not consume the following token.
+pub fn derive_bool_flags(command: &Command) -> BTreeSet<String> {
+    let mut flags = BTreeSet::from([
+        "--help".to_owned(),
+        "-h".to_owned(),
+        "--verbose".to_owned(),
+        "--debug".to_owned(),
+    ]);
+    collect_flag_names(command, &mut |arg, name| {
+        if !arg_requires_value(arg) {
+            flags.insert(name);
+        }
+    });
+    flags
+}
+
+#[must_use]
+/// Derives flag names that consume the following token.
+pub fn derive_value_flags(command: &Command) -> BTreeSet<String> {
+    let mut flags = BTreeSet::new();
+    collect_flag_names(command, &mut |arg, name| {
+        if arg_requires_value(arg) {
+            flags.insert(name);
+        }
+    });
+    flags
+}
+
+fn collect_flag_names(command: &Command, visit: &mut impl FnMut(&Arg, String)) {
+    for arg in command.get_arguments() {
+        if arg.is_positional() {
+            continue;
+        }
+        if let Some(long) = arg.get_long() {
+            visit(arg, format!("--{long}"));
+        }
+        if let Some(short) = arg.get_short() {
+            visit(arg, format!("-{short}"));
+        }
+    }
+    for child in command.get_subcommands() {
+        collect_flag_names(child, visit);
+    }
+}
+
+fn arg_requires_value(arg: &Arg) -> bool {
+    match arg.get_action() {
+        ArgAction::Set | ArgAction::Append => arg
+            .get_num_args()
+            .is_none_or(|range| range.takes_values() && range.min_values() > 0),
+        ArgAction::SetTrue
+        | ArgAction::SetFalse
+        | ArgAction::Count
+        | ArgAction::Help
+        | ArgAction::HelpShort
+        | ArgAction::HelpLong
+        | ArgAction::Version => false,
+        _ => arg
+            .get_num_args()
+            .is_some_and(|range| range.takes_values() && range.min_values() > 0),
+    }
+}
