@@ -124,6 +124,38 @@ let command = RuntimeCommandSpec::new(
 
 Use `RuntimeCommandSpec::new_with_context` only when the command needs the command path, user-supplied args, or middleware snapshot.
 
+### Typed Arguments Alternative
+
+When a command has many flags, complex validation, or an existing `#[derive(clap::Args)]` struct,
+use the typed path instead:
+
+```rust
+use cli_engine::{CommandResult, CommandSpec, Credential, RuntimeCommandSpec};
+use serde_json::json;
+
+#[derive(Debug, Clone, clap::Args)]
+struct ListArgs {
+    #[arg(long)]
+    team: String,
+
+    #[arg(long, default_value = "10")]
+    limit: u32,
+}
+
+let command = RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
+    CommandSpec::from_args::<ListArgs>("list", "List projects")
+        .with_system("projects-api")
+        .with_default_fields("id,name,status"),
+    async |_credential: Option<Credential>, args: ListArgs| {
+        Ok(CommandResult::new(json!([
+            {"id": "p1", "name": "Portal", "team": args.team, "limit": args.limit}
+        ])))
+    },
+);
+```
+
+Both the builder and typed paths produce equivalent runtime commands and can be mixed within a module.
+
 For a full module, prefer this shape:
 
 ```rust
@@ -190,6 +222,7 @@ Command checklist:
 - Use `.no_auth(true)` only for commands that genuinely do not need credentials.
 - Use `.with_tier(...)` or `.mutates(true)` for mutating commands so `--dry-run` can short-circuit them.
 - Prefer returning structured JSON values from handlers; let cli-engine render JSON, human, and TOON formats.
+- Prefer `CommandSpec::from_args::<T>()` + `RuntimeCommandSpec::new_typed` when the command has many flags, needs clap validation attributes, or when porting existing derive-based commands. Use the builder path for simple commands with one or two flags.
 
 ## Output And Schemas
 

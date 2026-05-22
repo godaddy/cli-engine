@@ -54,7 +54,12 @@ pub struct CommandResultMetadata {}
 /// Most commands can use [`RuntimeCommandSpec::new`] and receive just the
 /// credential and effective args. Use this context when a command needs the
 /// colon path, user-supplied args, or a snapshot of middleware state.
+///
+/// This struct is constructed by the framework during command dispatch.
+/// Consumer code receives it in handler closures and should not construct it
+/// directly.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CommandContext {
     /// Credential resolved by middleware. No-auth commands receive `None`.
     pub credential: Option<Credential>,
@@ -66,6 +71,23 @@ pub struct CommandContext {
     pub command_path: String,
     /// Middleware snapshot for this invocation.
     pub middleware: Middleware,
+    /// Raw `clap` matches for typed argument deserialization via derive.
+    pub raw_matches: Arc<ArgMatches>,
+}
+
+impl CommandContext {
+    /// Deserializes the raw argument matches into a typed args struct.
+    ///
+    /// Use this with `#[derive(clap::Args)]` structs to get type-safe access
+    /// to command arguments instead of working with the `ValueMap` directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the matches cannot be deserialized into `T`.
+    pub fn typed_args<T: clap::FromArgMatches>(&self) -> Result<T> {
+        T::from_arg_matches(self.raw_matches.as_ref())
+            .map_err(|e| crate::CliCoreError::Message(format!("argument parse error: {e}")))
+    }
 }
 
 /// Declarative leaf command metadata and parser arguments.
@@ -111,6 +133,28 @@ impl CommandSpec {
         Self {
             name: name.into(),
             short: short.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Creates a command spec from a `#[derive(clap::Args)]` struct.
+    ///
+    /// Extracts the argument definitions from the derive type and populates the
+    /// spec's args list. The command name and help text are still required since
+    /// `Args` types do not carry those.
+    #[must_use]
+    pub fn from_args<T: clap::Args>(name: impl Into<String>, short: impl Into<String>) -> Self {
+        let placeholder = Command::new("__placeholder");
+        let augmented = T::augment_args(placeholder);
+        let args: Vec<Arg> = augmented
+            .get_arguments()
+            .filter(|a| !matches!(a.get_id().as_str(), "help" | "version"))
+            .cloned()
+            .collect();
+        Self {
+            name: name.into(),
+            short: short.into(),
+            args,
             ..Self::default()
         }
     }
@@ -418,6 +462,40 @@ impl RuntimeCommandSpec {
             handler: Arc::new(move |context| {
                 let future = handler(context);
                 Box::pin(async move { future.await.map(Into::into) })
+            }),
+        }
+    }
+
+    /// Creates a runtime command with typed argument deserialization.
+    ///
+    /// The handler receives the optional credential and the deserialized args
+    /// struct. Use with `CommandSpec::from_args::<T>()` to get end-to-end type
+    /// safety from argument definition through handler consumption.
+    ///
+    /// If the handler also needs the command path, middleware, or user-supplied
+    /// args, use [`RuntimeCommandSpec::new_with_context`] with
+    /// [`CommandContext::typed_args`] instead.
+    #[must_use]
+    pub fn new_typed<T, F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
+    where
+        T: clap::FromArgMatches + Send + 'static,
+        F: Fn(Option<Credential>, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Output>> + Send + 'static,
+        Output: Into<CommandResult> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        Self {
+            spec,
+            handler: Arc::new(move |context| {
+                let credential = context.credential.clone();
+                let parsed = T::from_arg_matches(context.raw_matches.as_ref());
+                let handler = handler.clone();
+                Box::pin(async move {
+                    let args = parsed.map_err(|e| {
+                        crate::CliCoreError::Message(format!("argument parse error: {e}"))
+                    })?;
+                    handler(credential, args).await.map(Into::into)
+                })
             }),
         }
     }

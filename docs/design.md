@@ -30,6 +30,7 @@ docs/
   design.md
 examples/
   basic.rs
+  typed.rs
 src/
   lib.rs
   cli.rs
@@ -47,6 +48,7 @@ src/
   transport/
 tests/
   foundation.rs
+  derive_bridge.rs
 ```
 
 The root module re-exports the common authoring surface so consumer modules can usually import from
@@ -170,6 +172,45 @@ fn list_projects() -> RuntimeCommandSpec {
 
 Use `RuntimeCommandSpec::new_with_context` only when a handler needs the colon command path,
 user-supplied args, or a middleware snapshot.
+
+### Typed Arguments
+
+When commands have many flags or already use `#[derive(clap::Args)]` structs, the typed path avoids
+manual `Arg` construction and `ValueMap` extraction:
+
+```rust
+use cli_engine::{CommandResult, CommandSpec, Credential, RuntimeCommandSpec};
+use serde_json::json;
+
+#[derive(Debug, Clone, clap::Args)]
+struct ListArgs {
+    #[arg(long)]
+    team: String,
+
+    #[arg(long, default_value = "10")]
+    limit: u32,
+}
+
+fn list_projects() -> RuntimeCommandSpec {
+    RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
+        CommandSpec::from_args::<ListArgs>("list", "List projects")
+            .with_system("projects-api")
+            .with_default_fields("id,name,status"),
+        async |_credential: Option<Credential>, args: ListArgs| {
+            Ok(CommandResult::new(json!([
+                {"id": "p1", "name": "Portal", "team": args.team, "limit": args.limit}
+            ])))
+        },
+    )
+}
+```
+
+`CommandSpec::from_args::<T>()` calls `T::augment_args` to extract argument definitions.
+`RuntimeCommandSpec::new_typed` deserializes parsed matches into the typed struct. Handlers that use
+`RuntimeCommandSpec::new` or `new_with_context` can also call `context.typed_args::<T>()` for
+on-demand deserialization.
+
+The builder and derive paths are equivalent at runtime and can be mixed within a module.
 
 Command metadata should be explicit:
 
