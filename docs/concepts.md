@@ -151,6 +151,41 @@ async fn handler(
 Use `RuntimeCommandSpec::new_with_context` when a handler needs command path, user-supplied args, or
 middleware context.
 
+### Typed Arguments
+
+Commands can also define arguments with `#[derive(clap::Args)]` structs instead of manual `Arg`
+builders. This gives compile-time type safety from argument definition through handler consumption:
+
+```rust
+use cli_engine::{CommandResult, CommandSpec, Credential, RuntimeCommandSpec};
+use serde_json::json;
+
+#[derive(Debug, Clone, clap::Args)]
+struct ListArgs {
+    #[arg(long)]
+    team: String,
+
+    #[arg(long, default_value = "10")]
+    limit: u32,
+}
+
+let command = RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
+    CommandSpec::from_args::<ListArgs>("list", "List projects")
+        .with_system("projects-api")
+        .with_default_fields("id,name,status"),
+    async |_credential: Option<Credential>, args: ListArgs| {
+        Ok(CommandResult::new(json!([
+            {"id": "p1", "name": "Portal", "team": args.team}
+        ])))
+    },
+);
+```
+
+`CommandSpec::from_args::<T>()` extracts argument definitions from the derive type.
+`RuntimeCommandSpec::new_typed` deserializes the raw matches into the typed struct before calling
+the handler. Both approaches produce equivalent runtime commands and can be mixed freely within a
+module.
+
 ## Built-In Commands
 
 The framework registers built-in commands for common CLI behavior:
