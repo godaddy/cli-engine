@@ -3435,6 +3435,22 @@ fn raw_search_and_output_extraction_matches_legacy_bypass_helpers() {
         extract_output_format(&["my-cli", "--search", "foo"]),
         "json"
     );
+    assert_eq!(
+        extract_output_format(&["my-cli", "project", "list", "--json"]),
+        "json"
+    );
+    assert_eq!(
+        extract_output_format(&["my-cli", "project", "list", "--toon"]),
+        "toon"
+    );
+    assert_eq!(
+        extract_output_format(&["my-cli", "--toon", "project", "list"]),
+        "toon"
+    );
+    assert_eq!(
+        extract_output_format(&["my-cli", "project", "list", "--human"]),
+        "human"
+    );
 
     assert!(has_true_schema_flag(&["my-cli", "release", "--schema"]));
     assert!(has_true_schema_flag(&[
