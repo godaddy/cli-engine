@@ -66,6 +66,23 @@ pub struct CommandContext {
     pub command_path: String,
     /// Middleware snapshot for this invocation.
     pub middleware: Middleware,
+    /// Raw `clap` matches for typed argument deserialization via derive.
+    pub raw_matches: ArgMatches,
+}
+
+impl CommandContext {
+    /// Deserializes the raw argument matches into a typed args struct.
+    ///
+    /// Use this with `#[derive(clap::Args)]` structs to get type-safe access
+    /// to command arguments instead of working with the `ValueMap` directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the matches cannot be deserialized into `T`.
+    pub fn typed_args<T: clap::FromArgMatches>(&self) -> Result<T> {
+        T::from_arg_matches(&self.raw_matches)
+            .map_err(|e| crate::CliCoreError::Message(format!("argument parse error: {e}")))
+    }
 }
 
 /// Declarative leaf command metadata and parser arguments.
@@ -111,6 +128,24 @@ impl CommandSpec {
         Self {
             name: name.into(),
             short: short.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Creates a command spec from a `#[derive(clap::Args)]` struct.
+    ///
+    /// Extracts the argument definitions from the derive type and populates the
+    /// spec's args list. The command name and help text are still required since
+    /// `Args` types do not carry those.
+    #[must_use]
+    pub fn from_args<T: clap::Args>(name: impl Into<String>, short: impl Into<String>) -> Self {
+        let placeholder = Command::new("__placeholder");
+        let augmented = T::augment_args(placeholder);
+        let args: Vec<Arg> = augmented.get_arguments().cloned().collect();
+        Self {
+            name: name.into(),
+            short: short.into(),
+            args,
             ..Self::default()
         }
     }
@@ -418,6 +453,36 @@ impl RuntimeCommandSpec {
             handler: Arc::new(move |context| {
                 let future = handler(context);
                 Box::pin(async move { future.await.map(Into::into) })
+            }),
+        }
+    }
+
+    /// Creates a runtime command with typed argument deserialization.
+    ///
+    /// The handler receives a credential, the deserialized args struct, and the
+    /// full context. Use with `CommandSpec::from_args::<T>()` to get end-to-end
+    /// type safety from argument definition through handler consumption.
+    #[must_use]
+    pub fn new_typed<T, F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
+    where
+        T: clap::FromArgMatches + Send + 'static,
+        F: Fn(Option<Credential>, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Output>> + Send + 'static,
+        Output: Into<CommandResult> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        Self {
+            spec,
+            handler: Arc::new(move |context| {
+                let credential = context.credential.clone();
+                let parsed = T::from_arg_matches(&context.raw_matches);
+                let handler = handler.clone();
+                Box::pin(async move {
+                    let args = parsed.map_err(|e| {
+                        crate::CliCoreError::Message(format!("argument parse error: {e}"))
+                    })?;
+                    handler(credential, args).await.map(Into::into)
+                })
             }),
         }
     }
