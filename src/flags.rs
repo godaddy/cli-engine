@@ -170,16 +170,45 @@ pub fn register_global_flags(command: Command) -> Command {
                 .value_name("KEYWORD")
                 .help("Search commands and guides by keyword"),
         )
+        .arg(
+            Arg::new("json")
+                .long("json")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Shorthand for --output json"),
+        )
+        .arg(
+            Arg::new("toon")
+                .long("toon")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Shorthand for --output toon"),
+        )
+        .arg(
+            Arg::new("human")
+                .long("human")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .help("Shorthand for --output human"),
+        )
 }
 
 #[must_use]
 /// Extracts framework-global flags from parsed `clap` matches.
 pub fn global_flags_from_matches(matches: &ArgMatches) -> GlobalFlags {
-    GlobalFlags {
-        output_format: matches
+    let output_format = if matches.get_flag("toon") {
+        "toon".to_owned()
+    } else if matches.get_flag("human") {
+        "human".to_owned()
+    } else {
+        matches
             .get_one::<String>("output")
             .cloned()
-            .unwrap_or_else(|| "json".to_owned()),
+            .unwrap_or_else(|| "json".to_owned())
+    };
+
+    GlobalFlags {
+        output_format,
         verbose: matches
             .get_one::<String>("verbose")
             .cloned()
@@ -237,7 +266,10 @@ pub fn extract_search_query(args: &[impl AsRef<str>]) -> String {
 }
 
 #[must_use]
-/// Extracts `--output`/`-o` from raw args before normal parsing.
+/// Extracts output format from raw args.
+///
+/// Recognizes `--output <format>` / `-o <format>` / `--output=<format>`,
+/// plus `--json`, `--toon`, and `--human` as shorthand for their respective formats.
 pub fn extract_output_format(args: &[impl AsRef<str>]) -> String {
     for index in 0..args.len() {
         let arg = args[index].as_ref();
@@ -248,6 +280,15 @@ pub fn extract_output_format(args: &[impl AsRef<str>]) -> String {
         }
         if let Some(value) = arg.strip_prefix("--output=") {
             return value.to_owned();
+        }
+        if arg == "--json" {
+            return "json".to_owned();
+        }
+        if arg == "--toon" {
+            return "toon".to_owned();
+        }
+        if arg == "--human" {
+            return "human".to_owned();
         }
     }
     "json".to_owned()

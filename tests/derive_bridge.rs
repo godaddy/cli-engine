@@ -283,3 +283,54 @@ async fn derive_bridge_handles_flattened_structs() {
     assert_eq!(json["data"]["page_size"], 50);
     assert_eq!(json["data"]["page"], 0);
 }
+
+// --- output shorthand aliases ---
+
+#[tokio::test]
+async fn json_shorthand_flag_produces_json_output() {
+    let cli = derive_cli();
+
+    let result = cli
+        .run(["derive-test", "greet", "hello", "--name", "World", "--json"])
+        .await;
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.rendered);
+    let json: Value = serde_json::from_str(&result.rendered).expect("valid json");
+    assert_eq!(json["data"]["messages"], json!(["Hello, World!"]));
+}
+
+#[tokio::test]
+async fn toon_shorthand_flag_produces_toon_output() {
+    let cli = derive_cli();
+
+    let result = cli
+        .run(["derive-test", "greet", "hello", "--name", "World", "--toon"])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    assert!(
+        !result.rendered.starts_with('{'),
+        "toon output should not be raw JSON: {}",
+        result.rendered
+    );
+}
+
+#[tokio::test]
+async fn human_shorthand_flag_produces_human_output() {
+    let cli = derive_cli();
+
+    let result = cli
+        .run([
+            "derive-test",
+            "greet",
+            "hello",
+            "--name",
+            "World",
+            "--human",
+        ])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    assert!(
+        !result.rendered.starts_with('{'),
+        "human output should not be raw JSON: {}",
+        result.rendered
+    );
+}

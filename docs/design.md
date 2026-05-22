@@ -228,6 +228,9 @@ Framework global flags populate middleware and apply consistently to every comma
 | Flag | Purpose |
 | --- | --- |
 | `--output`, `-o` | Output format: `json`, `human`, or `toon`. |
+| `--json` | Shorthand for `--output json`. |
+| `--toon` | Shorthand for `--output toon`. |
+| `--human` | Shorthand for `--output human`. |
 | `--verbose` | Includes metadata; no value means all metadata. |
 | `--dry-run` | Short-circuits mutating/destructive commands. |
 | `--fields` | Selects comma-separated output fields. |
