@@ -216,6 +216,9 @@ populate middleware:
 | Flag | Middleware field | Default | Purpose |
 | --- | --- | --- | --- |
 | `--output`, `-o` | `output_format` | `json` | Output format: `json`, `human`, or `toon`. |
+| `--json` | `output_format` | — | Shorthand for `--output json`. |
+| `--toon` | `output_format` | — | Shorthand for `--output toon`. |
+| `--human` | `output_format` | — | Shorthand for `--output human`. |
 | `--verbose` | `verbose` | empty | Includes metadata; no value means `all`. |
 | `--dry-run` | `dry_run` | `false` | Short-circuits mutating/destructive commands. |
 | `--fields` | `fields` | empty | Selects comma-separated output fields. |
@@ -337,8 +340,9 @@ my-cli project list --fields name,status
 my-cli project list --output human
 ```
 
-JSON output is the default. Human output is optimized for terminal reading. TOON can be requested
-explicitly with `--output toon`.
+JSON output is the default. Human output is optimized for terminal reading. Each format has a
+shorthand flag: `--json`, `--human`, and `--toon` are equivalent to `--output json`,
+`--output human`, and `--output toon` respectively.
 
 Errors are rendered through the same envelope path as successful data. Framework errors are mapped
 to process exit codes by category. Callers that need a specific process status can use
