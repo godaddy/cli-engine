@@ -815,7 +815,7 @@ impl Cli {
         let user_args_for_handler = user_args.clone();
         let handler_path = command_path.clone();
         let middleware_for_handler = middleware.clone();
-        let raw_matches_for_handler = leaf.clone();
+        let raw_matches_for_handler = Arc::new(leaf.clone());
         let result = run_with_timeout(
             command_timeout,
             &flags.timeout,
