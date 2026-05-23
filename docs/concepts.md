@@ -259,7 +259,7 @@ populate middleware:
 | `--offset` | `offset` | `0` | Client-side starting offset for list output. |
 | `--schema` | `schema` | `false` | Renders command schema instead of running business logic. |
 | `--reason` | `reason` | empty | Reason passed to authorization. |
-| `--timeout` | `timeout` | `60s` | Command deadline; `0s` disables it. |
+| `--timeout` | `timeout` | `0s` | Command deadline (e.g. `60s`, `5m`); default `0s` = no timeout. |
 | `--debug` | `debug` | empty | Enables debug behavior for integrations that use it. |
 | `--search` | `search` | empty | Searches command and guide documentation before command execution. |
 

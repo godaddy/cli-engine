@@ -2753,7 +2753,7 @@ async fn runtime_command_context_exposes_args_user_args_path_and_middleware() {
             "user_region_present": false,
             "output": "json",
             "debug": "*",
-            "timeout_present": true,
+            "timeout_present": false,
             "app": "my-cli",
             "credential_present": false
         })
@@ -3483,7 +3483,7 @@ fn global_flag_defaults_and_derived_flag_classes_cover_common_clap_actions() {
             offset: 0,
             schema: false,
             reason: String::new(),
-            timeout: "60s".to_owned(),
+            timeout: "0s".to_owned(),
             debug: String::new(),
             search: String::new(),
         }

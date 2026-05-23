@@ -49,7 +49,7 @@ impl Default for GlobalFlags {
             offset: 0,
             schema: false,
             reason: String::new(),
-            timeout: "60s".to_owned(),
+            timeout: "0s".to_owned(),
             debug: String::new(),
             search: String::new(),
         }
@@ -150,9 +150,9 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("timeout")
                 .global(true)
                 .allow_hyphen_values(true)
-                .default_value("60s")
+                .default_value("0s")
                 .value_name("DURATION")
-                .help("Overall command timeout (e.g. 60s, 5m); use 0s to disable"),
+                .help("Overall command timeout (e.g. 60s, 5m); default 0s = no timeout"),
         )
         .arg(
             Arg::new("debug")
@@ -236,7 +236,7 @@ pub fn global_flags_from_matches(matches: &ArgMatches) -> GlobalFlags {
         timeout: matches
             .get_one::<String>("timeout")
             .cloned()
-            .unwrap_or_else(|| "60s".to_owned()),
+            .unwrap_or_else(|| "0s".to_owned()),
         debug: matches
             .get_one::<String>("debug")
             .cloned()

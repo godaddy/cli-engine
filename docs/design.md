@@ -246,7 +246,7 @@ Framework global flags populate middleware and apply consistently to every comma
 | `--offset` | Client-side starting offset for list output. |
 | `--schema` | Renders command schema instead of running business logic. |
 | `--reason` | Reason passed to authorization, audit, and activity. |
-| `--timeout` | Command deadline; `0s` disables the deadline. |
+| `--timeout` | Command deadline (e.g. `60s`, `5m`); default is no timeout (`0s`). |
 | `--debug` | Debug selector for integrations that use it. |
 | `--search` | Searches command and guide documentation before command execution. |
 | `--version`, `-v` | Prints version/build metadata. |
