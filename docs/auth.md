@@ -173,6 +173,65 @@ For compatibility with existing provider binaries, `ExecProvider` also sends `re
 value as `env`, accepts credential responses containing `realm`, and can fall back to the
 `list-realms` action when `list-environments` is not available.
 
+## PkceAuthProvider
+
+`PkceAuthProvider` is a built-in OAuth 2.0 Authorization Code + PKCE provider (RFC 7636). It
+requires the `pkce-auth` Cargo feature.
+
+```toml
+[dependencies]
+cli-engine = { path = "...", features = ["pkce-auth"] }
+```
+
+The provider manages the full browser-based login flow:
+
+1. Generates a random PKCE code verifier and SHA-256 challenge.
+2. Starts a local TCP server on `127.0.0.1` to receive the OAuth callback.
+3. Opens the system browser to the authorization endpoint.
+4. Exchanges the returned code for tokens at the token endpoint.
+5. Stores tokens in the system keychain via the `keyring` crate (macOS Keychain, Linux Secret
+   Service, or the platform's encrypted file fallback).
+6. Refreshes expired tokens automatically using the stored refresh token.
+
+```rust
+use std::sync::Arc;
+use cli_engine::{CliConfig, auth::pkce::PkceAuthProvider};
+
+let provider = Arc::new(
+    PkceAuthProvider::new(
+        "primary",
+        "https://auth.example.com/oauth/authorize",
+        "https://auth.example.com/oauth/token",
+        "my-client-id",
+        &["openid", "profile"],
+    )
+    .with_app_id("my-cli"),   // keychain service prefix
+);
+
+let config = CliConfig::new("my-cli", "My CLI", "my-cli")
+    .with_default_auth_provider("primary")
+    .with_auth_provider(provider);
+```
+
+Tokens are stored per `(app_id, provider_name, env)` tuple. The in-process cache avoids
+redundant keychain reads. A 30-second expiry buffer triggers proactive refresh.
+
+The redirect port defaults to `7443`. Override it with `PkceAuthProvider::with_redirect_port`.
+
+### Environment Variable Overrides
+
+At runtime, the provider checks for environment variable overrides before using its compiled-in
+values. The prefix is the provider name uppercased with hyphens replaced by underscores:
+
+| Variable | Purpose |
+| --- | --- |
+| `<PREFIX>_OAUTH_CLIENT_ID` | OAuth client ID. |
+| `<PREFIX>_OAUTH_AUTH_URL` | Authorization endpoint URL. |
+| `<PREFIX>_OAUTH_TOKEN_URL` | Token endpoint URL. |
+
+For a provider named `"primary"`, the variables are `PRIMARY_OAUTH_CLIENT_ID`,
+`PRIMARY_OAUTH_AUTH_URL`, and `PRIMARY_OAUTH_TOKEN_URL`.
+
 ## Dispatcher
 
 [`Dispatcher`](../src/auth/dispatcher.rs) routes auth calls by provider name:

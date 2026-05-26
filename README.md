@@ -1,8 +1,6 @@
 # cli-engine
 
-`cli-engine` is a Rust library for building consistent, domain-oriented CLI applications.
-It provides shared framework pieces for command registration, authentication, authorization hooks,
-middleware, structured output, schemas, guides, search, command tree rendering, and HTTP transport.
+`cli-engine` is a Rust library for building consistent, domain-oriented CLI applications. It provides shared framework pieces for command registration, authentication, authorization hooks, middleware, structured output, schemas, guides, search, command tree rendering, and HTTP transport.
 
 Consumer CLIs bring their own binary entrypoint and domain modules. `cli-engine` owns the common
 execution pipeline so teams can add commands by copying a nearby command and filling in the
@@ -82,6 +80,12 @@ manifest that produces the same `(path, bytes)` pairs.
 - [Authentication and transport](docs/auth.md)
 - [Basic example](examples/basic.rs)
 - [Agent instructions](AGENTS.md)
+
+## Cargo Features
+
+| Feature | Description |
+| --- | --- |
+| `pkce-auth` | Enables `auth::pkce::PkceAuthProvider`, a built-in browser-based OAuth 2.0 PKCE flow with system keychain storage via the `keyring` crate. Adds optional dependencies: `keyring`, `open`, `rand`, `sha2`, `url`. |
 
 ## Verification
 

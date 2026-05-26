@@ -19,8 +19,8 @@ mod toon;
 
 pub use crate::error::{DetailedError, ExitCoder, exit_code_for_error, exit_code_for_exit_coder};
 pub use envelope::{
-    Envelope, ErrorEnvelope, Metadata, PaginationMeta, build_detailed_error_envelope,
-    build_error_envelope,
+    Envelope, ErrorEnvelope, Metadata, NextAction, NextActionParam, PaginationMeta,
+    build_detailed_error_envelope, build_error_envelope,
 };
 pub use fields::{FieldTree, filter_fields, parse_fields};
 pub use human::{

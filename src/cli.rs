@@ -14,10 +14,14 @@ mod tree_render;
 use clap::{ArgMatches, Command};
 
 use crate::{
-    AuthProvider, CliCoreError, CommandMeta, CommandSpec, GroupSpec, GuideEntry, Middleware,
-    MiddlewareRequest, Result, RuntimeCommandSpec, RuntimeGroupSpec,
+    ActivityEmitter, AuthProvider, Auditor, Authorizer, CliCoreError, CommandMeta, CommandSpec,
+    GroupSpec, GuideEntry, Middleware, MiddlewareRequest, Result, RuntimeCommandSpec,
+    RuntimeGroupSpec,
     auth::commands::auth_command_group,
-    command::{CommandContext, command_args_from_matches, command_path_from_matches, leaf_matches},
+    command::{
+        CommandContext, StreamSender, command_args_from_matches, command_path_from_matches,
+        leaf_matches,
+    },
     error::exit_code_for_error,
     flags::{
         GlobalFlags, derive_bool_flags, derive_value_flags, extract_command_path,
@@ -131,6 +135,12 @@ pub struct CliConfig {
     pub views: Vec<HumanViewDef>,
     /// Providers registered before command execution starts.
     pub auth_providers: Vec<Arc<dyn AuthProvider>>,
+    /// Optional authorization gatekeeper injected into middleware.
+    pub authz: Option<Arc<dyn Authorizer>>,
+    /// Optional audit recorder injected into middleware.
+    pub auditor: Option<Arc<dyn Auditor>>,
+    /// Optional activity event sink injected into middleware.
+    pub activity: Option<Arc<dyn ActivityEmitter>>,
     /// Optional late initializer for runtime dependencies.
     pub init_deps: Option<InitDeps>,
     /// Optional hook for adding application-specific global flags.
@@ -233,6 +243,27 @@ impl CliConfig {
         self
     }
 
+    /// Sets the authorization gatekeeper.
+    #[must_use]
+    pub fn with_authz(mut self, authz: Arc<dyn Authorizer>) -> Self {
+        self.authz = Some(authz);
+        self
+    }
+
+    /// Sets the audit recorder.
+    #[must_use]
+    pub fn with_auditor(mut self, auditor: Arc<dyn Auditor>) -> Self {
+        self.auditor = Some(auditor);
+        self
+    }
+
+    /// Sets the activity event sink.
+    #[must_use]
+    pub fn with_activity(mut self, activity: Arc<dyn ActivityEmitter>) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
     /// Sets the late dependency initializer.
     #[must_use]
     pub fn with_init_deps(mut self, init_deps: InitDeps) -> Self {
@@ -298,6 +329,9 @@ impl std::fmt::Debug for CliConfig {
             .field("guides", &self.guides)
             .field("views", &self.views)
             .field("auth_providers_len", &self.auth_providers.len())
+            .field("has_authz", &self.authz.is_some())
+            .field("has_auditor", &self.auditor.is_some())
+            .field("has_activity", &self.activity.is_some())
             .field("has_init_deps", &self.init_deps.is_some())
             .field("has_register_flags", &self.register_flags.is_some())
             .field("has_apply_flags", &self.apply_flags.is_some())
@@ -316,6 +350,15 @@ pub struct CliRunOutput {
     pub exit_code: i32,
     /// Rendered stdout or stderr payload.
     pub rendered: String,
+}
+
+impl From<crate::middleware::MiddlewareOutput> for CliRunOutput {
+    fn from(o: crate::middleware::MiddlewareOutput) -> Self {
+        Self {
+            exit_code: o.exit_code,
+            rendered: o.rendered,
+        }
+    }
 }
 
 /// Configured CLI application.
@@ -424,6 +467,7 @@ impl Cli {
         }
         root = register_global_flags(root)
             .subcommand(help_command())
+            .subcommand(guide_command())
             .subcommand(Command::new("tree").about("Display full command tree"));
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
@@ -438,6 +482,9 @@ impl Cli {
         let mut middleware = Middleware::new();
         middleware.app_id = config.app_id.clone();
         middleware.default_auth_provider = config.default_auth_provider.clone().unwrap_or_default();
+        middleware.authz = config.authz.clone();
+        middleware.auditor = config.auditor.clone();
+        middleware.activity = config.activity.clone();
         middleware
             .schema_registry
             .merge(&global_schema_registry_snapshot());
@@ -810,6 +857,33 @@ impl Cli {
         let meta = self.resolve_meta(&command_path, command.spec.metadata());
         let default_fields = command.spec.default_fields.clone().unwrap_or_default();
         let system = command.spec.system.clone().unwrap_or_default();
+
+        if let Some(streaming_handler) = command.streaming_handler.clone() {
+            let result = run_with_timeout(
+                command_timeout,
+                &flags.timeout,
+                run_streaming_command(
+                    &middleware,
+                    MiddlewareRequest {
+                        meta,
+                        command_path: &command_path,
+                        system: &system,
+                        user_args,
+                        args,
+                        default_fields: &default_fields,
+                        no_auth: command.spec.no_auth,
+                    },
+                    Arc::new(leaf.clone()),
+                    streaming_handler,
+                ),
+            )
+            .await;
+            return self.finish_run(match result {
+                Ok(output) => output,
+                Err(err) => render_cli_error(&middleware, &err, &self.config.app_id),
+            });
+        }
+
         let handler = command.handler.clone();
         let args_for_handler = args.clone();
         let user_args_for_handler = user_args.clone();
@@ -845,14 +919,8 @@ impl Cli {
         .await;
 
         match result {
-            Ok(output) => self.finish_run(CliRunOutput {
-                exit_code: output.exit_code,
-                rendered: output.rendered,
-            }),
-            Err(err) => self.finish_run(CliRunOutput {
-                exit_code: exit_code_for_error(&err),
-                rendered: render_cli_error(&middleware, &err, &self.config.app_id).rendered,
-            }),
+            Ok(output) => self.finish_run(output.into()),
+            Err(err) => self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id)),
         }
     }
 
@@ -1425,7 +1493,7 @@ fn has_root_version_flag(args: &[String], root: &Command, root_name: &str) -> bo
     let bool_flags = derive_bool_flags(root);
     let value_flags = derive_value_flags(root);
     let mut iter = args.iter().peekable();
-    if iter.peek().is_some_and(|arg| arg.as_str() == root_name) {
+    if iter.peek().is_some_and(|arg| arg_matches_root_name(arg, root_name)) {
         iter.next();
     }
 
@@ -1455,7 +1523,7 @@ fn normalize_optional_global_flags_before_command(root: &Command, args: &[String
     let mut current = root;
     while index < args.len() {
         let arg = &args[index];
-        if index == 0 && arg == root.get_name() {
+        if index == 0 && arg_matches_root_name(arg, root.get_name()) {
             normalized.push(arg.clone());
             index += 1;
             continue;
@@ -1551,7 +1619,7 @@ fn positional_command_tokens(
 ) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut iter = args.iter().peekable();
-    if iter.peek().is_some_and(|arg| arg.as_str() == root_name) {
+    if iter.peek().is_some_and(|arg| arg_matches_root_name(arg, root_name)) {
         iter.next();
     }
 
@@ -1580,6 +1648,14 @@ fn positional_command_tokens(
 
 fn unknown_flag_consumes_value(arg: &str, next: Option<&&String>) -> bool {
     arg.starts_with('-') && next.is_some_and(|value| !value.starts_with('-'))
+}
+
+fn arg_matches_root_name(arg: &str, root_name: &str) -> bool {
+    arg == root_name
+        || std::path::Path::new(arg)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == root_name)
 }
 
 fn register_runtime_group_schemas(
@@ -1684,5 +1760,76 @@ fn process_exit_code(code: i32) -> ExitCode {
     match u8::try_from(code) {
         Ok(code) if code != 0 => ExitCode::from(code),
         Ok(_) | Err(_) => ExitCode::from(1),
+    }
+}
+
+async fn run_streaming_command(
+    middleware: &Middleware,
+    request: MiddlewareRequest<'_>,
+    raw_matches: Arc<ArgMatches>,
+    streaming_handler: crate::command::StreamingCommandHandler,
+) -> Result<CliRunOutput> {
+    use tokio::{io::AsyncWriteExt, sync::mpsc};
+
+    let args_for_handler = request.args.clone();
+    let user_args_for_handler = request.user_args.clone();
+    let handler_path = request.command_path.to_owned();
+    let middleware_for_handler = middleware.clone();
+    let raw_matches_for_handler = raw_matches;
+
+    let (tx, mut rx) = mpsc::channel::<serde_json::Value>(64);
+    let sender = StreamSender(tx);
+
+    // Drain the channel concurrently so a bounded channel never deadlocks
+    // even when the handler emits many events.
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(event) = rx.recv().await {
+            let Ok(line) = serde_json::to_string(&event) else {
+                continue;
+            };
+            if stdout.write_all(line.as_bytes()).await.is_err()
+                || stdout.write_all(b"\n").await.is_err()
+                || stdout.flush().await.is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let output = middleware
+        .run(
+            request,
+            async move |credential| {
+                streaming_handler(
+                    CommandContext {
+                        credential,
+                        args: args_for_handler,
+                        user_args: user_args_for_handler,
+                        command_path: handler_path,
+                        middleware: middleware_for_handler,
+                        raw_matches: raw_matches_for_handler,
+                    },
+                    sender,
+                )
+                .await?;
+                Ok(crate::CommandResult::new(serde_json::Value::Null))
+            },
+        )
+        .await;
+
+    // Handler has completed; its sender is dropped, which closes the channel.
+    // Wait for the writer task to flush all remaining events.
+    drop(writer.await);
+
+    match output {
+        Ok(_) => Ok(CliRunOutput {
+            exit_code: 0,
+            rendered: String::new(),
+        }),
+        Err(err) => Ok(CliRunOutput {
+            exit_code: exit_code_for_error(&err),
+            rendered: render_cli_error(middleware, &err, middleware.app_id.as_str()).rendered,
+        }),
     }
 }

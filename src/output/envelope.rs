@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,8 +21,82 @@ pub struct Envelope {
     /// Non-fatal warnings.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Suggested follow-up actions for the caller (agent or human).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<NextAction>,
     #[serde(default, skip)]
     serialization_error: Option<String>,
+}
+
+/// A suggested follow-up command the caller can run next.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NextAction {
+    /// Executable command template, e.g. `"application info --name {{name}}"`.
+    pub command: String,
+    /// Human-readable description of what this action does.
+    pub description: String,
+    /// Optional parameter hints for agent-driven invocation.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub params: HashMap<String, NextActionParam>,
+}
+
+impl NextAction {
+    /// Creates a next action with a command template and description.
+    #[must_use]
+    pub fn new(command: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            description: description.into(),
+            params: HashMap::new(),
+        }
+    }
+
+    /// Adds a parameter hint.
+    #[must_use]
+    pub fn with_param(mut self, name: impl Into<String>, param: NextActionParam) -> Self {
+        self.params.insert(name.into(), param);
+        self
+    }
+}
+
+/// Metadata hint for a parameter in a [`NextAction`] command template.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct NextActionParam {
+    /// Concrete value to substitute, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Allowed values for enumeration parameters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub r#enum: Vec<String>,
+    /// Whether the parameter is required.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub required: bool,
+    /// Default value when none is supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Human-readable description of this parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl NextActionParam {
+    /// Creates a parameter hint with a known concrete value.
+    #[must_use]
+    pub fn value(value: impl Into<String>) -> Self {
+        Self {
+            value: Some(value.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Creates a required parameter hint.
+    #[must_use]
+    pub fn required() -> Self {
+        Self {
+            required: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Execution metadata attached to an [`Envelope`].
@@ -102,6 +176,7 @@ impl Envelope {
             metadata: Some(Metadata::new(system)),
             error: None,
             warnings: Vec::new(),
+            next_actions: Vec::new(),
             serialization_error,
         }
     }
@@ -124,6 +199,7 @@ impl Envelope {
                 request_id: String::new(),
             }),
             warnings: Vec::new(),
+            next_actions: Vec::new(),
             serialization_error: None,
         }
     }
@@ -151,8 +227,16 @@ impl Envelope {
                 request_id,
             }),
             warnings: Vec::new(),
+            next_actions: Vec::new(),
             serialization_error: None,
         }
+    }
+
+    /// Attaches suggested follow-up actions.
+    #[must_use]
+    pub fn with_next_actions(mut self, actions: Vec<NextAction>) -> Self {
+        self.next_actions = actions;
+        self
     }
 
     /// Marks the envelope as a dry-run response.
@@ -288,6 +372,7 @@ pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &st
                 request_id,
             }),
             warnings: Vec::new(),
+            next_actions: Vec::new(),
             serialization_error: None,
         };
     }
@@ -397,6 +482,7 @@ pub fn build_detailed_error_envelope(err: &dyn DetailedError, system: &str) -> E
             request_id,
         }),
         warnings: Vec::new(),
+        next_actions: Vec::new(),
         serialization_error: None,
     }
 }

@@ -3,16 +3,38 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use schemars::JsonSchema;
 use serde_json::{Number, Value};
+use tokio::sync::mpsc;
 
 use crate::{
     CommandMeta, Credential, Middleware, OutputSchema, Result, SchemaInfo, Tier,
     middleware::ValueMap,
+    output::NextAction,
 };
+
+/// Sender half for streaming command output.
+///
+/// Streaming handlers call [`StreamSender::send`] for each progress event.
+/// The engine drains the channel and writes each event as an NDJSON line.
+#[derive(Clone, Debug)]
+pub struct StreamSender(pub(crate) mpsc::Sender<Value>);
+
+impl StreamSender {
+    /// Sends one event. Silently drops the event if the receiver is gone.
+    pub async fn send(&self, event: Value) {
+        drop(self.0.send(event).await);
+    }
+}
 
 /// Boxed future returned by runtime command handlers.
 pub type CommandFuture = Pin<Box<dyn Future<Output = Result<CommandResult>> + Send>>;
 /// Shared command handler used by [`RuntimeCommandSpec`].
 pub type CommandHandler = Arc<dyn Fn(CommandContext) -> CommandFuture + Send + Sync>;
+
+/// Boxed future returned by streaming command handlers.
+pub type StreamingCommandFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+/// Shared streaming handler: receives context and an event sender; returns when the stream ends.
+pub type StreamingCommandHandler =
+    Arc<dyn Fn(CommandContext, StreamSender) -> StreamingCommandFuture + Send + Sync>;
 
 /// Data returned by a command handler.
 ///
@@ -36,6 +58,13 @@ impl CommandResult {
             metadata: CommandResultMetadata::default(),
         }
     }
+
+    /// Attaches suggested follow-up actions to this result.
+    #[must_use]
+    pub fn with_next_actions(mut self, actions: Vec<NextAction>) -> Self {
+        self.metadata.next_actions = actions;
+        self
+    }
 }
 
 impl From<Value> for CommandResult {
@@ -47,7 +76,10 @@ impl From<Value> for CommandResult {
 /// Optional metadata a command can attach to its result.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CommandResultMetadata {}
+pub struct CommandResultMetadata {
+    /// Suggested follow-up actions for the caller.
+    pub next_actions: Vec<NextAction>,
+}
 
 /// Runtime context passed to advanced command handlers.
 ///
@@ -411,12 +443,18 @@ impl GroupSpec {
 /// `RuntimeCommandSpec` pairs a [`CommandSpec`] with async business logic.
 /// This split keeps metadata inspectable for help/search/schema generation
 /// before the handler ever runs.
+///
+/// Use [`RuntimeCommandSpec::new_streaming`] for commands that emit incremental
+/// NDJSON progress events (e.g. long-running deployments with `--follow`).
 #[derive(Clone)]
 pub struct RuntimeCommandSpec {
     /// Declarative command metadata.
     pub spec: CommandSpec,
     /// Async command implementation.
     pub handler: CommandHandler,
+    /// Optional streaming handler. When set, the engine writes NDJSON events
+    /// to stdout as they arrive instead of collecting a single envelope.
+    pub streaming_handler: Option<StreamingCommandHandler>,
 }
 
 impl std::fmt::Debug for RuntimeCommandSpec {
@@ -424,6 +462,7 @@ impl std::fmt::Debug for RuntimeCommandSpec {
         formatter
             .debug_struct("RuntimeCommandSpec")
             .field("spec", &self.spec)
+            .field("is_streaming", &self.streaming_handler.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -442,6 +481,7 @@ impl RuntimeCommandSpec {
     {
         Self {
             spec,
+            streaming_handler: None,
             handler: Arc::new(move |context| {
                 let future = handler(context.credential, context.args);
                 Box::pin(async move { future.await.map(Into::into) })
@@ -459,9 +499,34 @@ impl RuntimeCommandSpec {
     {
         Self {
             spec,
+            streaming_handler: None,
             handler: Arc::new(move |context| {
                 let future = handler(context);
                 Box::pin(async move { future.await.map(Into::into) })
+            }),
+        }
+    }
+
+    /// Creates a streaming command that emits NDJSON events to stdout.
+    ///
+    /// The handler receives context and a [`StreamSender`]. It should call
+    /// `sender.send(event).await` for each progress event, then return `Ok(())`.
+    /// The engine writes each event as a JSON line; stdout is flushed after each.
+    #[must_use]
+    pub fn new_streaming<F, Fut>(spec: CommandSpec, handler: F) -> Self
+    where
+        F: Fn(CommandContext, StreamSender) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let streaming: StreamingCommandHandler = Arc::new(move |context, sender| {
+            let future = handler(context, sender);
+            Box::pin(future)
+        });
+        Self {
+            spec,
+            streaming_handler: Some(streaming),
+            handler: Arc::new(|_context| {
+                Box::pin(async { Ok(CommandResult::new(Value::Null)) })
             }),
         }
     }
@@ -497,6 +562,7 @@ impl RuntimeCommandSpec {
                     handler(credential, args).await.map(Into::into)
                 })
             }),
+            streaming_handler: None,
         }
     }
 }
