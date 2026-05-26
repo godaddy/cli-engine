@@ -1826,10 +1826,7 @@ async fn run_streaming_command(
     drop(writer.await);
 
     match output {
-        Ok(_) => Ok(CliRunOutput {
-            exit_code: 0,
-            rendered: String::new(),
-        }),
+        Ok(out) => Ok(out.into()),
         Err(err) => Ok(CliRunOutput {
             exit_code: exit_code_for_error(&err),
             rendered: render_cli_error(middleware, &err, middleware.app_id.as_str()).rendered,

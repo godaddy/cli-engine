@@ -203,7 +203,7 @@ impl PkceAuthProvider {
                 self.store_cached_token(env, token.clone()).await;
                 return Ok(token);
             }
-            if let Some(refresh_token) = &token.refresh_token.clone()
+            if let Some(refresh_token) = token.refresh_token.as_deref()
                 && let Ok(refreshed) = self.refresh_access_token(refresh_token).await
             {
                 self.save_token_to_keychain(env, &refreshed)?;
@@ -211,7 +211,10 @@ impl PkceAuthProvider {
                 return Ok(refreshed);
             }
         }
-        self.run_pkce_flow(env).await
+        let token = self.run_pkce_flow(env).await?;
+        self.save_token_to_keychain(env, &token)?;
+        self.store_cached_token(env, token.clone()).await;
+        Ok(token)
     }
 
     async fn run_pkce_flow(&self, env: &str) -> Result<StoredToken> {
@@ -486,4 +489,80 @@ async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result
         expires_at,
         refresh_token: body.refresh_token,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> PkceAuthProvider {
+        PkceAuthProvider::new(
+            "test",
+            "https://example.com/auth",
+            "https://example.com/token",
+            "client-id",
+            &["openid"],
+        )
+    }
+
+    fn valid_token(access_token: &str) -> StoredToken {
+        StoredToken {
+            access_token: access_token.to_owned(),
+            expires_at: Utc::now().timestamp() + 3600,
+            refresh_token: None,
+        }
+    }
+
+    fn expired_token() -> StoredToken {
+        StoredToken {
+            access_token: "old-token".to_owned(),
+            // Older than the expiry buffer so is_valid() returns false.
+            expires_at: Utc::now().timestamp() - TOKEN_EXPIRY_BUFFER_SECS - 1,
+            refresh_token: None,
+        }
+    }
+
+    /// store_cached_token + cached_token round-trip: the mechanism used by
+    /// the persistence fix must reliably write and read tokens from the cache.
+    #[tokio::test]
+    async fn cache_stores_and_retrieves_valid_token() {
+        let provider = test_provider();
+        let token = valid_token("access-abc");
+
+        provider.store_cached_token("dev", token.clone()).await;
+
+        let cached = provider.cached_token("dev").await;
+        assert!(cached.is_some(), "expected cached token to be present");
+        assert_eq!(cached.unwrap().access_token, "access-abc");
+    }
+
+    /// Expired tokens must not be returned from the cache; the caller would
+    /// then proceed to the keychain or PKCE flow.
+    #[tokio::test]
+    async fn cached_token_ignores_expired_tokens() {
+        let provider = test_provider();
+        provider.store_cached_token("dev", expired_token()).await;
+
+        assert!(
+            provider.cached_token("dev").await.is_none(),
+            "expired token should not be returned from cache"
+        );
+    }
+
+    /// resolve_token must return a pre-seeded in-memory token without
+    /// triggering the PKCE browser flow (which would require a port and browser).
+    /// This also exercises the cache-hit path that follows token persistence.
+    #[tokio::test]
+    async fn resolve_token_returns_cached_token_without_pkce_flow() {
+        let provider = test_provider();
+        provider
+            .store_cached_token("dev", valid_token("cached-token"))
+            .await;
+
+        let resolved = provider
+            .resolve_token("dev")
+            .await
+            .expect("resolve from cache");
+        assert_eq!(resolved.access_token, "cached-token");
+    }
 }

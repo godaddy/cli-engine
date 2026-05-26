@@ -141,9 +141,9 @@ RuntimeCommandSpec::new_streaming(
         .with_system("deploy-api")
         .with_tier(Tier::Mutate),
     |_ctx, sender: StreamSender| async move {
-        sender.send(json!({ "status": "building" })).await?;
-        sender.send(json!({ "status": "deploying", "progress": 42 })).await?;
-        sender.send(json!({ "status": "done" })).await?;
+        sender.send(json!({ "status": "building" })).await;
+        sender.send(json!({ "status": "deploying", "progress": 42 })).await;
+        sender.send(json!({ "status": "done" })).await;
         Ok(())
     },
 )
