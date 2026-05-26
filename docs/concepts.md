@@ -150,8 +150,7 @@ RuntimeCommandSpec::new_streaming(
 ```
 
 Streaming commands do not go through the normal output pipeline (filtering, field selection, `--output`).
-Each event is written verbatim. The handler and the NDJSON writer run concurrently so a slow
-consumer cannot deadlock a handler that emits many events.
+Each event is written verbatim. The handler and the NDJSON writer run concurrently so the handler can keep sending while the writer flushes to stdout. If stdout is under backpressure the bounded channel can fill and the handler will wait on `send` until the writer catches up.
 
 
 - `with_long` for expanded help.

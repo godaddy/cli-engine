@@ -17,7 +17,9 @@ impl AuthProvider for AlwaysFailAuth {
     }
 
     async fn get_credential(&self, _env: &str, _command: &str, _tier: &str) -> Result<Credential> {
-        Err(CliCoreError::message("auth failed: no credentials configured"))
+        Err(CliCoreError::message(
+            "auth failed: no credentials configured",
+        ))
     }
 
     async fn status(&self, _env: &str) -> Result<Credential> {

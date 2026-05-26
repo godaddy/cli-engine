@@ -533,3 +533,70 @@ fn is_absent_null_or_empty_object(value: &Option<Value>) -> bool {
         Some(Value::Array(_) | Value::Bool(_) | Value::Number(_) | Value::String(_)) => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn next_actions_appear_in_serialized_envelope() {
+        let envelope =
+            Envelope::success(json!({"id": "p1"}), "projects-api").with_next_actions(vec![
+                NextAction::new("project get --id {{id}}", "Get project details"),
+            ]);
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
+        let parsed: Value =
+            serde_json::from_str(&serialized).expect("serialized envelope is valid JSON");
+
+        assert_eq!(
+            parsed["next_actions"][0]["command"],
+            "project get --id {{id}}"
+        );
+        assert_eq!(
+            parsed["next_actions"][0]["description"],
+            "Get project details"
+        );
+    }
+
+    #[test]
+    fn next_actions_omitted_from_json_when_empty() {
+        let envelope = Envelope::success(json!({"id": "p1"}), "projects-api");
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
+        let parsed: Value =
+            serde_json::from_str(&serialized).expect("serialized envelope is valid JSON");
+
+        assert!(
+            parsed.get("next_actions").is_none(),
+            "empty next_actions must not appear in JSON output"
+        );
+    }
+
+    #[test]
+    fn next_action_params_serialize_when_present() {
+        let action = NextAction::new("deploy run --app {{app}}", "Deploy the app").with_param(
+            "app",
+            NextActionParam {
+                description: Some("Application name".to_owned()),
+                required: true,
+                value: None,
+                r#enum: Vec::new(),
+                default: None,
+            },
+        );
+        let envelope = Envelope::success(json!(null), "deploy-api").with_next_actions(vec![action]);
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
+        let parsed: Value =
+            serde_json::from_str(&serialized).expect("serialized envelope is valid JSON");
+
+        assert_eq!(
+            parsed["next_actions"][0]["params"]["app"]["description"],
+            "Application name"
+        );
+        assert_eq!(parsed["next_actions"][0]["params"]["app"]["required"], true);
+    }
+}

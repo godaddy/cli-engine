@@ -380,9 +380,9 @@ impl Middleware {
         )
         .await;
 
-        let next_actions = result.metadata.next_actions.clone();
+        let CommandResult { data, metadata } = result;
         self.render_envelope(
-            Envelope::success(result.data, command_system).with_next_actions(next_actions),
+            Envelope::success(data, command_system).with_next_actions(metadata.next_actions),
             default_fields,
             command_path,
             start,

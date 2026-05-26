@@ -1659,7 +1659,7 @@ fn unknown_flag_consumes_value(arg: &str, next: Option<&&String>) -> bool {
 fn arg_matches_root_name(arg: &str, root_name: &str) -> bool {
     arg == root_name
         || std::path::Path::new(arg)
-            .file_name()
+            .file_stem()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n == root_name)
 }
@@ -1786,8 +1786,9 @@ async fn run_streaming_command(
     let (tx, mut rx) = mpsc::channel::<serde_json::Value>(64);
     let sender = StreamSender(tx);
 
-    // Drain the channel concurrently so a bounded channel never deadlocks
-    // even when the handler emits many events.
+    // Drain the channel concurrently so the handler's sends don't stall
+    // while the writer flushes to stdout. If stdout is under backpressure
+    // the bounded channel can still fill and the handler will await send.
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(event) = rx.recv().await {
@@ -1823,7 +1824,7 @@ async fn run_streaming_command(
 
     // Handler has completed; its sender is dropped, which closes the channel.
     // Wait for the writer task to flush all remaining events.
-    drop(writer.await);
+    let _write_result = writer.await;
 
     match output {
         Ok(out) => Ok(out.into()),
