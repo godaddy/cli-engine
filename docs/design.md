@@ -44,6 +44,10 @@ src/
   tier.rs
   error.rs
   auth/
+    mod.rs
+    exec.rs
+    pkce.rs
+    ...
   output/
   transport/
 tests/
@@ -173,6 +177,8 @@ fn list_projects() -> RuntimeCommandSpec {
 Use `RuntimeCommandSpec::new_with_context` only when a handler needs the colon command path,
 user-supplied args, or a middleware snapshot.
 
+Use `RuntimeCommandSpec::new_streaming` for commands that emit a sequence of events rather than a single result. The handler receives a `StreamSender` and writes individual `serde_json::Value` events. Each event is written to stdout as a newline-delimited JSON line as it arrives. The handler and the NDJSON writer run concurrently to avoid deadlocks on high-volume streams.
+
 ### Typed Arguments
 
 When commands have many flags or already use `#[derive(clap::Args)]` structs, the typed path avoids
@@ -271,6 +277,8 @@ Auth providers implement `AuthProvider` and are registered with the CLI or durin
 initialization. The dispatcher routes credential operations by provider name and supports the
 built-in `auth login`, `auth status`, and `auth logout` commands.
 
+`PkceAuthProvider` (behind the `pkce-auth` feature) is a built-in provider that implements the full browser-based OAuth 2.0 PKCE flow. It stores tokens in the system keychain and refreshes them automatically. Consumer CLIs that need a first-party browser login flow can use it directly without writing a provider binary.
+
 Credential fields are serialized as provider-contract JSON and are used by transport injectors,
 authorization, audit, and activity.
 
@@ -291,6 +299,7 @@ Handlers return JSON-serializable data and a system id. Middleware wraps the res
 - `metadata`
 - `error`
 - `warnings`
+- `next_actions`
 
 Metadata is omitted unless `--verbose` is requested. Selective metadata is supported with
 comma-separated verbose fields.
