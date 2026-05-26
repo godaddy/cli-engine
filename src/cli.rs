@@ -14,7 +14,7 @@ mod tree_render;
 use clap::{ArgMatches, Command};
 
 use crate::{
-    ActivityEmitter, AuthProvider, Auditor, Authorizer, CliCoreError, CommandMeta, CommandSpec,
+    ActivityEmitter, Auditor, AuthProvider, Authorizer, CliCoreError, CommandMeta, CommandSpec,
     GroupSpec, GuideEntry, Middleware, MiddlewareRequest, Result, RuntimeCommandSpec,
     RuntimeGroupSpec,
     auth::commands::auth_command_group,
@@ -1493,7 +1493,10 @@ fn has_root_version_flag(args: &[String], root: &Command, root_name: &str) -> bo
     let bool_flags = derive_bool_flags(root);
     let value_flags = derive_value_flags(root);
     let mut iter = args.iter().peekable();
-    if iter.peek().is_some_and(|arg| arg_matches_root_name(arg, root_name)) {
+    if iter
+        .peek()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+    {
         iter.next();
     }
 
@@ -1619,7 +1622,10 @@ fn positional_command_tokens(
 ) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut iter = args.iter().peekable();
-    if iter.peek().is_some_and(|arg| arg_matches_root_name(arg, root_name)) {
+    if iter
+        .peek()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+    {
         iter.next();
     }
 
@@ -1798,24 +1804,21 @@ async fn run_streaming_command(
     });
 
     let output = middleware
-        .run(
-            request,
-            async move |credential| {
-                streaming_handler(
-                    CommandContext {
-                        credential,
-                        args: args_for_handler,
-                        user_args: user_args_for_handler,
-                        command_path: handler_path,
-                        middleware: middleware_for_handler,
-                        raw_matches: raw_matches_for_handler,
-                    },
-                    sender,
-                )
-                .await?;
-                Ok(crate::CommandResult::new(serde_json::Value::Null))
-            },
-        )
+        .run(request, async move |credential| {
+            streaming_handler(
+                CommandContext {
+                    credential,
+                    args: args_for_handler,
+                    user_args: user_args_for_handler,
+                    command_path: handler_path,
+                    middleware: middleware_for_handler,
+                    raw_matches: raw_matches_for_handler,
+                },
+                sender,
+            )
+            .await?;
+            Ok(crate::CommandResult::new(serde_json::Value::Null))
+        })
         .await;
 
     // Handler has completed; its sender is dropped, which closes the channel.

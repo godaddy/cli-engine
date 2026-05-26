@@ -7,8 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     CommandMeta, Credential, Middleware, OutputSchema, Result, SchemaInfo, Tier,
-    middleware::ValueMap,
-    output::NextAction,
+    middleware::ValueMap, output::NextAction,
 };
 
 /// Sender half for streaming command output.
@@ -525,9 +524,7 @@ impl RuntimeCommandSpec {
         Self {
             spec,
             streaming_handler: Some(streaming),
-            handler: Arc::new(|_context| {
-                Box::pin(async { Ok(CommandResult::new(Value::Null)) })
-            }),
+            handler: Arc::new(|_context| Box::pin(async { Ok(CommandResult::new(Value::Null)) })),
         }
     }
 

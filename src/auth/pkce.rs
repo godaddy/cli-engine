@@ -44,11 +44,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-use crate::{
-    Credential, Result,
-    auth::AuthProvider,
-    error::CliCoreError,
-};
+use crate::{Credential, Result, auth::AuthProvider, error::CliCoreError};
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
@@ -173,10 +169,8 @@ impl PkceAuthProvider {
     }
 
     fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
-        let entry =
-            keyring::Entry::new(&self.keychain_service(env), self.keychain_user()).map_err(
-                |err| CliCoreError::message(format!("keychain access failed: {err}")),
-            )?;
+        let entry = keyring::Entry::new(&self.keychain_service(env), self.keychain_user())
+            .map_err(|err| CliCoreError::message(format!("keychain access failed: {err}")))?;
         let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
         entry
             .set_password(&json)
@@ -255,7 +249,8 @@ impl PkceAuthProvider {
         drop(open::that(url.as_str()));
 
         let code = wait_for_callback(listener, &state, Duration::from_secs(120)).await?;
-        self.exchange_code_for_token(&code, &code_verifier, env).await
+        self.exchange_code_for_token(&code, &code_verifier, env)
+            .await
     }
 
     async fn exchange_code_for_token(
@@ -420,7 +415,9 @@ async fn wait_for_callback(
             drop(stream.write_all(html_response.as_bytes()));
 
             if state.as_deref() != Some(expected_state.as_str()) {
-                return Err(CliCoreError::message("OAuth state mismatch — possible CSRF"));
+                return Err(CliCoreError::message(
+                    "OAuth state mismatch — possible CSRF",
+                ));
             }
             code.ok_or_else(|| CliCoreError::message("no authorization code in callback"))
         })
@@ -431,7 +428,9 @@ async fn wait_for_callback(
 
     match result {
         Ok(inner) => inner,
-        Err(_) => Err(CliCoreError::message("timed out waiting for OAuth callback")),
+        Err(_) => Err(CliCoreError::message(
+            "timed out waiting for OAuth callback",
+        )),
     }
 }
 
