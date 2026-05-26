@@ -7,7 +7,7 @@
 //! The module also contains an [`crate::auth::exec::ExecProvider`] for provider
 //! binaries that speak the JSON stdin/stdout contract.
 //!
-//! When the `pkce-auth` feature is enabled, [`pkce::PkceAuthProvider`] adds a
+//! When the `pkce-auth` feature is enabled, `pkce::PkceAuthProvider` adds a
 //! built-in browser-based OAuth 2.0 PKCE flow with system keychain storage.
 
 /// Built-in `auth login`, `auth status`, and `auth logout` command helpers.
