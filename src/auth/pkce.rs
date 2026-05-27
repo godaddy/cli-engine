@@ -405,9 +405,10 @@ async fn wait_for_callback(
                     CliCoreError::message(format!("callback server accept failed: {err}"))
                 })?;
                 let mut buf = [0_u8; 4096];
-                let n = stream.read(&mut buf).map_err(|err| {
-                    CliCoreError::message(format!("callback read failed: {err}"))
-                })?;
+                let n = match stream.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
                 let request = String::from_utf8_lossy(&buf[..n]);
 
                 let code = extract_query_param(&request, "code");
@@ -423,10 +424,10 @@ async fn wait_for_callback(
                     };
                 drop(stream.write_all(html_response.as_bytes()));
 
-                if state.as_deref() == Some(expected_state.as_str())
-                    && let Some(code) = code
-                {
-                    return Ok(code);
+                if state.as_deref() == Some(expected_state.as_str()) {
+                    return code.ok_or_else(|| {
+                        CliCoreError::message("no authorization code in callback")
+                    });
                 }
             }
         })
