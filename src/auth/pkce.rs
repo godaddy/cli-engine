@@ -39,7 +39,7 @@ use std::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{SecondsFormat, Utc};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -204,8 +204,11 @@ impl PkceAuthProvider {
                 return Ok(token);
             }
             if let Some(refresh_token) = token.refresh_token.as_deref()
-                && let Ok(refreshed) = self.refresh_access_token(refresh_token).await
+                && let Ok(mut refreshed) = self.refresh_access_token(refresh_token).await
             {
+                if refreshed.refresh_token.is_none() {
+                    refreshed.refresh_token = Some(refresh_token.to_owned());
+                }
                 self.save_token_to_keychain(env, &refreshed)?;
                 self.store_cached_token(env, refreshed.clone()).await;
                 return Ok(refreshed);
@@ -370,8 +373,7 @@ impl AuthProvider for PkceAuthProvider {
 
 /// Generates a PKCE code verifier and SHA-256 code challenge.
 fn pkce_challenge() -> (String, String) {
-    let mut bytes = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let bytes: [u8; 32] = rand::rng().random();
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let hash = Sha256::digest(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(hash);
@@ -380,12 +382,14 @@ fn pkce_challenge() -> (String, String) {
 
 /// Generates a random OAuth state parameter.
 fn random_state() -> String {
-    let mut bytes = [0_u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let bytes: [u8; 16] = rand::rng().random();
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Waits for the OAuth callback on the given listener, validates state.
+///
+/// Accepts connections in a loop so that stray connections (port scanners,
+/// browser preflight requests) do not consume the single callback attempt.
 async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
@@ -396,33 +400,35 @@ async fn wait_for_callback(
     let expected_state = expected_state.to_owned();
     let result = tokio::time::timeout(timeout, async move {
         tokio::task::spawn_blocking(move || {
-            let (mut stream, _) = listener.accept().map_err(|err| {
-                CliCoreError::message(format!("callback server accept failed: {err}"))
-            })?;
-            let mut buf = [0_u8; 4096];
-            let n = stream
-                .read(&mut buf)
-                .map_err(|err| CliCoreError::message(format!("callback read failed: {err}")))?;
-            let request = String::from_utf8_lossy(&buf[..n]);
+            loop {
+                let (mut stream, _) = listener.accept().map_err(|err| {
+                    CliCoreError::message(format!("callback server accept failed: {err}"))
+                })?;
+                let mut buf = [0_u8; 4096];
+                let n = stream.read(&mut buf).map_err(|err| {
+                    CliCoreError::message(format!("callback read failed: {err}"))
+                })?;
+                let request = String::from_utf8_lossy(&buf[..n]);
 
-            let code = extract_query_param(&request, "code");
-            let state = extract_query_param(&request, "state");
+                let code = extract_query_param(&request, "code");
+                let state = extract_query_param(&request, "state");
 
-            let html_response = if state.as_deref() == Some(&expected_state) && code.is_some() {
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-                 <html><body>Authentication successful. You may close this window.</body></html>"
-            } else {
-                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
-                 <html><body>Authentication failed. Please try again.</body></html>"
-            };
-            drop(stream.write_all(html_response.as_bytes()));
+                let html_response =
+                    if state.as_deref() == Some(&expected_state) && code.is_some() {
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+                         <html><body>Authentication successful. You may close this window.</body></html>"
+                    } else {
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
+                         <html><body>Authentication failed. Please try again.</body></html>"
+                    };
+                drop(stream.write_all(html_response.as_bytes()));
 
-            if state.as_deref() != Some(expected_state.as_str()) {
-                return Err(CliCoreError::message(
-                    "OAuth state mismatch — possible CSRF",
-                ));
+                if state.as_deref() == Some(expected_state.as_str())
+                    && let Some(code) = code
+                {
+                    return Ok(code);
+                }
             }
-            code.ok_or_else(|| CliCoreError::message("no authorization code in callback"))
         })
         .await
         .map_err(|err| CliCoreError::message(format!("callback task failed: {err}")))?
@@ -442,32 +448,9 @@ fn extract_query_param(request: &str, name: &str) -> Option<String> {
     let line = request.lines().next()?;
     let path = line.split_whitespace().nth(1)?;
     let query = path.split_once('?')?.1;
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        if key == name {
-            return Some(url_decode(value));
-        }
-    }
-    None
-}
-
-fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            let h1 = chars.next().and_then(|c| c.to_digit(16));
-            let h2 = chars.next().and_then(|c| c.to_digit(16));
-            if let (Some(h1), Some(h2)) = (h1, h2) {
-                #[allow(clippy::cast_possible_truncation)]
-                let byte = ((h1 << 4) | h2) as u8;
-                result.push(byte as char);
-                continue;
-            }
-        }
-        result.push(ch);
-    }
-    result
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
 }
 
 #[derive(Debug, Deserialize)]
@@ -533,7 +516,10 @@ mod tests {
 
         let cached = provider.cached_token("dev").await;
         assert!(cached.is_some(), "expected cached token to be present");
-        assert_eq!(cached.unwrap().access_token, "access-abc");
+        assert_eq!(
+            cached.expect("token must be present").access_token,
+            "access-abc"
+        );
     }
 
     /// Expired tokens must not be returned from the cache; the caller would
@@ -546,6 +532,28 @@ mod tests {
         assert!(
             provider.cached_token("dev").await.is_none(),
             "expired token should not be returned from cache"
+        );
+    }
+
+    #[test]
+    fn extract_query_param_skips_malformed_pairs() {
+        let request = "GET /callback?foo&code=abc123&state=xyz HTTP/1.1\r\nHost: localhost\r\n";
+        assert_eq!(
+            extract_query_param(request, "code"),
+            Some("abc123".to_owned()),
+        );
+        assert_eq!(
+            extract_query_param(request, "state"),
+            Some("xyz".to_owned()),
+        );
+    }
+
+    #[test]
+    fn extract_query_param_decodes_percent_encoding() {
+        let request = "GET /callback?code=a%20b%2Bc&state=ok HTTP/1.1\r\n";
+        assert_eq!(
+            extract_query_param(request, "code"),
+            Some("a b+c".to_owned()),
         );
     }
 

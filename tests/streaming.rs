@@ -88,6 +88,41 @@ async fn streaming_handler_error_exits_nonzero() {
     );
 }
 
+fn cli_with_successful_handler() -> Cli {
+    let module = Module::new("Streaming Tests", |_| {
+        RuntimeGroupSpec::new(GroupSpec::new("deploy", "Deploy commands")).with_command(
+            RuntimeCommandSpec::new_streaming(
+                CommandSpec::new("run", "Run a deploy").no_auth(true),
+                async |_ctx, sender: StreamSender| {
+                    sender.send(json!({"status": "building"})).await;
+                    sender.send(json!({"status": "done"})).await;
+                    Ok(())
+                },
+            ),
+        )
+    });
+    Cli::new(CliConfig::new("test-cli", "Test CLI", "test").with_module(module))
+}
+
+/// Successful streaming commands must exit 0 with no trailing rendered output.
+///
+/// NDJSON events are written directly to stdout by the writer task. The
+/// framework must not append a rendered envelope (e.g. `{"data": null}`)
+/// after the events.
+#[tokio::test]
+async fn streaming_success_exits_zero_with_no_rendered_output() {
+    let result = cli_with_successful_handler()
+        .run(["test-cli", "deploy", "run"])
+        .await;
+
+    assert_eq!(result.exit_code, 0, "successful stream should exit 0");
+    assert!(
+        result.rendered.is_empty(),
+        "successful stream should produce no rendered output, got: {:?}",
+        result.rendered
+    );
+}
+
 /// Auth failures on streaming commands must exit non-zero.
 ///
 /// Middleware renders auth errors as Ok(MiddlewareOutput{exit_code:non-zero}), which

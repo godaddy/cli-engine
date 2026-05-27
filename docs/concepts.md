@@ -150,7 +150,10 @@ RuntimeCommandSpec::new_streaming(
 ```
 
 Streaming commands do not go through the normal output pipeline (filtering, field selection, `--output`).
-Each event is written verbatim. The handler and the NDJSON writer run concurrently so the handler can keep sending while the writer flushes to stdout. If stdout is under backpressure the bounded channel can fill and the handler will wait on `send` until the writer catches up.
+Each event is written verbatim to the process stdout (`tokio::io::stdout()`), bypassing any custom
+writer injection from `execute_from` variants. The handler and the NDJSON writer run concurrently
+so the handler can keep sending while the writer flushes to stdout. If stdout is under backpressure
+the bounded channel can fill and the handler will wait on `send` until the writer catches up.
 
 
 - `with_long` for expanded help.
@@ -357,8 +360,9 @@ with data, metadata, errors, and warnings.
 ### next_actions
 
 Command handlers can attach a list of follow-on command suggestions to any result using
-`CommandResult::with_next_actions`. The framework includes these suggestions in every output
-envelope under the `next_actions` key, regardless of output format:
+`CommandResult::with_next_actions`. The framework includes these suggestions in the output
+envelope under the `next_actions` key in JSON and TOON output formats. Human output does not
+display `next_actions`.
 
 ```rust
 use cli_engine::{CommandResult, NextAction, NextActionParam};

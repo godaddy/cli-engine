@@ -1827,6 +1827,10 @@ async fn run_streaming_command(
     let _write_result = writer.await;
 
     match output {
+        Ok(out) if out.exit_code == 0 => Ok(CliRunOutput {
+            exit_code: 0,
+            rendered: String::new(),
+        }),
         Ok(out) => Ok(out.into()),
         Err(err) => Ok(CliRunOutput {
             exit_code: exit_code_for_error(&err),

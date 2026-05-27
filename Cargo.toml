@@ -21,7 +21,7 @@ async-trait = "0.1.89"
 base64 = "0.22.1"
 keyring = { version = "3.6.1", optional = true }
 open = { version = "5.3.2", optional = true }
-rand = { version = "0.8.5", optional = true }
+rand = { version = "0.9", optional = true }
 sha2 = { version = "0.10.9", optional = true }
 url = { version = "2.5.4", optional = true }
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "serde"] }
