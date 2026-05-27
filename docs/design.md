@@ -177,7 +177,7 @@ fn list_projects() -> RuntimeCommandSpec {
 Use `RuntimeCommandSpec::new_with_context` only when a handler needs the colon command path,
 user-supplied args, or a middleware snapshot.
 
-Use `RuntimeCommandSpec::new_streaming` for commands that emit a sequence of events rather than a single result. The handler receives a `StreamSender` and writes individual `serde_json::Value` events. Each event is written to stdout as a newline-delimited JSON line as it arrives. The handler and the NDJSON writer run concurrently to avoid deadlocks on high-volume streams.
+Use `RuntimeCommandSpec::new_streaming` for commands that emit a sequence of events rather than a single result. The handler receives a `StreamSender` and writes individual `serde_json::Value` events. Each event is written to stdout as a newline-delimited JSON line as it arrives. The handler and the NDJSON writer run concurrently so the handler can keep sending while the writer flushes to stdout. If stdout is under backpressure the bounded channel can fill and the handler will wait on `send` until the writer catches up.
 
 ### Typed Arguments
 

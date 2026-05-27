@@ -43,6 +43,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{Credential, Result, auth::AuthProvider, error::CliCoreError};
 
@@ -50,11 +51,30 @@ const REDIRECT_PORT_DEFAULT: u16 = 7443;
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
 
 /// Stored token with expiry tracking.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Token fields are zeroized on drop to limit in-memory exposure.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct StoredToken {
     access_token: String,
     expires_at: i64,
     refresh_token: Option<String>,
+}
+
+impl std::fmt::Debug for StoredToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredToken")
+            .field("access_token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .field(
+                "refresh_token",
+                if self.refresh_token.is_some() {
+                    &"Some([redacted])"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl StoredToken {
@@ -330,7 +350,7 @@ impl AuthProvider for PkceAuthProvider {
     async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
         let token = self.resolve_token(env).await?;
         Ok(Credential {
-            token: token.access_token,
+            token: token.access_token.clone(),
             env: env.to_owned(),
             provider: self.name.clone(),
             expires_at: chrono::DateTime::from_timestamp(token.expires_at, 0)
@@ -347,7 +367,7 @@ impl AuthProvider for PkceAuthProvider {
             )));
         };
         Ok(Credential {
-            token: token.access_token,
+            token: token.access_token.clone(),
             env: env.to_owned(),
             provider: self.name.clone(),
             expires_at: chrono::DateTime::from_timestamp(token.expires_at, 0)
