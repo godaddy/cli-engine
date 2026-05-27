@@ -8854,6 +8854,13 @@ impl AuthProvider for EmptyThenFilledProvider {
 fn make_executable(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
 
+    // Sync the file to disk before changing permissions and executing.
+    // Without this, Linux can return ETXTBSY when the exec races with
+    // the kernel flushing the write from std::fs::write.
+    let file = std::fs::File::open(path).expect("script should be openable for sync");
+    file.sync_all().expect("script sync should succeed");
+    drop(file);
+
     let mut permissions = std::fs::metadata(path)
         .expect("script metadata should be readable")
         .permissions();
