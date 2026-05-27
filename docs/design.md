@@ -177,7 +177,7 @@ fn list_projects() -> RuntimeCommandSpec {
 Use `RuntimeCommandSpec::new_with_context` only when a handler needs the colon command path,
 user-supplied args, or a middleware snapshot.
 
-Use `RuntimeCommandSpec::new_streaming` for commands that emit a sequence of events rather than a single result. The handler receives a `StreamSender` and writes individual `serde_json::Value` events. Each event is written to stdout as a newline-delimited JSON line as it arrives. The handler and the NDJSON writer run concurrently to avoid deadlocks on high-volume streams.
+Use `RuntimeCommandSpec::new_streaming` for commands that emit a sequence of events rather than a single result. The handler receives a `StreamSender` and writes individual `serde_json::Value` events. Each event is written to stdout as a newline-delimited JSON line as it arrives. The handler and the NDJSON writer run concurrently so the handler can keep sending while the writer flushes to stdout. If stdout is under backpressure the bounded channel can fill and the handler will wait on `send` until the writer catches up.
 
 ### Typed Arguments
 
@@ -246,7 +246,7 @@ Framework global flags populate middleware and apply consistently to every comma
 | `--offset` | Client-side starting offset for list output. |
 | `--schema` | Renders command schema instead of running business logic. |
 | `--reason` | Reason passed to authorization, audit, and activity. |
-| `--timeout` | Command deadline; `0s` disables the deadline. |
+| `--timeout` | Command deadline (e.g. `60s`, `5m`); default is no timeout (`0s`). |
 | `--debug` | Debug selector for integrations that use it. |
 | `--search` | Searches command and guide documentation before command execution. |
 | `--version`, `-v` | Prints version/build metadata. |
