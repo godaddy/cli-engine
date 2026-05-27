@@ -125,6 +125,37 @@ let command = RuntimeCommandSpec::new(
 Command definitions should stay close to business logic. Use the builder methods to set optional
 metadata:
 
+### Streaming Commands
+
+For commands that emit a sequence of progress events rather than a single result — for example, a
+deploy command that streams build logs — use `RuntimeCommandSpec::new_streaming`. The handler
+receives a `StreamSender` and writes individual `serde_json::Value` events. Each value is written
+to stdout as a newline-delimited JSON (NDJSON) line as it arrives.
+
+```rust
+use cli_engine::{CommandSpec, RuntimeCommandSpec, StreamSender, Tier};
+use serde_json::json;
+
+RuntimeCommandSpec::new_streaming(
+    CommandSpec::new("deploy", "Deploy and stream progress")
+        .with_system("deploy-api")
+        .with_tier(Tier::Mutate),
+    |_ctx, sender: StreamSender| async move {
+        sender.send(json!({ "status": "building" })).await;
+        sender.send(json!({ "status": "deploying", "progress": 42 })).await;
+        sender.send(json!({ "status": "done" })).await;
+        Ok(())
+    },
+)
+```
+
+Streaming commands do not go through the normal output pipeline (filtering, field selection, `--output`).
+Each event is written verbatim to the process stdout (`tokio::io::stdout()`), bypassing any custom
+writer injection from `execute_from` variants. The handler and the NDJSON writer run concurrently
+so the handler can keep sending while the writer flushes to stdout. If stdout is under backpressure
+the bounded channel can fill and the handler will wait on `send` until the writer catches up.
+
+
 - `with_long` for expanded help.
 - `with_alias` for alternate group or command names.
 - `hidden(true)` for groups or commands that remain runnable but are omitted from help, tree, and
@@ -277,6 +308,10 @@ Auth providers implement the `AuthProvider` trait. Providers expose credential r
 status, logout, and environment-listing behavior. The framework includes:
 
 - `ExecProvider`, which invokes an external provider command using JSON stdin/stdout.
+- `PkceAuthProvider` (requires the `pkce-auth` feature), a built-in browser-based OAuth 2.0 PKCE
+  flow that manages the local callback server, opens the system browser, and persists tokens in the
+  system keychain via the `keyring` crate. Auth URL, token URL, and client ID can be overridden via
+  environment variables at runtime.
 - A `Dispatcher` that routes auth calls by provider name. Single-provider facades created from the
   dispatcher remain live views of the dispatcher, so transport injectors observe later provider
   registration or replacement.
@@ -321,6 +356,32 @@ Risk tiers classify command impact:
 
 Handlers return JSON-serializable data and a system id. Middleware wraps the result in an envelope
 with data, metadata, errors, and warnings.
+
+### next_actions
+
+Command handlers can attach a list of follow-on command suggestions to any result using
+`CommandResult::with_next_actions`. The framework includes these suggestions in the output
+envelope under the `next_actions` key in JSON and TOON output formats. Human output does not
+display `next_actions`.
+
+```rust
+use cli_engine::{CommandResult, NextAction, NextActionParam};
+use serde_json::json;
+use std::collections::HashMap;
+
+Ok(CommandResult::new(json!({ "id": "app-1", "name": "my-app" }))
+    .with_next_actions(vec![
+        NextAction {
+            command: "application info --name my-app".to_owned(),
+            description: "Get full application details".to_owned(),
+            params: HashMap::new(),
+        },
+    ]))
+```
+
+`NextAction` parameters are optional and carry `value`, `enum`, `required`, `default`, and
+`description` fields. This is the primary mechanism for agent-first CLIs to tell callers what
+command to run next.
 
 The output pipeline runs in this order:
 

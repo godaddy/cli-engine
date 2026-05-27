@@ -98,7 +98,8 @@ pub use cli::{
 };
 pub use command::{
     CommandContext, CommandFuture, CommandHandler, CommandResult, CommandResultMetadata,
-    CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec, command_args_from_matches,
+    CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec, StreamSender,
+    StreamingCommandFuture, StreamingCommandHandler, command_args_from_matches,
     command_path_from_matches, command_path_from_parts, leaf_matches,
 };
 pub use error::{
@@ -117,10 +118,10 @@ pub use middleware::{
 pub use module::{CommandModule, Module, ModuleContext, ModuleRegister};
 pub use output::{
     Envelope, ErrorEnvelope, FieldInfo, HumanViewDef, HumanViewFn, HumanViewRegistry,
-    HumanViewRenderer, Metadata, OutputField, OutputFormat, OutputSchema, PaginationMeta,
-    PipelineOpts, RendererFactory, SchemaInfo, SchemaRegistry, TableColumn, apply_pipeline,
-    build_detailed_error_envelope, build_error_envelope, fields_for, fields_from_json_schema,
-    filter_fields, format_help_section, get_global_schema_by_path,
+    HumanViewRenderer, Metadata, NextAction, NextActionParam, OutputField, OutputFormat,
+    OutputSchema, PaginationMeta, PipelineOpts, RendererFactory, SchemaInfo, SchemaRegistry,
+    TableColumn, apply_pipeline, build_detailed_error_envelope, build_error_envelope, fields_for,
+    fields_from_json_schema, filter_fields, format_help_section, get_global_schema_by_path,
     global_human_view_registry_snapshot, global_schema_registry_snapshot, is_valid_output_format,
     json_schema_for, json_schema_info, lookup_global_human_view_columns,
     lookup_global_human_view_func, parse_fields, register_global_human_view,

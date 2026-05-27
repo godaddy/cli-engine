@@ -303,6 +303,19 @@ impl HttpClient {
         Ok(())
     }
 
+    /// Sends GET and returns the raw response body as bytes.
+    pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self.send_get_raw_status_only_retry(path).await?;
+        if response.status().is_client_error() || response.status().is_server_error() {
+            return Err(parse_error_response(response, "GET", path).await.into());
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| CliCoreError::message(format!("transport: stream response: {err}")))?;
+        Ok(bytes.to_vec())
+    }
+
     /// Sends POST and streams the raw response body into a writer.
     pub async fn post_raw<B: Serialize>(
         &self,
