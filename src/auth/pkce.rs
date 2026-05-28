@@ -410,49 +410,51 @@ fn random_state() -> String {
 ///
 /// Accepts connections in a loop so that stray connections (port scanners,
 /// browser preflight requests) do not consume the single callback attempt.
+/// Uses async I/O so the future is properly cancelled on Ctrl+C.
 async fn wait_for_callback(
     listener: TcpListener,
     expected_state: &str,
     timeout: Duration,
 ) -> Result<String> {
-    use std::io::{Read, Write};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| CliCoreError::message(format!("callback server setup failed: {err}")))?;
+    let listener = tokio::net::TcpListener::from_std(listener)
+        .map_err(|err| CliCoreError::message(format!("callback server setup failed: {err}")))?;
 
     let expected_state = expected_state.to_owned();
     let result = tokio::time::timeout(timeout, async move {
-        tokio::task::spawn_blocking(move || {
-            loop {
-                let (mut stream, _) = listener.accept().map_err(|err| {
-                    CliCoreError::message(format!("callback server accept failed: {err}"))
-                })?;
-                let mut buf = [0_u8; 4096];
-                let n = match stream.read(&mut buf) {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                };
-                let request = String::from_utf8_lossy(&buf[..n]);
+        loop {
+            let (mut stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let mut buf = vec![0_u8; 4096];
+            let n = match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => continue,
+                Ok(n) => n,
+            };
+            let request = String::from_utf8_lossy(&buf[..n]);
 
-                let code = extract_query_param(&request, "code");
-                let state = extract_query_param(&request, "state");
+            let code = extract_query_param(&request, "code");
+            let state = extract_query_param(&request, "state");
 
-                let html_response =
-                    if state.as_deref() == Some(&expected_state) && code.is_some() {
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-                         <html><body>Authentication successful. You may close this window.</body></html>"
-                    } else {
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
-                         <html><body>Authentication failed. Please try again.</body></html>"
-                    };
-                drop(stream.write_all(html_response.as_bytes()));
+            let html_response = if state.as_deref() == Some(&expected_state) && code.is_some() {
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+                 <html><body>Authentication successful. You may close this window.</body></html>"
+            } else {
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
+                 <html><body>Authentication failed. Please try again.</body></html>"
+            };
+            drop(stream.write_all(html_response.as_bytes()).await);
 
-                if state.as_deref() == Some(expected_state.as_str()) {
-                    return code.ok_or_else(|| {
-                        CliCoreError::message("no authorization code in callback")
-                    });
-                }
+            if state.as_deref() == Some(expected_state.as_str()) {
+                return code
+                    .ok_or_else(|| CliCoreError::message("no authorization code in callback"));
             }
-        })
-        .await
-        .map_err(|err| CliCoreError::message(format!("callback task failed: {err}")))?
+        }
     })
     .await;
 
