@@ -429,7 +429,14 @@ async fn wait_for_callback(
         loop {
             let (mut stream, _) = match listener.accept().await {
                 Ok(conn) => conn,
-                Err(_) => continue,
+                Err(_) => {
+                    // Back off before retrying so a persistent accept failure
+                    // (e.g. file-descriptor exhaustion) cannot spin the CPU until
+                    // the timeout fires. The sleep is an await point, so Ctrl+C
+                    // still cancels the flow promptly.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
             };
             let mut buf = vec![0_u8; 4096];
             let n = match stream.read(&mut buf).await {
