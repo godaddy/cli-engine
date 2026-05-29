@@ -689,6 +689,11 @@ fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<(
         std::fs::create_dir_all(parent).map_err(|e| {
             CliCoreError::message(format!("failed to create credential directory: {e}"))
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
     }
     let rand_id = rand::random::<u32>();
     let tmp_path = path.with_file_name(format!(
@@ -738,8 +743,11 @@ fn write_token_tmp(tmp_path: &std::path::Path, json: &str) -> Result<()> {
 /// - Windows-forbidden filename characters: `:  * ? " < > |`
 /// - ASCII control characters (bytes 0x00–0x1F)
 fn is_safe_path_component(s: &str) -> bool {
-    const WINDOWS_FORBIDDEN: &[char] = &['\\', ':', '*', '?', '"', '<', '>', '|'];
-    if s.contains(WINDOWS_FORBIDDEN) || s.bytes().any(|b| b < 0x20) {
+    // '/' is listed explicitly because Path::components() silently strips trailing
+    // slashes — "prod/" parses as a single Normal("prod") component and would
+    // otherwise pass the components check below.
+    const FORBIDDEN: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    if s.contains(FORBIDDEN) || s.bytes().any(|b| b < 0x20) {
         return false;
     }
     let mut components = std::path::Path::new(s).components();
