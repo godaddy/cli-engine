@@ -99,6 +99,7 @@ pub struct PkceAuthProvider {
     redirect_uri: Option<String>,
     app_id: String,
     env_prefix: String,
+    allow_file_fallback: bool,
     /// In-process token cache keyed by env.
     cache: Arc<RwLock<HashMap<String, StoredToken>>>,
 }
@@ -131,6 +132,7 @@ impl PkceAuthProvider {
             redirect_uri: None,
             app_id: String::new(),
             env_prefix,
+            allow_file_fallback: false,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -166,6 +168,18 @@ impl PkceAuthProvider {
     pub fn with_extra_scopes(mut self, scopes: &[impl AsRef<str>]) -> Self {
         self.scopes
             .extend(scopes.iter().map(|s| s.as_ref().to_owned()));
+        self
+    }
+
+    /// Enables an encrypted-file fallback when the system keychain is unavailable
+    /// (e.g. headless Linux / WSL without a running secret-service daemon).
+    ///
+    /// Disabled by default. The original TypeScript CLI had no file fallback;
+    /// enable only when you have confirmed the deployment environment lacks a
+    /// reliable keychain and you accept unencrypted credentials on disk.
+    #[must_use]
+    pub fn with_file_fallback(mut self, enabled: bool) -> Self {
+        self.allow_file_fallback = enabled;
         self
     }
 
@@ -217,25 +231,110 @@ impl PkceAuthProvider {
         "token"
     }
 
+    /// Returns the path to the fallback credential file for this provider/env.
+    ///
+    /// Used when the system keychain is unavailable (e.g. WSL, headless Linux).
+    fn credential_file_path(&self, env: &str) -> Option<std::path::PathBuf> {
+        let app = if self.app_id.is_empty() {
+            &self.name
+        } else {
+            &self.app_id
+        };
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|_| {
+                std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+            })
+            .ok()?;
+        Some(
+            base.join(app)
+                .join("credentials")
+                .join(format!("{}-{}.json", self.name, env)),
+        )
+    }
+
     fn load_token_from_keychain(&self, env: &str) -> Option<StoredToken> {
-        let entry = keyring::Entry::new(&self.keychain_service(env), self.keychain_user()).ok()?;
-        let json = entry.get_password().ok()?;
+        let service = self.keychain_service(env);
+        match keyring::Entry::new(&service, self.keychain_user()) {
+            Err(e) => {
+                tracing::warn!(service, error = %e, "keychain entry creation failed");
+            }
+            Ok(entry) => match entry.get_password() {
+                Err(e) => {
+                    tracing::warn!(service, error = %e, "keychain read failed");
+                }
+                Ok(json) => match serde_json::from_str(&json) {
+                    Err(e) => {
+                        tracing::warn!(service, error = %e, "keychain token JSON invalid");
+                    }
+                    Ok(token) => return Some(token),
+                },
+            },
+        }
+        if !self.allow_file_fallback {
+            return None;
+        }
+        let path = self.credential_file_path(env)?;
+        let json = std::fs::read_to_string(&path).ok()?;
+        tracing::debug!(path = %path.display(), "loaded token from file fallback");
         serde_json::from_str(&json).ok()
     }
 
     fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
-        let entry = keyring::Entry::new(&self.keychain_service(env), self.keychain_user())
-            .map_err(|err| CliCoreError::message(format!("keychain access failed: {err}")))?;
         let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
-        entry
-            .set_password(&json)
-            .map_err(|err| CliCoreError::message(format!("keychain write failed: {err}")))?;
+        let service = self.keychain_service(env);
+        match keyring::Entry::new(&service, self.keychain_user()) {
+            Err(e) => {
+                tracing::warn!(service, error = %e, "keychain entry creation failed");
+            }
+            Ok(entry) => match entry.set_password(&json) {
+                Err(e) => {
+                    tracing::warn!(service, error = %e, "keychain write failed");
+                }
+                Ok(()) => {
+                    tracing::debug!(service, "token saved to keychain");
+                    return Ok(());
+                }
+            },
+        }
+        if !self.allow_file_fallback {
+            return Err(CliCoreError::message(
+                "keychain is unavailable and file fallback is disabled — \
+                 ensure your system keychain (e.g. gnome-keyring, macOS Keychain) \
+                 is running and unlocked",
+            ));
+        }
+        let path = self
+            .credential_file_path(env)
+            .ok_or_else(|| CliCoreError::message("could not determine credential file path"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                CliCoreError::message(format!("failed to create credential directory: {e}"))
+            })?;
+        }
+        std::fs::write(&path, &json).map_err(|e| {
+            CliCoreError::message(format!(
+                "failed to write credentials to {}: {e}",
+                path.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        tracing::debug!(path = %path.display(), "token saved to file fallback");
         Ok(())
     }
 
     fn delete_token_from_keychain(&self, env: &str) {
         if let Ok(entry) = keyring::Entry::new(&self.keychain_service(env), self.keychain_user()) {
             drop(entry.delete_credential());
+        }
+        if self.allow_file_fallback {
+            if let Some(path) = self.credential_file_path(env) {
+                drop(std::fs::remove_file(path));
+            }
         }
     }
 
