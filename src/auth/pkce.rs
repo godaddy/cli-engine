@@ -171,7 +171,7 @@ impl PkceAuthProvider {
         self
     }
 
-    /// Enables an encrypted-file fallback when the system keychain is unavailable
+    /// Enables a file-based fallback when the system keychain is unavailable
     /// (e.g. headless Linux / WSL without a running secret-service daemon).
     ///
     /// Disabled by default. The original TypeScript CLI had no file fallback;
@@ -242,9 +242,8 @@ impl PkceAuthProvider {
         };
         let base = std::env::var("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
-            .or_else(|_| {
-                std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
-            })
+            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+            .or_else(|_| std::env::var("APPDATA").map(std::path::PathBuf::from))
             .ok()?;
         Some(
             base.join(app)
@@ -260,6 +259,9 @@ impl PkceAuthProvider {
                 tracing::warn!(service, error = %e, "keychain entry creation failed");
             }
             Ok(entry) => match entry.get_password() {
+                Err(keyring::Error::NoEntry) => {
+                    tracing::debug!(service, "no stored token in keychain");
+                }
                 Err(e) => {
                     tracing::warn!(service, error = %e, "keychain read failed");
                 }
@@ -312,17 +314,36 @@ impl PkceAuthProvider {
                 CliCoreError::message(format!("failed to create credential directory: {e}"))
             })?;
         }
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| {
+                    CliCoreError::message(format!(
+                        "failed to write credentials to {}: {e}",
+                        path.display()
+                    ))
+                })?;
+            file.write_all(json.as_bytes()).map_err(|e| {
+                CliCoreError::message(format!(
+                    "failed to write credentials to {}: {e}",
+                    path.display()
+                ))
+            })?;
+        }
+        #[cfg(not(unix))]
         std::fs::write(&path, &json).map_err(|e| {
             CliCoreError::message(format!(
                 "failed to write credentials to {}: {e}",
                 path.display()
             ))
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
-        }
         tracing::debug!(path = %path.display(), "token saved to file fallback");
         Ok(())
     }
@@ -331,10 +352,8 @@ impl PkceAuthProvider {
         if let Ok(entry) = keyring::Entry::new(&self.keychain_service(env), self.keychain_user()) {
             drop(entry.delete_credential());
         }
-        if self.allow_file_fallback {
-            if let Some(path) = self.credential_file_path(env) {
-                drop(std::fs::remove_file(path));
-            }
+        if let Some(path) = self.credential_file_path(env) {
+            drop(std::fs::remove_file(path));
         }
     }
 
@@ -804,6 +823,32 @@ mod tests {
         assert_eq!(
             extract_query_param(request, "code"),
             Some("a b+c".to_owned()),
+        );
+    }
+
+    #[test]
+    fn credential_file_path_uses_xdg_config_home() {
+        let dir = std::env::temp_dir().join("cli-engine-test-xdg-pkce");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let provider = test_provider();
+        let path = provider.credential_file_path("prod");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(
+            path,
+            Some(dir.join("test").join("credentials").join("test-prod.json"))
+        );
+    }
+
+    #[test]
+    fn credential_file_path_with_app_id_uses_app_id_as_dir() {
+        let dir = std::env::temp_dir().join("cli-engine-test-xdg-pkce-appid");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let provider = test_provider().with_app_id("myapp");
+        let path = provider.credential_file_path("prod");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        assert_eq!(
+            path,
+            Some(dir.join("myapp").join("credentials").join("test-prod.json"))
         );
     }
 
