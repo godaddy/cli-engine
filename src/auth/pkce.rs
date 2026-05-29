@@ -240,6 +240,20 @@ impl PkceAuthProvider {
         } else {
             &self.app_id
         };
+        // Reject components that contain path separators or are dot-sequences to
+        // prevent directory traversal when env or app_id comes from untrusted input.
+        if !is_safe_path_component(app)
+            || !is_safe_path_component(&self.name)
+            || !is_safe_path_component(env)
+        {
+            tracing::warn!(
+                app,
+                name = self.name,
+                env,
+                "refusing credential path with unsafe component"
+            );
+            return None;
+        }
         let base = std::env::var("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
@@ -336,6 +350,9 @@ impl PkceAuthProvider {
                     path.display()
                 ))
             })?;
+            // Correct permissions even when the file pre-existed with broader mode.
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
         }
         #[cfg(not(unix))]
         std::fs::write(&path, &json).map_err(|e| {
@@ -561,6 +578,14 @@ fn random_state() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Returns true only when `s` is a single, non-traversal path component.
+///
+/// Rejects empty strings, dot-sequences (`..`, `.`), and strings that contain
+/// any path separator (both `/` and `\` so the check is portable).
+fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty() && s != ".." && s != "." && !s.contains('/') && !s.contains('\\')
+}
+
 /// Waits for the OAuth callback on the given listener, validates state and path.
 ///
 /// Accepts connections in a loop so that stray connections (port scanners,
@@ -685,6 +710,21 @@ async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises access to XDG_CONFIG_HOME (and restores it) so env-var tests
+    /// cannot race each other when the test runner spawns multiple threads.
+    static XDG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_xdg_config_home<F: FnOnce()>(value: &std::path::Path, f: F) {
+        let _guard = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", value);
+        f();
+        match prev {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
 
     fn test_provider() -> PkceAuthProvider {
         PkceAuthProvider::new(
@@ -829,27 +869,40 @@ mod tests {
     #[test]
     fn credential_file_path_uses_xdg_config_home() {
         let dir = std::env::temp_dir().join("cli-engine-test-xdg-pkce");
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        let provider = test_provider();
-        let path = provider.credential_file_path("prod");
-        std::env::remove_var("XDG_CONFIG_HOME");
-        assert_eq!(
-            path,
-            Some(dir.join("test").join("credentials").join("test-prod.json"))
-        );
+        with_xdg_config_home(&dir, || {
+            let path = test_provider().credential_file_path("prod");
+            assert_eq!(
+                path,
+                Some(dir.join("test").join("credentials").join("test-prod.json"))
+            );
+        });
     }
 
     #[test]
     fn credential_file_path_with_app_id_uses_app_id_as_dir() {
         let dir = std::env::temp_dir().join("cli-engine-test-xdg-pkce-appid");
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        let provider = test_provider().with_app_id("myapp");
-        let path = provider.credential_file_path("prod");
-        std::env::remove_var("XDG_CONFIG_HOME");
-        assert_eq!(
-            path,
-            Some(dir.join("myapp").join("credentials").join("test-prod.json"))
-        );
+        with_xdg_config_home(&dir, || {
+            let path = test_provider()
+                .with_app_id("myapp")
+                .credential_file_path("prod");
+            assert_eq!(
+                path,
+                Some(dir.join("myapp").join("credentials").join("test-prod.json"))
+            );
+        });
+    }
+
+    #[test]
+    fn credential_file_path_rejects_traversal_in_env() {
+        let dir = std::env::temp_dir().join("cli-engine-test-xdg-traversal");
+        with_xdg_config_home(&dir, || {
+            assert_eq!(
+                test_provider().credential_file_path("../../etc/passwd"),
+                None
+            );
+            assert_eq!(test_provider().credential_file_path("dev/subdir"), None);
+            assert_eq!(test_provider().credential_file_path(".."), None);
+        });
     }
 
     /// resolve_token must return a pre-seeded in-memory token without
