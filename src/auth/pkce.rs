@@ -404,42 +404,40 @@ impl PkceAuthProvider {
                         CliCoreError::message(format!("failed to create credential directory: {e}"))
                     })?;
                 }
+                let tmp_path = path.with_extension("tmp");
                 #[cfg(unix)]
                 {
                     use std::io::Write as _;
                     use std::os::unix::fs::OpenOptionsExt as _;
-                    use std::os::unix::fs::PermissionsExt as _;
                     let mut file = std::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
                         .truncate(true)
                         .mode(0o600)
-                        .open(&path)
+                        .open(&tmp_path)
                         .map_err(|e| {
                             CliCoreError::message(format!(
                                 "failed to write credentials to {}: {e}",
-                                path.display()
+                                tmp_path.display()
                             ))
                         })?;
                     file.write_all(json.as_bytes()).map_err(|e| {
                         CliCoreError::message(format!(
                             "failed to write credentials to {}: {e}",
-                            path.display()
+                            tmp_path.display()
                         ))
                     })?;
-                    // Correct permissions even when the file pre-existed with broader mode.
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                        .map_err(|e| {
-                            CliCoreError::message(format!(
-                                "failed to set credentials file permissions on {}: {e}",
-                                path.display()
-                            ))
-                        })?;
                 }
                 #[cfg(not(unix))]
-                std::fs::write(&path, &json).map_err(|e| {
+                std::fs::write(&tmp_path, &json).map_err(|e| {
                     CliCoreError::message(format!(
                         "failed to write credentials to {}: {e}",
+                        tmp_path.display()
+                    ))
+                })?;
+                std::fs::rename(&tmp_path, &path).map_err(|e| {
+                    CliCoreError::message(format!(
+                        "failed to finalize credential file {}: {e}",
                         path.display()
                     ))
                 })?;
@@ -466,7 +464,13 @@ impl PkceAuthProvider {
             .await,
         );
         if let Some(path) = self.credential_file_path(env) {
-            drop(std::fs::remove_file(path));
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to delete credential file");
+                }
+            }
         }
     }
 
@@ -679,7 +683,9 @@ fn random_state() -> String {
 /// Rejects empty strings, dot-sequences (`..`, `.`), and strings that contain
 /// any path separator (both `/` and `\` so the check is portable).
 fn is_safe_path_component(s: &str) -> bool {
-    !s.is_empty() && s != ".." && s != "." && !s.contains('/') && !s.contains('\\')
+    let mut components = std::path::Path::new(s).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 /// Waits for the OAuth callback on the given listener, validates state and path.
