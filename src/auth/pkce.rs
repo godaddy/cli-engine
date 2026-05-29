@@ -240,8 +240,6 @@ impl PkceAuthProvider {
         } else {
             &self.app_id
         };
-        // Reject components that contain path separators or are dot-sequences to
-        // prevent directory traversal when env or app_id comes from untrusted input.
         if !is_safe_path_component(app)
             || !is_safe_path_component(&self.name)
             || !is_safe_path_component(env)
@@ -254,42 +252,7 @@ impl PkceAuthProvider {
             );
             return None;
         }
-        let base = std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                // On Windows prefer APPDATA over HOME/.config: HOME is often set
-                // by Git Bash/MSYS shells and would place credentials in a
-                // non-standard location. On all other platforms keep the
-                // XDG-conventional HOME/.config first.
-                #[cfg(windows)]
-                {
-                    std::env::var("APPDATA")
-                        .ok()
-                        .filter(|v| !v.is_empty())
-                        .map(std::path::PathBuf::from)
-                        .or_else(|| {
-                            std::env::var("HOME")
-                                .ok()
-                                .filter(|v| !v.is_empty())
-                                .map(|h| std::path::PathBuf::from(h).join(".config"))
-                        })
-                }
-                #[cfg(not(windows))]
-                {
-                    std::env::var("HOME")
-                        .ok()
-                        .filter(|v| !v.is_empty())
-                        .map(|h| std::path::PathBuf::from(h).join(".config"))
-                        .or_else(|| {
-                            std::env::var("APPDATA")
-                                .ok()
-                                .filter(|v| !v.is_empty())
-                                .map(std::path::PathBuf::from)
-                        })
-                }
-            })?;
+        let base = config_base_dir()?;
         Some(
             base.join(app)
                 .join("credentials")
@@ -301,29 +264,9 @@ impl PkceAuthProvider {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
 
-        // Run keyring I/O on a blocking thread. zbus's tokio transport internally
-        // calls block_on, which panics if invoked from within an active runtime.
         let json_opt = match tokio::task::spawn_blocking({
             let service = service.clone();
-            move || -> Option<String> {
-                match keyring::Entry::new(&service, &user) {
-                    Err(e) => {
-                        tracing::warn!(service, error = %e, "keychain entry creation failed");
-                        None
-                    }
-                    Ok(entry) => match entry.get_password() {
-                        Err(keyring::Error::NoEntry) => {
-                            tracing::debug!(service, "no stored token in keychain");
-                            None
-                        }
-                        Err(e) => {
-                            tracing::warn!(service, error = %e, "keychain read failed");
-                            None
-                        }
-                        Ok(json) => Some(json),
-                    },
-                }
-            }
+            move || keychain_read_blocking(&service, &user)
         })
         .await
         {
@@ -352,24 +295,7 @@ impl PkceAuthProvider {
             return None;
         }
         let path = self.credential_file_path(env)?;
-        let json = match tokio::fs::read_to_string(&path).await {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "file fallback read failed");
-                return None;
-            }
-        };
-        match serde_json::from_str(&json) {
-            Ok(token) => {
-                tracing::debug!(path = %path.display(), "loaded token from file fallback");
-                Some(token)
-            }
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "file fallback token JSON invalid");
-                None
-            }
-        }
+        load_token_from_file(&path).await
     }
 
     async fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
@@ -380,24 +306,7 @@ impl PkceAuthProvider {
         let keychain_saved = match tokio::task::spawn_blocking({
             let service = service.clone();
             let json = json.clone();
-            move || -> bool {
-                match keyring::Entry::new(&service, &user) {
-                    Err(e) => {
-                        tracing::warn!(service, error = %e, "keychain entry creation failed");
-                        false
-                    }
-                    Ok(entry) => match entry.set_password(&json) {
-                        Err(e) => {
-                            tracing::warn!(service, error = %e, "keychain write failed");
-                            false
-                        }
-                        Ok(()) => {
-                            tracing::debug!(service, "token saved to keychain");
-                            true
-                        }
-                    },
-                }
-            }
+            move || keychain_write_blocking(&service, &user, &json)
         })
         .await
         {
@@ -428,55 +337,7 @@ impl PkceAuthProvider {
             .ok_or_else(|| CliCoreError::message("could not determine credential file path"))?;
         tokio::task::spawn_blocking({
             let path = path.clone();
-            move || -> Result<()> {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| {
-                        CliCoreError::message(format!("failed to create credential directory: {e}"))
-                    })?;
-                }
-                let rand_id = rand::random::<u32>();
-                let tmp_path = path.with_file_name(format!(
-                    "{}.{rand_id:08x}.tmp",
-                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("cred"),
-                ));
-                #[cfg(unix)]
-                {
-                    use std::io::Write as _;
-                    use std::os::unix::fs::OpenOptionsExt as _;
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(0o600)
-                        .open(&tmp_path)
-                        .map_err(|e| {
-                            CliCoreError::message(format!(
-                                "failed to write credentials to {}: {e}",
-                                tmp_path.display()
-                            ))
-                        })?;
-                    file.write_all(json.as_bytes()).map_err(|e| {
-                        CliCoreError::message(format!(
-                            "failed to write credentials to {}: {e}",
-                            tmp_path.display()
-                        ))
-                    })?;
-                }
-                #[cfg(not(unix))]
-                std::fs::write(&tmp_path, &json).map_err(|e| {
-                    CliCoreError::message(format!(
-                        "failed to write credentials to {}: {e}",
-                        tmp_path.display()
-                    ))
-                })?;
-                std::fs::rename(&tmp_path, &path).map_err(|e| {
-                    CliCoreError::message(format!(
-                        "failed to finalize credential file {}: {e}",
-                        path.display()
-                    ))
-                })?;
-                Ok(())
-            }
+            move || write_token_file_blocking(path, json)
         })
         .await
         .map_err(|e| {
@@ -715,6 +576,155 @@ fn pkce_challenge() -> (String, String) {
 fn random_state() -> String {
     let bytes: [u8; 16] = rand::rng().random();
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Resolves the base config directory from environment variables.
+fn config_base_dir() -> Option<std::path::PathBuf> {
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            // On Windows prefer APPDATA over HOME/.config: HOME is often set by
+            // Git Bash/MSYS shells and would place credentials in a non-standard
+            // location. On all other platforms keep XDG-conventional HOME/.config.
+            #[cfg(windows)]
+            {
+                std::env::var("APPDATA")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        std::env::var("HOME")
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .map(|h| std::path::PathBuf::from(h).join(".config"))
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var("HOME")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|h| std::path::PathBuf::from(h).join(".config"))
+                    .or_else(|| {
+                        std::env::var("APPDATA")
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .map(std::path::PathBuf::from)
+                    })
+            }
+        })
+}
+
+/// Reads a token JSON string from the system keychain. Sync; call inside `spawn_blocking`.
+fn keychain_read_blocking(service: &str, user: &str) -> Option<String> {
+    match keyring::Entry::new(service, user) {
+        Err(e) => {
+            tracing::warn!(service, error = %e, "keychain entry creation failed");
+            None
+        }
+        Ok(entry) => match entry.get_password() {
+            Err(keyring::Error::NoEntry) => {
+                tracing::debug!(service, "no stored token in keychain");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(service, error = %e, "keychain read failed");
+                None
+            }
+            Ok(json) => Some(json),
+        },
+    }
+}
+
+/// Writes a token JSON string to the system keychain. Sync; call inside `spawn_blocking`.
+fn keychain_write_blocking(service: &str, user: &str, json: &str) -> bool {
+    match keyring::Entry::new(service, user) {
+        Err(e) => {
+            tracing::warn!(service, error = %e, "keychain entry creation failed");
+            false
+        }
+        Ok(entry) => match entry.set_password(json) {
+            Err(e) => {
+                tracing::warn!(service, error = %e, "keychain write failed");
+                false
+            }
+            Ok(()) => {
+                tracing::debug!(service, "token saved to keychain");
+                true
+            }
+        },
+    }
+}
+
+/// Reads and parses a [`StoredToken`] from the file fallback path.
+async fn load_token_from_file(path: &std::path::Path) -> Option<StoredToken> {
+    let json = match tokio::fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "file fallback read failed");
+            return None;
+        }
+    };
+    match serde_json::from_str(&json) {
+        Ok(token) => {
+            tracing::debug!(path = %path.display(), "loaded token from file fallback");
+            Some(token)
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "file fallback token JSON invalid");
+            None
+        }
+    }
+}
+
+/// Writes `json` atomically to `path` via a uniquely-named temp file.
+/// Sync; call inside `spawn_blocking`.
+fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliCoreError::message(format!("failed to create credential directory: {e}"))
+        })?;
+    }
+    let rand_id = rand::random::<u32>();
+    let tmp_path = path.with_file_name(format!(
+        "{}.{rand_id:08x}.tmp",
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("cred"),
+    ));
+    write_token_tmp(&tmp_path, &json)?;
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        CliCoreError::message(format!(
+            "failed to finalize credential file {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Opens `tmp_path` with `O_CREAT|O_EXCL` and writes `json`.
+/// Sets mode `0o600` on Unix so credentials are never world-readable.
+fn write_token_tmp(tmp_path: &std::path::Path, json: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(tmp_path).map_err(|e| {
+        CliCoreError::message(format!(
+            "failed to write credentials to {}: {e}",
+            tmp_path.display()
+        ))
+    })?;
+    file.write_all(json.as_bytes()).map_err(|e| {
+        CliCoreError::message(format!(
+            "failed to write credentials to {}: {e}",
+            tmp_path.display()
+        ))
+    })
 }
 
 /// Returns true only when `s` is a single, non-traversal path component.
