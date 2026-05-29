@@ -277,52 +277,103 @@ impl PkceAuthProvider {
         )
     }
 
-    fn load_token_from_keychain(&self, env: &str) -> Option<StoredToken> {
+    async fn load_token_from_keychain(&self, env: &str) -> Option<StoredToken> {
         let service = self.keychain_service(env);
-        match keyring::Entry::new(&service, self.keychain_user()) {
-            Err(e) => {
-                tracing::warn!(service, error = %e, "keychain entry creation failed");
-            }
-            Ok(entry) => match entry.get_password() {
-                Err(keyring::Error::NoEntry) => {
-                    tracing::debug!(service, "no stored token in keychain");
-                }
-                Err(e) => {
-                    tracing::warn!(service, error = %e, "keychain read failed");
-                }
-                Ok(json) => match serde_json::from_str(&json) {
+        let user = self.keychain_user().to_owned();
+
+        // Run keyring I/O on a blocking thread. zbus's tokio transport internally
+        // calls block_on, which panics if invoked from within an active runtime.
+        let json_opt = tokio::task::spawn_blocking({
+            let service = service.clone();
+            move || -> Option<String> {
+                match keyring::Entry::new(&service, &user) {
                     Err(e) => {
-                        tracing::warn!(service, error = %e, "keychain token JSON invalid");
+                        tracing::warn!(service, error = %e, "keychain entry creation failed");
+                        None
                     }
-                    Ok(token) => return Some(token),
-                },
-            },
+                    Ok(entry) => match entry.get_password() {
+                        Err(keyring::Error::NoEntry) => {
+                            tracing::debug!(service, "no stored token in keychain");
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(service, error = %e, "keychain read failed");
+                            None
+                        }
+                        Ok(json) => Some(json),
+                    },
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(json) = json_opt {
+            match serde_json::from_str::<StoredToken>(&json) {
+                Ok(token) => return Some(token),
+                Err(e) => {
+                    tracing::warn!(service, error = %e, "keychain token JSON invalid");
+                }
+            }
         }
+
         if !self.allow_file_fallback {
             return None;
         }
         let path = self.credential_file_path(env)?;
-        let json = std::fs::read_to_string(&path).ok()?;
-        tracing::debug!(path = %path.display(), "loaded token from file fallback");
-        serde_json::from_str(&json).ok()
+        let json = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "file fallback read failed");
+                return None;
+            }
+        };
+        match serde_json::from_str(&json) {
+            Ok(token) => {
+                tracing::debug!(path = %path.display(), "loaded token from file fallback");
+                Some(token)
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "file fallback token JSON invalid");
+                None
+            }
+        }
     }
 
-    fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
+    async fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
         let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
         let service = self.keychain_service(env);
-        match keyring::Entry::new(&service, self.keychain_user()) {
-            Err(e) => {
-                tracing::warn!(service, error = %e, "keychain entry creation failed");
+        let user = self.keychain_user().to_owned();
+
+        let keychain_saved = tokio::task::spawn_blocking({
+            let service = service.clone();
+            let json = json.clone();
+            move || -> bool {
+                match keyring::Entry::new(&service, &user) {
+                    Err(e) => {
+                        tracing::warn!(service, error = %e, "keychain entry creation failed");
+                        false
+                    }
+                    Ok(entry) => match entry.set_password(&json) {
+                        Err(e) => {
+                            tracing::warn!(service, error = %e, "keychain write failed");
+                            false
+                        }
+                        Ok(()) => {
+                            tracing::debug!(service, "token saved to keychain");
+                            true
+                        }
+                    },
+                }
             }
-            Ok(entry) => match entry.set_password(&json) {
-                Err(e) => {
-                    tracing::warn!(service, error = %e, "keychain write failed");
-                }
-                Ok(()) => {
-                    tracing::debug!(service, "token saved to keychain");
-                    return Ok(());
-                }
-            },
+        })
+        .await
+        .unwrap_or(false);
+
+        if keychain_saved {
+            return Ok(());
         }
         if !self.allow_file_fallback {
             return Err(CliCoreError::message(
@@ -383,10 +434,17 @@ impl PkceAuthProvider {
         Ok(())
     }
 
-    fn delete_token_from_keychain(&self, env: &str) {
-        if let Ok(entry) = keyring::Entry::new(&self.keychain_service(env), self.keychain_user()) {
-            drop(entry.delete_credential());
-        }
+    async fn delete_token_from_keychain(&self, env: &str) {
+        let service = self.keychain_service(env);
+        let user = self.keychain_user().to_owned();
+        drop(
+            tokio::task::spawn_blocking(move || {
+                if let Ok(entry) = keyring::Entry::new(&service, &user) {
+                    drop(entry.delete_credential());
+                }
+            })
+            .await,
+        );
         if let Some(path) = self.credential_file_path(env) {
             drop(std::fs::remove_file(path));
         }
@@ -406,7 +464,7 @@ impl PkceAuthProvider {
         if let Some(token) = self.cached_token(env).await {
             return Ok(token);
         }
-        if let Some(token) = self.load_token_from_keychain(env) {
+        if let Some(token) = self.load_token_from_keychain(env).await {
             if token.is_valid() {
                 self.store_cached_token(env, token.clone()).await;
                 return Ok(token);
@@ -417,13 +475,13 @@ impl PkceAuthProvider {
                 if refreshed.refresh_token.is_none() {
                     refreshed.refresh_token = Some(refresh_token.to_owned());
                 }
-                self.save_token_to_keychain(env, &refreshed)?;
+                self.save_token_to_keychain(env, &refreshed).await?;
                 self.store_cached_token(env, refreshed.clone()).await;
                 return Ok(refreshed);
             }
         }
         let token = self.run_pkce_flow(env).await?;
-        self.save_token_to_keychain(env, &token)?;
+        self.save_token_to_keychain(env, &token).await?;
         self.store_cached_token(env, token.clone()).await;
         Ok(token)
     }
@@ -551,7 +609,7 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
-        let Some(token) = self.load_token_from_keychain(env) else {
+        let Some(token) = self.load_token_from_keychain(env).await else {
             return Err(CliCoreError::message(format!(
                 "not logged in for environment {env:?}"
             )));
@@ -568,7 +626,7 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn logout(&self, env: &str) -> Result<()> {
-        self.delete_token_from_keychain(env);
+        self.delete_token_from_keychain(env).await;
         let mut cache = self.cache.write().await;
         cache.remove(env);
         Ok(())
