@@ -680,8 +680,10 @@ async fn load_token_from_file(path: &std::path::Path) -> Option<StoredToken> {
     }
 }
 
-/// Writes `json` atomically to `path` via a uniquely-named temp file.
-/// Sync; call inside `spawn_blocking`.
+/// Writes `json` to `path` via a uniquely-named temp file then renames it into place.
+/// On Unix the rename is atomic. On Windows it is best-effort (`MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`): it replaces an existing destination but is not
+/// crash-atomic. Sync; call inside `spawn_blocking`.
 fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -727,14 +729,17 @@ fn write_token_tmp(tmp_path: &std::path::Path, json: &str) -> Result<()> {
     })
 }
 
-/// Returns true only when `s` is a single, non-traversal path component.
+/// Returns true only when `s` is a single, non-traversal path component that is
+/// valid on all supported platforms.
 ///
-/// Rejects empty strings, dot-sequences (`..`, `.`), strings that contain `/`,
-/// and strings that contain `\` (rejected explicitly because on Unix `\\` is a
-/// valid filename character and `Path::components()` would accept it as a single
-/// `Normal` component, defeating the traversal guard on Windows-style inputs).
+/// Rejects:
+/// - empty strings, `.`, and `..`
+/// - strings containing `/` or `\` (path separators on any platform)
+/// - Windows-forbidden filename characters: `:  * ? " < > |`
+/// - ASCII control characters (bytes 0x00–0x1F)
 fn is_safe_path_component(s: &str) -> bool {
-    if s.contains('\\') {
+    const WINDOWS_FORBIDDEN: &[char] = &['\\', ':', '*', '?', '"', '<', '>', '|'];
+    if s.contains(WINDOWS_FORBIDDEN) || s.bytes().any(|b| b < 0x20) {
         return false;
     }
     let mut components = std::path::Path::new(s).components();
