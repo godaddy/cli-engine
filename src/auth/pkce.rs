@@ -259,16 +259,36 @@ impl PkceAuthProvider {
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from)
             .or_else(|| {
-                std::env::var("HOME")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(|h| std::path::PathBuf::from(h).join(".config"))
-            })
-            .or_else(|| {
-                std::env::var("APPDATA")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(std::path::PathBuf::from)
+                // On Windows prefer APPDATA over HOME/.config: HOME is often set
+                // by Git Bash/MSYS shells and would place credentials in a
+                // non-standard location. On all other platforms keep the
+                // XDG-conventional HOME/.config first.
+                #[cfg(windows)]
+                {
+                    std::env::var("APPDATA")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .map(std::path::PathBuf::from)
+                        .or_else(|| {
+                            std::env::var("HOME")
+                                .ok()
+                                .filter(|v| !v.is_empty())
+                                .map(|h| std::path::PathBuf::from(h).join(".config"))
+                        })
+                }
+                #[cfg(not(windows))]
+                {
+                    std::env::var("HOME")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .map(|h| std::path::PathBuf::from(h).join(".config"))
+                        .or_else(|| {
+                            std::env::var("APPDATA")
+                                .ok()
+                                .filter(|v| !v.is_empty())
+                                .map(std::path::PathBuf::from)
+                        })
+                }
             })?;
         Some(
             base.join(app)
@@ -476,14 +496,12 @@ impl PkceAuthProvider {
     async fn delete_token_from_keychain(&self, env: &str) {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
-        drop(
-            tokio::task::spawn_blocking(move || {
-                if let Ok(entry) = keyring::Entry::new(&service, &user) {
-                    drop(entry.delete_credential());
-                }
-            })
-            .await,
-        );
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(entry) = keyring::Entry::new(&service, &user) {
+                let _ = entry.delete_credential();
+            }
+        })
+        .await;
         if let Some(path) = self.credential_file_path(env) {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}
