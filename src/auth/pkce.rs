@@ -404,7 +404,11 @@ impl PkceAuthProvider {
                         CliCoreError::message(format!("failed to create credential directory: {e}"))
                     })?;
                 }
-                let tmp_path = path.with_extension("tmp");
+                let rand_id = rand::random::<u32>();
+                let tmp_path = path.with_file_name(format!(
+                    "{}.{rand_id:08x}.tmp",
+                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("cred"),
+                ));
                 #[cfg(unix)]
                 {
                     use std::io::Write as _;
