@@ -185,9 +185,9 @@ impl PkceAuthProvider {
     }
 
     fn effective_redirect_uri(&self) -> String {
-        self.redirect_uri.clone().unwrap_or_else(|| {
-            format!("http://127.0.0.1:{}/callback", self.redirect_port)
-        })
+        self.redirect_uri
+            .clone()
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}/callback", self.redirect_port))
     }
 
     /// Parses the effective redirect URI and returns `(bind_port, callback_path)`.
@@ -299,8 +299,8 @@ impl PkceAuthProvider {
 
         // Start the local callback server before opening the browser so the
         // redirect lands as soon as the user approves.
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], bind_port)))
-            .map_err(|err| {
+        let listener =
+            TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], bind_port))).map_err(|err| {
                 CliCoreError::message(format!(
                     "failed to bind callback server on port {bind_port}: {err}"
                 ))
@@ -487,9 +487,7 @@ async fn wait_for_callback(
             if extract_request_path(&request).as_deref() != Some(expected_path.as_str()) {
                 drop(
                     stream
-                        .write_all(
-                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
-                        )
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
                         .await,
                 );
                 continue;
@@ -517,7 +515,9 @@ async fn wait_for_callback(
 
     match result {
         Ok(inner) => inner,
-        Err(_) => Err(CliCoreError::message("timed out waiting for OAuth callback")),
+        Err(_) => Err(CliCoreError::message(
+            "timed out waiting for OAuth callback",
+        )),
     }
 }
 
@@ -525,7 +525,12 @@ async fn wait_for_callback(
 fn extract_request_path(request: &str) -> Option<String> {
     let line = request.lines().next()?;
     let path_with_query = line.split_whitespace().nth(1)?;
-    Some(path_with_query.split_once('?').map_or(path_with_query, |(p, _)| p).to_owned())
+    Some(
+        path_with_query
+            .split_once('?')
+            .map_or(path_with_query, |(p, _)| p)
+            .to_owned(),
+    )
 }
 
 /// Extracts a query parameter value from an HTTP request line.
@@ -648,8 +653,7 @@ mod tests {
 
     #[test]
     fn parse_redirect_uri_extracts_port_and_path_from_custom_uri() {
-        let provider =
-            test_provider().with_redirect_uri("http://localhost:8080/auth/callback");
+        let provider = test_provider().with_redirect_uri("http://localhost:8080/auth/callback");
         let (port, path) = provider.parse_redirect_uri().expect("valid URI");
         assert_eq!(port, 8080);
         assert_eq!(path, "/auth/callback");
