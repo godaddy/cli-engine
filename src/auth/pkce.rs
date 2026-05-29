@@ -684,9 +684,14 @@ fn random_state() -> String {
 
 /// Returns true only when `s` is a single, non-traversal path component.
 ///
-/// Rejects empty strings, dot-sequences (`..`, `.`), and strings that contain
-/// any path separator (both `/` and `\` so the check is portable).
+/// Rejects empty strings, dot-sequences (`..`, `.`), strings that contain `/`,
+/// and strings that contain `\` (rejected explicitly because on Unix `\\` is a
+/// valid filename character and `Path::components()` would accept it as a single
+/// `Normal` component, defeating the traversal guard on Windows-style inputs).
 fn is_safe_path_component(s: &str) -> bool {
+    if s.contains('\\') {
+        return false;
+    }
     let mut components = std::path::Path::new(s).components();
     matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none()
@@ -1022,6 +1027,7 @@ mod tests {
                 None
             );
             assert_eq!(test_provider().credential_file_path("dev/subdir"), None);
+            assert_eq!(test_provider().credential_file_path("dev\\subdir"), None);
             assert_eq!(test_provider().credential_file_path(".."), None);
         });
     }
