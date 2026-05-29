@@ -283,7 +283,7 @@ impl PkceAuthProvider {
 
         // Run keyring I/O on a blocking thread. zbus's tokio transport internally
         // calls block_on, which panics if invoked from within an active runtime.
-        let json_opt = tokio::task::spawn_blocking({
+        let json_opt = match tokio::task::spawn_blocking({
             let service = service.clone();
             move || -> Option<String> {
                 match keyring::Entry::new(&service, &user) {
@@ -306,8 +306,13 @@ impl PkceAuthProvider {
             }
         })
         .await
-        .ok()
-        .flatten();
+        {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::warn!(service, error = %e, "keychain read task panicked");
+                None
+            }
+        };
 
         if let Some(json) = json_opt {
             match serde_json::from_str::<StoredToken>(&json) {
@@ -322,7 +327,7 @@ impl PkceAuthProvider {
             return None;
         }
         let path = self.credential_file_path(env)?;
-        let json = match std::fs::read_to_string(&path) {
+        let json = match tokio::fs::read_to_string(&path).await {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
             Err(e) => {
@@ -347,7 +352,7 @@ impl PkceAuthProvider {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
 
-        let keychain_saved = tokio::task::spawn_blocking({
+        let keychain_saved = match tokio::task::spawn_blocking({
             let service = service.clone();
             let json = json.clone();
             move || -> bool {
@@ -370,7 +375,13 @@ impl PkceAuthProvider {
             }
         })
         .await
-        .unwrap_or(false);
+        {
+            Ok(saved) => saved,
+            Err(e) => {
+                tracing::warn!(service, error = %e, "keychain write task panicked");
+                false
+            }
+        };
 
         if keychain_saved {
             return Ok(());
@@ -385,51 +396,60 @@ impl PkceAuthProvider {
         let path = self
             .credential_file_path(env)
             .ok_or_else(|| CliCoreError::message("could not determine credential file path"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CliCoreError::message(format!("failed to create credential directory: {e}"))
-            })?;
-        }
-        #[cfg(unix)]
-        {
-            use std::io::Write as _;
-            use std::os::unix::fs::OpenOptionsExt as _;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&path)
-                .map_err(|e| {
+        tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || -> Result<()> {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        CliCoreError::message(format!("failed to create credential directory: {e}"))
+                    })?;
+                }
+                #[cfg(unix)]
+                {
+                    use std::io::Write as _;
+                    use std::os::unix::fs::OpenOptionsExt as _;
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(&path)
+                        .map_err(|e| {
+                            CliCoreError::message(format!(
+                                "failed to write credentials to {}: {e}",
+                                path.display()
+                            ))
+                        })?;
+                    file.write_all(json.as_bytes()).map_err(|e| {
+                        CliCoreError::message(format!(
+                            "failed to write credentials to {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    // Correct permissions even when the file pre-existed with broader mode.
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .map_err(|e| {
+                            CliCoreError::message(format!(
+                                "failed to set credentials file permissions on {}: {e}",
+                                path.display()
+                            ))
+                        })?;
+                }
+                #[cfg(not(unix))]
+                std::fs::write(&path, &json).map_err(|e| {
                     CliCoreError::message(format!(
                         "failed to write credentials to {}: {e}",
                         path.display()
                     ))
                 })?;
-            file.write_all(json.as_bytes()).map_err(|e| {
-                CliCoreError::message(format!(
-                    "failed to write credentials to {}: {e}",
-                    path.display()
-                ))
-            })?;
-            // Correct permissions even when the file pre-existed with broader mode.
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
-                |e| {
-                    CliCoreError::message(format!(
-                        "failed to set credentials file permissions on {}: {e}",
-                        path.display()
-                    ))
-                },
-            )?;
-        }
-        #[cfg(not(unix))]
-        std::fs::write(&path, &json).map_err(|e| {
-            CliCoreError::message(format!(
-                "failed to write credentials to {}: {e}",
-                path.display()
-            ))
-        })?;
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| {
+            CliCoreError::message(format!("credential file write task panicked: {e}"))
+        })??;
         tracing::debug!(path = %path.display(), "token saved to file fallback");
         Ok(())
     }
