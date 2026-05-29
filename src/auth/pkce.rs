@@ -309,7 +309,12 @@ impl PkceAuthProvider {
         {
             Ok(opt) => opt,
             Err(e) => {
-                tracing::warn!(service, error = %e, "keychain read task panicked");
+                let reason = if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "panicked"
+                };
+                tracing::warn!(service, error = %e, reason, "keychain read task failed");
                 None
             }
         };
@@ -378,7 +383,12 @@ impl PkceAuthProvider {
         {
             Ok(saved) => saved,
             Err(e) => {
-                tracing::warn!(service, error = %e, "keychain write task panicked");
+                let reason = if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "panicked"
+                };
+                tracing::warn!(service, error = %e, reason, "keychain write task failed");
                 false
             }
         };
@@ -450,7 +460,14 @@ impl PkceAuthProvider {
         })
         .await
         .map_err(|e| {
-            CliCoreError::message(format!("credential file write task panicked: {e}"))
+            CliCoreError::message(format!(
+                "credential file write task {}: {e}",
+                if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "panicked"
+                }
+            ))
         })??;
         tracing::debug!(path = %path.display(), "token saved to file fallback");
         Ok(())
