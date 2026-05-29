@@ -255,10 +255,21 @@ impl PkceAuthProvider {
             return None;
         }
         let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from)
-            .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-            .or_else(|_| std::env::var("APPDATA").map(std::path::PathBuf::from))
-            .ok()?;
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|h| std::path::PathBuf::from(h).join(".config"))
+            })
+            .or_else(|| {
+                std::env::var("APPDATA")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(std::path::PathBuf::from)
+            })?;
         Some(
             base.join(app)
                 .join("credentials")
@@ -352,7 +363,14 @@ impl PkceAuthProvider {
             })?;
             // Correct permissions even when the file pre-existed with broader mode.
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    CliCoreError::message(format!(
+                        "failed to set credentials file permissions on {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
         }
         #[cfg(not(unix))]
         std::fs::write(&path, &json).map_err(|e| {
@@ -715,15 +733,30 @@ mod tests {
     /// cannot race each other when the test runner spawns multiple threads.
     static XDG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// RAII guard that restores an env var when dropped, including on panic.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn with_xdg_config_home<F: FnOnce()>(value: &std::path::Path, f: F) {
-        let _guard = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("XDG_CONFIG_HOME").ok();
         std::env::set_var("XDG_CONFIG_HOME", value);
+        let _restore = EnvVarGuard {
+            key: "XDG_CONFIG_HOME",
+            prev,
+        };
         f();
-        match prev {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
     }
 
     fn test_provider() -> PkceAuthProvider {
