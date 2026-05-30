@@ -372,7 +372,12 @@ impl PkceAuthProvider {
         let user = self.keychain_user().to_owned();
         if let Err(e) = tokio::task::spawn_blocking(move || {
             if let Ok(entry) = keyring::Entry::new(&service, &user) {
-                drop(entry.delete_credential());
+                match entry.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => {}
+                    Err(e) => {
+                        tracing::warn!(service, error = %e, "keychain delete failed");
+                    }
+                }
             }
         })
         .await
@@ -700,6 +705,9 @@ async fn load_token_from_file(path: &std::path::Path) -> Option<StoredToken> {
         }
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "file fallback token JSON invalid");
+            // Best-effort delete: a permanently corrupt file causes repeated
+            // warnings and PKCE flows on every run until manually removed.
+            tokio::fs::remove_file(path).await.ok();
             None
         }
     }
