@@ -722,12 +722,14 @@ fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<(
         path.file_stem().and_then(|s| s.to_str()).unwrap_or("cred"),
     ));
     write_token_tmp(&tmp_path, &json)?;
-    std::fs::rename(&tmp_path, &path).map_err(|e| {
-        CliCoreError::message(format!(
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        std::fs::remove_file(&tmp_path).ok();
+        return Err(CliCoreError::message(format!(
             "failed to finalize credential file {}: {e}",
             path.display()
-        ))
-    })
+        )));
+    }
+    Ok(())
 }
 
 /// Opens `tmp_path` with `O_CREAT|O_EXCL` and writes `json`.
