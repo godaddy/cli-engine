@@ -763,12 +763,31 @@ fn write_token_tmp(tmp_path: &std::path::Path, json: &str) -> Result<()> {
 /// - strings containing `/` or `\` (path separators on any platform)
 /// - Windows-forbidden filename characters: `:  * ? " < > |`
 /// - ASCII control characters (bytes 0x00–0x1F)
+/// - trailing `.` or space (valid on Unix but rejected by Windows)
+/// - Windows reserved device names (`CON`, `NUL`, `COM1`, etc.) with or without extension
 fn is_safe_path_component(s: &str) -> bool {
     // '/' is listed explicitly because Path::components() silently strips trailing
     // slashes — "prod/" parses as a single Normal("prod") component and would
     // otherwise pass the components check below.
     const FORBIDDEN: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
     if s.contains(FORBIDDEN) || s.bytes().any(|b| b < 0x20) {
+        return false;
+    }
+    if s.ends_with('.') || s.ends_with(' ') {
+        return false;
+    }
+    // Windows treats these device names as special regardless of extension,
+    // e.g. opening "NUL.json" writes to the null device, not a file.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+        "LPT9",
+    ];
+    let stem = std::path::Path::new(s)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(s);
+    if RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
         return false;
     }
     let mut components = std::path::Path::new(s).components();
@@ -1118,6 +1137,31 @@ mod tests {
             assert_eq!(test_provider().credential_file_path("dev\\subdir"), None);
             assert_eq!(test_provider().credential_file_path(".."), None);
         });
+    }
+
+    #[test]
+    fn is_safe_path_component_rejects_windows_reserved_names() {
+        for name in &[
+            "CON", "con", "NUL", "nul", "COM1", "LPT9", "CON.txt", "NUL.json",
+        ] {
+            assert!(
+                !is_safe_path_component(name),
+                "{name:?} should be rejected as a Windows reserved name"
+            );
+        }
+    }
+
+    #[test]
+    fn is_safe_path_component_rejects_trailing_dot_and_space() {
+        assert!(!is_safe_path_component("prod."));
+        assert!(!is_safe_path_component("prod "));
+    }
+
+    #[test]
+    fn is_safe_path_component_accepts_normal_values() {
+        for name in &["dev", "prod", "staging", "my-app", "my_app", "app.v2"] {
+            assert!(is_safe_path_component(name), "{name:?} should be accepted");
+        }
     }
 
     #[test]
