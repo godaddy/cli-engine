@@ -35,7 +35,7 @@ jobs:
         run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 
       - name: Doc Tests
-        run: cargo test --doc
+        run: cargo test --doc && cargo test --doc --features pkce-auth
 
       - name: Publish dry run
         run: cargo publish --dry-run

@@ -287,6 +287,18 @@ impl PkceAuthProvider {
                 Ok(token) => return Some(token),
                 Err(e) => {
                     tracing::warn!(service, error = %e, "keychain token JSON invalid");
+                    // Best-effort delete the corrupt entry so subsequent runs
+                    // don't repeat the warning and fall through to re-auth.
+                    let svc = service.clone();
+                    let usr = self.keychain_user().to_owned();
+                    drop(
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(entry) = keyring::Entry::new(&svc, &usr) {
+                                drop(entry.delete_credential());
+                            }
+                        })
+                        .await,
+                    );
                 }
             }
         }
@@ -370,24 +382,27 @@ impl PkceAuthProvider {
     async fn delete_token_from_keychain(&self, env: &str) {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            if let Ok(entry) = keyring::Entry::new(&service, &user) {
-                match entry.delete_credential() {
+        let service_for_warn = service.clone();
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || match keyring::Entry::new(&service, &user) {
+                Err(e) => {
+                    tracing::warn!(service, error = %e, "keychain entry creation failed on delete");
+                }
+                Ok(entry) => match entry.delete_credential() {
                     Ok(()) | Err(keyring::Error::NoEntry) => {}
                     Err(e) => {
                         tracing::warn!(service, error = %e, "keychain delete failed");
                     }
-                }
-            }
-        })
-        .await
+                },
+            })
+            .await
         {
             let reason = if e.is_cancelled() {
                 "cancelled"
             } else {
                 "panicked"
             };
-            tracing::warn!(error = %e, reason, "keychain delete task failed");
+            tracing::warn!(service = service_for_warn, error = %e, reason, "keychain delete task failed");
         }
         if let Some(path) = self.credential_file_path(env) {
             match tokio::fs::remove_file(&path).await {
