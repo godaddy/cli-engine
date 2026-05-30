@@ -327,9 +327,9 @@ impl PkceAuthProvider {
         }
         if !self.allow_file_fallback {
             return Err(CliCoreError::message(
-                "keychain is unavailable and file fallback is disabled — \
-                 ensure your system keychain (e.g. gnome-keyring, macOS Keychain) \
-                 is running and unlocked",
+                "failed to save token to keychain and file fallback is disabled — \
+                 check logs for the underlying error, or ensure your system keychain \
+                 (e.g. gnome-keyring, macOS Keychain) is running and unlocked",
             ));
         }
         let path = self
@@ -1134,6 +1134,31 @@ mod tests {
             test_provider().credential_file_path("prod"),
             None,
             "relative XDG_CONFIG_HOME should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_fallback_round_trip_write_then_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test-prod.json");
+        let token = valid_token("file-token");
+        let json = serde_json::to_string(&token).expect("serialize");
+
+        write_token_file_blocking(path.clone(), json).expect("write");
+
+        let loaded = load_token_from_file(&path).await;
+        assert_eq!(loaded.expect("token present").access_token, "file-token");
+    }
+
+    #[tokio::test]
+    async fn file_fallback_invalid_json_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, b"not-valid-json").expect("write");
+
+        assert!(
+            load_token_from_file(&path).await.is_none(),
+            "invalid JSON should return None"
         );
     }
 
