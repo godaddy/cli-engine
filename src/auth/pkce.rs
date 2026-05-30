@@ -357,14 +357,20 @@ impl PkceAuthProvider {
     async fn delete_token_from_keychain(&self, env: &str) {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
-        drop(
-            tokio::task::spawn_blocking(move || {
-                if let Ok(entry) = keyring::Entry::new(&service, &user) {
-                    drop(entry.delete_credential());
-                }
-            })
-            .await,
-        );
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            if let Ok(entry) = keyring::Entry::new(&service, &user) {
+                drop(entry.delete_credential());
+            }
+        })
+        .await
+        {
+            let reason = if e.is_cancelled() {
+                "cancelled"
+            } else {
+                "panicked"
+            };
+            tracing::warn!(error = %e, reason, "keychain delete task failed");
+        }
         if let Some(path) = self.credential_file_path(env) {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}
@@ -617,6 +623,9 @@ fn config_base_dir() -> Option<std::path::PathBuf> {
                     })
             }
         })
+        // Reject relative paths: a relative XDG_CONFIG_HOME/APPDATA/HOME would
+        // silently place credentials relative to the current working directory.
+        .filter(|p| p.is_absolute())
 }
 
 /// Reads a token JSON string from the system keychain. Sync; call inside `spawn_blocking`.
@@ -1109,6 +1118,23 @@ mod tests {
             assert_eq!(test_provider().credential_file_path("dev\\subdir"), None);
             assert_eq!(test_provider().credential_file_path(".."), None);
         });
+    }
+
+    #[test]
+    fn credential_file_path_rejects_relative_base_dir() {
+        let _lock = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("XDG_CONFIG_HOME").ok();
+        // SAFETY: mutex held for the duration.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", ".") };
+        let _restore = EnvVarGuard {
+            key: "XDG_CONFIG_HOME",
+            prev,
+        };
+        assert_eq!(
+            test_provider().credential_file_path("prod"),
+            None,
+            "relative XDG_CONFIG_HOME should be rejected"
+        );
     }
 
     /// resolve_token must return a pre-seeded in-memory token without
