@@ -357,12 +357,14 @@ impl PkceAuthProvider {
     async fn delete_token_from_keychain(&self, env: &str) {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(entry) = keyring::Entry::new(&service, &user) {
-                let _ = entry.delete_credential();
-            }
-        })
-        .await;
+        drop(
+            tokio::task::spawn_blocking(move || {
+                if let Ok(entry) = keyring::Entry::new(&service, &user) {
+                    drop(entry.delete_credential());
+                }
+            })
+            .await,
+        );
         if let Some(path) = self.credential_file_path(env) {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}
@@ -692,7 +694,10 @@ fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            drop(std::fs::set_permissions(
+                parent,
+                std::fs::Permissions::from_mode(0o700),
+            ));
         }
     }
     let rand_id = rand::random::<u32>();
@@ -877,6 +882,9 @@ async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result
 }
 
 #[cfg(test)]
+// set_var/remove_var are unsafe in Rust 2024 edition. The XDG_MUTEX in this
+// module serialises all access so usage here is data-race-free.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -892,9 +900,14 @@ mod tests {
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            // SAFETY: the XDG_MUTEX held by with_xdg_config_home serialises all
+            // env-var access in this test module; no other thread touches these
+            // variables while the mutex is held.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
             }
         }
     }
@@ -902,7 +915,8 @@ mod tests {
     fn with_xdg_config_home<F: FnOnce()>(value: &std::path::Path, f: F) {
         let _lock = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", value);
+        // SAFETY: same as EnvVarGuard::drop — mutex held for the duration.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", value) };
         let _restore = EnvVarGuard {
             key: "XDG_CONFIG_HOME",
             prev,
