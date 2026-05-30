@@ -694,10 +694,17 @@ fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            drop(std::fs::set_permissions(
-                parent,
-                std::fs::Permissions::from_mode(0o700),
-            ));
+            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            {
+                // The credential file itself is always 0o600; failing to
+                // restrict the parent directory is a defence-in-depth miss,
+                // not a confidentiality breach.
+                tracing::debug!(
+                    path = %parent.display(),
+                    error = %e,
+                    "could not restrict credential directory permissions"
+                );
+            }
         }
     }
     let rand_id = rand::random::<u32>();
