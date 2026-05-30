@@ -323,6 +323,19 @@ impl PkceAuthProvider {
         };
 
         if keychain_saved {
+            // Best-effort: remove any stale file-fallback token now that the
+            // keychain is working. Ignore NotFound; the file may never have existed.
+            if let Some(path) = self.credential_file_path(env) {
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) => {
+                        tracing::debug!(path = %path.display(), "removed stale file fallback after keychain write");
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        tracing::debug!(path = %path.display(), error = %e, "could not remove stale file fallback");
+                    }
+                }
+            }
             return Ok(());
         }
         if !self.allow_file_fallback {
@@ -595,7 +608,8 @@ fn config_base_dir() -> Option<std::path::PathBuf> {
         .or_else(|| {
             // On Windows prefer APPDATA over HOME/.config: HOME is often set by
             // Git Bash/MSYS shells and would place credentials in a non-standard
-            // location. On all other platforms keep XDG-conventional HOME/.config.
+            // location. On all other platforms prefer XDG-conventional HOME/.config,
+            // falling back to APPDATA as a last resort if HOME is unset.
             #[cfg(windows)]
             {
                 std::env::var("APPDATA")
