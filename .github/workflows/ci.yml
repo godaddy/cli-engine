@@ -32,7 +32,7 @@ jobs:
         run: cargo test --all-targets && cargo test --all-targets --features pkce-auth
 
       - name: Docs
-        run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps && RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --features pkce-auth
 
       - name: Doc Tests
         run: cargo test --doc && cargo test --doc --features pkce-auth
