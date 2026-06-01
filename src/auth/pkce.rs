@@ -5,7 +5,8 @@
 //! On headless or WSL environments where a keychain daemon is unavailable, an
 //! opt-in file fallback can be enabled with `PkceAuthProvider::with_file_fallback`;
 //! tokens are then written as **unencrypted JSON** to
-//! `<config-base>/<app>/credentials/<provider>-<env>.json` (mode `0600` on Unix),
+//! `<config-base>/<app>/credentials/<provider>-<env>.json` (at most `0600` on Unix; the
+//! process umask may make the mode more restrictive),
 //! where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
 //! Only enable the fallback when the deployment environment lacks a reliable
 //! keychain and the security tradeoff is acceptable.
@@ -234,7 +235,7 @@ impl PkceAuthProvider {
         }
     }
 
-    fn keychain_user(&self) -> &str {
+    fn keychain_user() -> &'static str {
         "token"
     }
 
@@ -269,49 +270,58 @@ impl PkceAuthProvider {
 
     async fn load_token_from_keychain(&self, env: &str) -> Option<StoredToken> {
         let service = self.keychain_service(env);
-        let user = self.keychain_user().to_owned();
+        let user = Self::keychain_user();
 
-        let json_opt = match tokio::task::spawn_blocking({
+        // None = backend error/unavailable; Some(None) = working but no entry.
+        let keychain_result = match tokio::task::spawn_blocking({
             let service = service.clone();
-            move || keychain_read_blocking(&service, &user)
+            move || keychain_read_blocking(&service, user)
         })
         .await
         {
-            Ok(opt) => opt,
+            Ok(result) => result,
             Err(e) => {
-                let reason = if e.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "panicked"
-                };
+                let reason = if e.is_cancelled() { "cancelled" } else { "panicked" };
                 tracing::warn!(service, error = %e, reason, "keychain read task failed");
                 None
             }
         };
 
-        if let Some(json) = json_opt {
-            match serde_json::from_str::<StoredToken>(&json) {
-                Ok(token) => return Some(token),
-                Err(e) => {
-                    tracing::warn!(service, error = %e, "keychain token JSON invalid");
-                    // Best-effort delete the corrupt entry so subsequent runs
-                    // don't repeat the warning and fall through to re-auth.
-                    let svc = service.clone();
-                    let usr = self.keychain_user().to_owned();
-                    if let Err(e) = tokio::task::spawn_blocking(move || {
-                        if let Ok(entry) = keyring::Entry::new(&svc, &usr)
-                            && let Err(e) = entry.delete_credential()
-                            && !matches!(e, keyring::Error::NoEntry)
+        match keychain_result {
+            Some(Some(ref json)) => {
+                match serde_json::from_str::<StoredToken>(json) {
+                    Ok(token) => return Some(token),
+                    Err(e) => {
+                        tracing::warn!(service, error = %e, "keychain token JSON invalid");
+                        // Best-effort delete the corrupt entry so subsequent runs
+                        // don't repeat the warning. The keychain was reachable, so
+                        // skip the file fallback and force re-auth.
+                        let svc = service.clone();
+                        let usr = Self::keychain_user();
+                        if let Err(e) = tokio::task::spawn_blocking(move || {
+                            if let Ok(entry) = keyring::Entry::new(&svc, usr)
+                                && let Err(e) = entry.delete_credential()
+                                && !matches!(e, keyring::Error::NoEntry)
+                            {
+                                tracing::warn!(service = %svc, error = %e, "failed to self-heal corrupt keychain entry");
+                            }
+                        })
+                        .await
                         {
-                            tracing::warn!(service = %svc, error = %e, "failed to self-heal corrupt keychain entry");
+                            let reason = if e.is_cancelled() { "cancelled" } else { "panicked" };
+                            tracing::warn!(service, error = %e, reason, "keychain self-heal task failed");
                         }
-                    })
-                    .await
-                    {
-                        let reason = if e.is_cancelled() { "cancelled" } else { "panicked" };
-                        tracing::warn!(service, error = %e, reason, "keychain self-heal task failed");
+                        return None;
                     }
                 }
+            }
+            Some(None) => {
+                // Keychain is reachable but has no entry. The file is stale or absent;
+                // skip the file fallback and let the caller trigger a new login.
+                return None;
+            }
+            None => {
+                // Keychain backend unavailable — fall through to the file fallback.
             }
         }
 
@@ -325,12 +335,12 @@ impl PkceAuthProvider {
     async fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
         let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
         let service = self.keychain_service(env);
-        let user = self.keychain_user().to_owned();
+        let user = Self::keychain_user();
 
         let (keychain_saved, json) = match tokio::task::spawn_blocking({
             let service = service.clone();
             move || {
-                let saved = keychain_write_blocking(&service, &user, &json);
+                let saved = keychain_write_blocking(&service, user, &json);
                 (saved, json)
             }
         })
@@ -397,10 +407,10 @@ impl PkceAuthProvider {
 
     async fn delete_token_from_keychain(&self, env: &str) {
         let service = self.keychain_service(env);
-        let user = self.keychain_user().to_owned();
+        let user = Self::keychain_user();
         let service_for_warn = service.clone();
         if let Err(e) =
-            tokio::task::spawn_blocking(move || match keyring::Entry::new(&service, &user) {
+            tokio::task::spawn_blocking(move || match keyring::Entry::new(&service, user) {
                 Err(e) => {
                     tracing::warn!(service, error = %e, "keychain entry creation failed on delete");
                 }
@@ -681,7 +691,11 @@ fn config_base_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Reads a token JSON string from the system keychain. Sync; call inside `spawn_blocking`.
-fn keychain_read_blocking(service: &str, user: &str) -> Option<String> {
+///
+/// Returns `Some(Some(json))` when a credential is found, `Some(None)` when the keychain
+/// is reachable but has no entry, and `None` when the keychain backend is unavailable or
+/// returns an unexpected error. Callers use `None` to decide whether to try the file fallback.
+fn keychain_read_blocking(service: &str, user: &str) -> Option<Option<String>> {
     match keyring::Entry::new(service, user) {
         Err(e) => {
             tracing::warn!(service, error = %e, "keychain entry creation failed");
@@ -690,13 +704,13 @@ fn keychain_read_blocking(service: &str, user: &str) -> Option<String> {
         Ok(entry) => match entry.get_password() {
             Err(keyring::Error::NoEntry) => {
                 tracing::debug!(service, "no stored token in keychain");
-                None
+                Some(None)
             }
             Err(e) => {
                 tracing::warn!(service, error = %e, "keychain read failed");
                 None
             }
-            Ok(json) => Some(json),
+            Ok(json) => Some(Some(json)),
         },
     }
 }
