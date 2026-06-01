@@ -281,7 +281,11 @@ impl PkceAuthProvider {
         {
             Ok(result) => result,
             Err(e) => {
-                let reason = if e.is_cancelled() { "cancelled" } else { "panicked" };
+                let reason = if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "panicked"
+                };
                 tracing::warn!(service, error = %e, reason, "keychain read task failed");
                 None
             }
