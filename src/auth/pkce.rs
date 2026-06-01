@@ -293,8 +293,11 @@ impl PkceAuthProvider {
                     let usr = self.keychain_user().to_owned();
                     drop(
                         tokio::task::spawn_blocking(move || {
-                            if let Ok(entry) = keyring::Entry::new(&svc, &usr) {
-                                drop(entry.delete_credential());
+                            if let Ok(entry) = keyring::Entry::new(&svc, &usr)
+                                && let Err(e) = entry.delete_credential()
+                                && !matches!(e, keyring::Error::NoEntry)
+                            {
+                                tracing::warn!(service = %svc, error = %e, "failed to self-heal corrupt keychain entry");
                             }
                         })
                         .await,
@@ -315,14 +318,16 @@ impl PkceAuthProvider {
         let service = self.keychain_service(env);
         let user = self.keychain_user().to_owned();
 
-        let keychain_saved = match tokio::task::spawn_blocking({
+        let (keychain_saved, json) = match tokio::task::spawn_blocking({
             let service = service.clone();
-            let json = json.clone();
-            move || keychain_write_blocking(&service, &user, &json)
+            move || {
+                let saved = keychain_write_blocking(&service, &user, &json);
+                (saved, json)
+            }
         })
         .await
         {
-            Ok(saved) => saved,
+            Ok(result) => result,
             Err(e) => {
                 let reason = if e.is_cancelled() {
                     "cancelled"
@@ -330,7 +335,9 @@ impl PkceAuthProvider {
                     "panicked"
                 };
                 tracing::warn!(service, error = %e, reason, "keychain write task failed");
-                false
+                // Re-serialize on task panic/cancel so the file-fallback path still has json.
+                let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
+                (false, json)
             }
         };
 
@@ -598,7 +605,9 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn list_environments(&self) -> Result<Vec<String>> {
-        // Keyring doesn't support listing; return cache keys as a hint.
+        // Keyring and file-fallback storage do not support listing; return only
+        // the in-memory cache keys as a hint. Tokens that survived a restart via
+        // file fallback are not enumerated here.
         let cache = self.cache.read().await;
         Ok(cache.keys().cloned().collect())
     }
@@ -801,18 +810,19 @@ fn write_token_tmp(tmp_path: &std::path::Path, json: &str) -> Result<()> {
 /// - empty strings, `.`, and `..`
 /// - strings containing `/` or `\` (path separators on any platform)
 /// - Windows-forbidden filename characters: `:  * ? " < > |`
-/// - ASCII control characters (bytes 0x00–0x1F)
-/// - trailing `.` or space (valid on Unix but rejected by Windows)
+/// - ASCII control characters (bytes 0x00–0x1F) and the DEL character (0x7F)
+/// - leading or trailing space (leading space is invisible in directory listings)
+/// - trailing `.` (valid on Unix but rejected by Windows)
 /// - Windows reserved device names (`CON`, `NUL`, `COM1`, etc.) with or without extension
 fn is_safe_path_component(s: &str) -> bool {
     // '/' is listed explicitly because Path::components() silently strips trailing
     // slashes — "prod/" parses as a single Normal("prod") component and would
     // otherwise pass the components check below.
     const FORBIDDEN: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
-    if s.contains(FORBIDDEN) || s.bytes().any(|b| b < 0x20) {
+    if s.contains(FORBIDDEN) || s.bytes().any(|b| b < 0x20 || b == 0x7F) {
         return false;
     }
-    if s.ends_with('.') || s.ends_with(' ') {
+    if s.starts_with(' ') || s.ends_with('.') || s.ends_with(' ') {
         return false;
     }
     // Windows treats these device names as special regardless of extension,
@@ -974,9 +984,8 @@ mod tests {
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            // SAFETY: the XDG_MUTEX held by with_xdg_config_home serialises all
-            // env-var access in this test module; no other thread touches these
-            // variables while the mutex is held.
+            // SAFETY: XDG_MUTEX is held for the duration of this guard's lifetime,
+            // ensuring no other thread modifies these variables concurrently.
             unsafe {
                 match self.prev.take() {
                     Some(v) => std::env::set_var(self.key, v),
@@ -1191,6 +1200,23 @@ mod tests {
     }
 
     #[test]
+    fn is_safe_path_component_rejects_empty_string() {
+        assert!(!is_safe_path_component(""));
+    }
+
+    #[test]
+    fn is_safe_path_component_rejects_leading_space_and_del() {
+        assert!(
+            !is_safe_path_component(" prod"),
+            "leading space should be rejected"
+        );
+        assert!(
+            !is_safe_path_component("prod\x7f"),
+            "DEL byte should be rejected"
+        );
+    }
+
+    #[test]
     fn is_safe_path_component_rejects_trailing_dot_and_space() {
         assert!(!is_safe_path_component("prod."));
         assert!(!is_safe_path_component("prod "));
@@ -1260,5 +1286,27 @@ mod tests {
             .await
             .expect("resolve from cache");
         assert_eq!(resolved.access_token, "cached-token");
+    }
+
+    /// list_environments returns only in-memory cache keys; tokens written to
+    /// disk via file fallback during a previous session are not enumerated.
+    #[tokio::test]
+    async fn list_environments_returns_only_cached_keys() {
+        let provider = test_provider();
+        provider.store_cached_token("dev", valid_token("t1")).await;
+        provider.store_cached_token("prod", valid_token("t2")).await;
+
+        let mut envs = provider.list_environments().await.expect("list");
+        envs.sort();
+        assert_eq!(envs, ["dev", "prod"]);
+    }
+
+    /// A provider with no cache entries returns an empty list, regardless of
+    /// what credential files may exist on disk from a previous session.
+    #[tokio::test]
+    async fn list_environments_returns_empty_without_cache() {
+        let provider = test_provider();
+        let envs = provider.list_environments().await.expect("list");
+        assert!(envs.is_empty(), "expected empty list for a fresh provider");
     }
 }
