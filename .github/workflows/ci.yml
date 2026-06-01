@@ -23,19 +23,19 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Check
-        run: cargo check --all-targets
+        run: cargo check --all-targets && cargo check --all-targets --features pkce-auth
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --features pkce-auth -- -D warnings
 
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --all-targets && cargo test --all-targets --features pkce-auth
 
       - name: Docs
-        run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps && RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --features pkce-auth
 
       - name: Doc Tests
-        run: cargo test --doc
+        run: cargo test --doc && cargo test --doc --features pkce-auth
 
       - name: Publish dry run
         run: cargo publish --dry-run
