@@ -2,6 +2,12 @@
 //!
 //! Implements the browser-based Authorization Code + PKCE flow (RFC 7636).
 //! Tokens are stored in the system keychain via the `keyring` crate.
+//! On headless or WSL environments where a keychain daemon is unavailable, an
+//! opt-in file fallback can be enabled with `PkceAuthProvider::with_file_fallback`;
+//! tokens are then written as **unencrypted JSON** under
+//! `$XDG_CONFIG_HOME/<app>/<provider>/credentials/` (mode `0600` on Unix).
+//! Only enable the fallback when the deployment environment lacks a reliable
+//! keychain and the security tradeoff is acceptable.
 //!
 //! # Setup
 //!
