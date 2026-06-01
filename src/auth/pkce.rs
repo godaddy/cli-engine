@@ -4,8 +4,9 @@
 //! Tokens are stored in the system keychain via the `keyring` crate.
 //! On headless or WSL environments where a keychain daemon is unavailable, an
 //! opt-in file fallback can be enabled with `PkceAuthProvider::with_file_fallback`;
-//! tokens are then written as **unencrypted JSON** under
-//! `$XDG_CONFIG_HOME/<app>/<provider>/credentials/` (mode `0600` on Unix).
+//! tokens are then written as **unencrypted JSON** to
+//! `<config-base>/<app>/credentials/<provider>-<env>.json` (mode `0600` on Unix),
+//! where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
 //! Only enable the fallback when the deployment environment lacks a reliable
 //! keychain and the security tradeoff is acceptable.
 //!
@@ -297,17 +298,19 @@ impl PkceAuthProvider {
                     // don't repeat the warning and fall through to re-auth.
                     let svc = service.clone();
                     let usr = self.keychain_user().to_owned();
-                    drop(
-                        tokio::task::spawn_blocking(move || {
-                            if let Ok(entry) = keyring::Entry::new(&svc, &usr)
-                                && let Err(e) = entry.delete_credential()
-                                && !matches!(e, keyring::Error::NoEntry)
-                            {
-                                tracing::warn!(service = %svc, error = %e, "failed to self-heal corrupt keychain entry");
-                            }
-                        })
-                        .await,
-                    );
+                    if let Err(e) = tokio::task::spawn_blocking(move || {
+                        if let Ok(entry) = keyring::Entry::new(&svc, &usr)
+                            && let Err(e) = entry.delete_credential()
+                            && !matches!(e, keyring::Error::NoEntry)
+                        {
+                            tracing::warn!(service = %svc, error = %e, "failed to self-heal corrupt keychain entry");
+                        }
+                    })
+                    .await
+                    {
+                        let reason = if e.is_cancelled() { "cancelled" } else { "panicked" };
+                        tracing::warn!(service, error = %e, reason, "keychain self-heal task failed");
+                    }
                 }
             }
         }
