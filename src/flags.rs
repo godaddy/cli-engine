@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::io::IsTerminal;
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
 
@@ -193,18 +194,65 @@ pub fn register_global_flags(command: Command) -> Command {
         )
 }
 
+/// Resolves the default output format when the user gave no explicit format.
+///
+/// Precedence here is env-override first, then a TTY policy: an interactive
+/// terminal gets human-friendly output, everything else (pipes, files, CI,
+/// most agents) gets machine-readable JSON. Pure so it can be unit-tested
+/// without a real terminal.
 #[must_use]
-/// Extracts framework-global flags from parsed `clap` matches.
-pub fn global_flags_from_matches(matches: &ArgMatches) -> GlobalFlags {
+pub fn resolve_default_output_format(env_override: Option<&str>, is_tty: bool) -> String {
+    match env_override {
+        Some(value) if !value.trim().is_empty() => value.trim().to_owned(),
+        _ if is_tty => "human".to_owned(),
+        _ => "json".to_owned(),
+    }
+}
+
+/// Derives the per-application output-format override env var from an app id,
+/// e.g. `godaddy` -> `GODADDY_OUTPUT`, `gdx` -> `GDX_OUTPUT`.
+#[must_use]
+pub fn output_env_var(app_id: &str) -> String {
+    let sanitized: String = app_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{sanitized}_OUTPUT")
+}
+
+/// Computes the default output format for `app_id`, consulting the
+/// `${APP_ID}_OUTPUT` env override and whether stdout is an interactive
+/// terminal. Used as the fallback when no explicit `--output`/`--json`/
+/// `--toon`/`--human` is given.
+#[must_use]
+pub fn default_output_format(app_id: &str) -> String {
+    let env = std::env::var(output_env_var(app_id)).ok();
+    resolve_default_output_format(env.as_deref(), std::io::stdout().is_terminal())
+}
+
+#[must_use]
+/// Extracts framework-global flags from parsed `clap` matches, falling back to
+/// `default_format` when the user gave no explicit output format.
+pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> GlobalFlags {
     let output_format = if matches.get_flag("toon") {
         "toon".to_owned()
     } else if matches.get_flag("human") {
         "human".to_owned()
-    } else {
+    } else if matches.get_flag("json") {
+        "json".to_owned()
+    } else if matches.value_source("output") == Some(clap::parser::ValueSource::CommandLine) {
         matches
             .get_one::<String>("output")
             .cloned()
-            .unwrap_or_else(|| "json".to_owned())
+            .unwrap_or_else(|| default_format.to_owned())
+    } else {
+        default_format.to_owned()
     };
 
     GlobalFlags {
@@ -269,14 +317,16 @@ pub fn extract_search_query(args: &[impl AsRef<str>]) -> String {
 /// Extracts output format from raw args.
 ///
 /// Recognizes `--output <format>` / `-o <format>` / `--output=<format>`,
-/// plus `--json`, `--toon`, and `--human` as shorthand for their respective formats.
-pub fn extract_output_format(args: &[impl AsRef<str>]) -> String {
+/// plus `--json`, `--toon`, and `--human` as shorthand for their respective
+/// formats. Falls back to `default_format` when none is present.
+pub fn extract_output_format(args: &[impl AsRef<str>], default_format: &str) -> String {
     for index in 0..args.len() {
         let arg = args[index].as_ref();
         if arg == "--output" || arg == "-o" {
-            return args
-                .get(index + 1)
-                .map_or_else(|| "json".to_owned(), |value| value.as_ref().to_owned());
+            return args.get(index + 1).map_or_else(
+                || default_format.to_owned(),
+                |value| value.as_ref().to_owned(),
+            );
         }
         if let Some(value) = arg.strip_prefix("--output=") {
             return value.to_owned();
@@ -291,7 +341,7 @@ pub fn extract_output_format(args: &[impl AsRef<str>]) -> String {
             return "human".to_owned();
         }
     }
-    "json".to_owned()
+    default_format.to_owned()
 }
 
 #[must_use]
@@ -417,5 +467,30 @@ fn arg_requires_value(arg: &Arg) -> bool {
         _ => arg
             .get_num_args()
             .is_some_and(|range| range.takes_values() && range.min_values() > 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{output_env_var, resolve_default_output_format};
+
+    #[test]
+    fn default_output_format_follows_tty_then_env_override() {
+        // TTY policy when no env override.
+        assert_eq!(resolve_default_output_format(None, true), "human");
+        assert_eq!(resolve_default_output_format(None, false), "json");
+        // Env override wins over the TTY policy in both directions.
+        assert_eq!(resolve_default_output_format(Some("json"), true), "json");
+        assert_eq!(resolve_default_output_format(Some("human"), false), "human");
+        // Blank/empty env override is ignored.
+        assert_eq!(resolve_default_output_format(Some("   "), false), "json");
+        assert_eq!(resolve_default_output_format(Some(""), true), "human");
+    }
+
+    #[test]
+    fn output_env_var_is_derived_from_app_id() {
+        assert_eq!(output_env_var("godaddy"), "GODADDY_OUTPUT");
+        assert_eq!(output_env_var("gdx"), "GDX_OUTPUT");
+        assert_eq!(output_env_var("my-cli"), "MY_CLI_OUTPUT");
     }
 }

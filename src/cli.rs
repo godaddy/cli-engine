@@ -24,21 +24,22 @@ use crate::{
     },
     error::exit_code_for_error,
     flags::{
-        GlobalFlags, derive_bool_flags, derive_value_flags, extract_command_path,
-        extract_output_format, extract_search_query, global_flags_from_matches,
-        has_true_schema_flag, register_global_flags,
+        GlobalFlags, default_output_format, derive_bool_flags, derive_value_flags,
+        extract_command_path, extract_output_format, extract_search_query,
+        global_flags_from_matches, has_true_schema_flag, register_global_flags,
     },
     guide::guide_content,
     module::{Module, ModuleContext},
     output::{
-        HumanViewDef, SchemaRegistry, format_help_section, global_human_view_registry_snapshot,
-        global_schema_registry_snapshot,
+        HumanViewDef, NextAction, SchemaRegistry, format_help_section,
+        global_human_view_registry_snapshot, global_schema_registry_snapshot,
     },
     search::{SearchDocument, SearchIndex},
 };
 
 use builtins::{guide_args, guide_command, help_args, help_command};
-pub use help::{ModuleHelpEntry, build_root_long};
+use help::{GROUP_HELP_TEMPLATE, ROOT_HELP_TEMPLATE};
+pub use help::{ModuleHelpEntry, build_root_long, render_next_actions_human};
 
 /// Build metadata shown by the root `--version` flag.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -105,6 +106,15 @@ pub type ResolveMeta = Arc<dyn Fn(&str, CommandMeta) -> CommandMeta + Send + Syn
 pub type OnShutdown = Arc<dyn Fn() + Send + Sync>;
 /// Hook that contributes extra root-scope `--search` documents.
 pub type ExtraSearchDocs = Arc<dyn Fn() -> Vec<SearchDocument> + Send + Sync>;
+/// Hook that supplies the suggested next actions shown when the CLI is invoked
+/// with no subcommand (bare root). The same actions drive a human "Next actions"
+/// section and the JSON discovery envelope.
+pub type RootNextActions = Arc<dyn Fn() -> Vec<NextAction> + Send + Sync>;
+
+/// Default name for the admin help category, under which the engine files the
+/// built-in `auth` command when a consumer does not override it via
+/// [`CliConfig::with_admin_category`].
+const DEFAULT_ADMIN_CATEGORY: &str = "Admin";
 
 /// Declarative configuration for a CLI application.
 ///
@@ -155,6 +165,13 @@ pub struct CliConfig {
     pub on_shutdown: Option<OnShutdown>,
     /// Optional root-scope search document provider.
     pub extra_search_docs: Option<ExtraSearchDocs>,
+    /// Optional provider for the bare-root suggested next actions.
+    pub root_next_actions: Option<RootNextActions>,
+    /// Name of the admin help category. The engine files its built-in `auth`
+    /// command under this heading; apps should use the same name for their own
+    /// admin modules (e.g. godaddy's `env`). When unset, defaults to `"Admin"`;
+    /// set it to match a consumer's own taxonomy (e.g. gdx's "Administration").
+    pub admin_category: Option<String>,
 }
 
 impl CliConfig {
@@ -312,6 +329,22 @@ impl CliConfig {
         self.extra_search_docs = Some(extra_search_docs);
         self
     }
+
+    /// Sets the provider for the bare-root suggested next actions.
+    #[must_use]
+    pub fn with_root_next_actions(mut self, root_next_actions: RootNextActions) -> Self {
+        self.root_next_actions = Some(root_next_actions);
+        self
+    }
+
+    /// Sets the name of the admin help category. The engine files the built-in
+    /// `auth` command there; apps should use the same name for their own admin
+    /// modules (e.g. godaddy's `env`). Optional: defaults to `"Admin"`.
+    #[must_use]
+    pub fn with_admin_category(mut self, category: impl Into<String>) -> Self {
+        self.admin_category = Some(category.into());
+        self
+    }
 }
 
 impl std::fmt::Debug for CliConfig {
@@ -339,6 +372,8 @@ impl std::fmt::Debug for CliConfig {
             .field("has_meta_resolver", &self.meta_resolver.is_some())
             .field("has_on_shutdown", &self.on_shutdown.is_some())
             .field("has_extra_search_docs", &self.extra_search_docs.is_some())
+            .field("has_root_next_actions", &self.root_next_actions.is_some())
+            .field("admin_category", &self.admin_category)
             .finish()
     }
 }
@@ -380,6 +415,7 @@ pub struct Cli {
     meta_resolver: Option<ResolveMeta>,
     on_shutdown: Option<OnShutdown>,
     extra_search_docs: Option<ExtraSearchDocs>,
+    root_next_actions: Option<RootNextActions>,
     init_state: Arc<Mutex<Option<std::result::Result<Middleware, InitFailure>>>>,
 }
 
@@ -437,6 +473,7 @@ impl std::fmt::Debug for Cli {
             .field("has_meta_resolver", &self.meta_resolver.is_some())
             .field("has_on_shutdown", &self.on_shutdown.is_some())
             .field("has_extra_search_docs", &self.extra_search_docs.is_some())
+            .field("has_root_next_actions", &self.root_next_actions.is_some())
             .finish()
     }
 }
@@ -456,6 +493,7 @@ impl Cli {
         let meta_resolver = config.meta_resolver.clone();
         let on_shutdown = config.on_shutdown.clone();
         let extra_search_docs = config.extra_search_docs.clone();
+        let root_next_actions = config.root_next_actions.clone();
         let mut root = Command::new(config.name.clone())
             .about(config.short.clone())
             .disable_help_subcommand(true)
@@ -477,7 +515,9 @@ impl Cli {
             .as_deref()
             .filter(|long| !long.is_empty())
             .unwrap_or(config.short.as_str());
-        root = root.long_about(build_root_long(intro, &[], false));
+        root = root
+            .long_about(build_root_long(intro, &[], false))
+            .help_template(ROOT_HELP_TEMPLATE);
 
         let mut middleware = Middleware::new();
         middleware.app_id = config.app_id.clone();
@@ -505,6 +545,7 @@ impl Cli {
             meta_resolver,
             on_shutdown,
             extra_search_docs,
+            root_next_actions,
             init_state: Arc::new(Mutex::new(None)),
         };
         for provider in auth_providers {
@@ -528,7 +569,40 @@ impl Cli {
         for command in commands {
             cli.add_command(command);
         }
+        // Registered last so `auth` appends to its category after module-defined
+        // entries, preserving the consumer's category ordering.
+        cli.register_auth_help_entry();
         cli
+    }
+
+    /// Lists the auto-registered `auth` command under the admin help category so
+    /// it is never uncategorized once clap's auto subcommand list is suppressed.
+    /// Defaults to [`DEFAULT_ADMIN_CATEGORY`]; `admin_category` overrides it to
+    /// align with a consumer's own taxonomy.
+    fn register_auth_help_entry(&mut self) {
+        let category = self
+            .config
+            .admin_category
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ADMIN_CATEGORY.to_owned());
+        let already_listed = self.module_entries.iter().any(|entry| entry.name == "auth");
+        let short = self
+            .root
+            .find_subcommand("auth")
+            .filter(|auth| !auth.is_hide_set())
+            .map(|auth| {
+                auth.get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            });
+        if !already_listed && let Some(short) = short {
+            self.module_entries.push(ModuleHelpEntry {
+                category,
+                name: "auth".to_owned(),
+                short,
+            });
+        }
+        self.refresh_root_long();
     }
 
     /// Returns the shared middleware template.
@@ -759,7 +833,8 @@ impl Cli {
             }
         };
 
-        let flags = global_flags_from_matches(&matches);
+        let default_format = default_output_format(&self.config.app_id);
+        let flags = global_flags_from_matches(&matches, &default_format);
         let command_timeout = match parse_command_timeout(&flags.timeout) {
             Ok(timeout) => timeout,
             Err(err) => {
@@ -826,6 +901,23 @@ impl Cli {
                     exit_code: 0,
                     rendered: group.clone().render_long_help().to_string(),
                 });
+            }
+            if command_path.is_empty()
+                && let Some(root_next_actions) = &self.root_next_actions
+            {
+                if let Err(err) = self.run_pre_run(
+                    &mut middleware,
+                    &command_path,
+                    &crate::middleware::ValueMap::new(),
+                ) {
+                    return self.finish_run(render_cli_error(
+                        &middleware,
+                        &err,
+                        &self.config.app_id,
+                    ));
+                }
+                let actions = root_next_actions();
+                return self.finish_run(self.render_root(&middleware, actions));
             }
             return self.finish_run(CliRunOutput {
                 exit_code: if command_path.is_empty() { 0 } else { 1 },
@@ -930,7 +1022,8 @@ impl Cli {
             return None;
         }
         let scope = self.search_scope(args);
-        let output_format = extract_output_format(args);
+        let output_format =
+            extract_output_format(args, &default_output_format(&self.config.app_id));
         Some(self.render_search(&query, &scope, &output_format))
     }
 
@@ -943,7 +1036,8 @@ impl Cli {
         let command_path =
             self.canonical_command_path(&extract_command_path(args, &bool_flags, &value_flags));
         let schema = self.middleware.schema_registry.get_by_path(&command_path)?;
-        let output_format = extract_output_format(args);
+        let output_format =
+            extract_output_format(args, &default_output_format(&self.config.app_id));
         Some(self.render_schema(schema, &output_format))
     }
 
@@ -989,6 +1083,67 @@ impl Cli {
         let results = SearchIndex::new(docs).search(query, 10);
         let envelope =
             crate::Envelope::success(results, self.config.app_id.clone()).prepare_for_render("");
+        match crate::output::render(format, &envelope) {
+            Ok(rendered) => CliRunOutput {
+                exit_code: 0,
+                rendered,
+            },
+            Err(err) => CliRunOutput {
+                exit_code: exit_code_for_error(&err),
+                rendered: err.to_string(),
+            },
+        }
+    }
+
+    /// Renders the bare-root response. For human output, renders long help plus
+    /// a "Next actions" section so a human invoking the CLI with no arguments
+    /// gets readable guidance; for machine-readable output, emits a discovery
+    /// envelope (light metadata + next actions). The output format has already
+    /// resolved the TTY/env/flag policy, so this just branches on it.
+    fn render_root(&self, middleware: &Middleware, actions: Vec<NextAction>) -> CliRunOutput {
+        let format: crate::output::OutputFormat = match middleware.output_format.parse() {
+            Ok(format) => format,
+            Err(err) => {
+                return CliRunOutput {
+                    exit_code: exit_code_for_error(&err),
+                    rendered: err.to_string(),
+                };
+            }
+        };
+        if format == crate::output::OutputFormat::Human {
+            // Fold the suggested actions into the root long-about so they render
+            // alongside the other curated sections (before Usage) instead of
+            // dangling beneath clap's options dump.
+            let base_long = self
+                .root
+                .get_long_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let long = format!("{base_long}{}", render_next_actions_human(&actions));
+            let rendered = self
+                .root
+                .clone()
+                .long_about(long)
+                .render_long_help()
+                .to_string();
+            return CliRunOutput {
+                exit_code: 0,
+                rendered,
+            };
+        }
+        let description = self
+            .config
+            .long
+            .as_deref()
+            .filter(|long| !long.is_empty())
+            .unwrap_or(self.config.short.as_str());
+        let data = serde_json::json!({
+            "description": description,
+            "version": self.config.build.version,
+        });
+        let envelope = crate::Envelope::success(data, self.config.app_id.clone())
+            .with_next_actions(actions)
+            .prepare_for_render(&middleware.verbose);
         match crate::output::render(format, &envelope) {
             Ok(rendered) => CliRunOutput {
                 exit_code: 0,
@@ -1081,17 +1236,46 @@ impl Cli {
     }
 
     fn refresh_root_long(&mut self) {
+        // Module-categorized entries, plus any visible top-level command that is
+        // neither categorized nor an engine built-in, listed under a generic
+        // "Commands" section. This keeps every command discoverable once clap's
+        // auto subcommand list is suppressed by the root help template.
+        const BUILTINS: [&str; 4] = ["help", "guide", "tree", "completion"];
+        let categorized: BTreeSet<&str> = self
+            .module_entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        let mut generic: Vec<ModuleHelpEntry> = self
+            .root
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set())
+            .filter(|command| !BUILTINS.contains(&command.get_name()))
+            .filter(|command| !categorized.contains(command.get_name()))
+            .map(|command| ModuleHelpEntry {
+                category: "Commands".to_owned(),
+                name: command.get_name().to_owned(),
+                short: command
+                    .get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+            })
+            .collect();
+        generic.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let mut entries = self.module_entries.clone();
+        entries.extend(generic);
+        let has_guide = !self.guide_entries.is_empty() || has_subcommand(&self.root, "guide");
         let intro = self
             .config
             .long
             .as_deref()
             .filter(|long| !long.is_empty())
             .unwrap_or(self.config.short.as_str());
-        self.root = self.root.clone().long_about(build_root_long(
-            intro,
-            &self.module_entries,
-            !self.guide_entries.is_empty() || has_subcommand(&self.root, "guide"),
-        ));
+        self.root = self
+            .root
+            .clone()
+            .long_about(build_root_long(intro, &entries, has_guide));
     }
 
     fn ensure_auth_command(&mut self) {
@@ -1716,7 +1900,9 @@ fn runtime_group_clap_command_with_schema_help(
 }
 
 fn group_clap_command_without_children(group: &GroupSpec) -> Command {
-    let mut command = Command::new(group.name.clone()).about(group.short.clone());
+    let mut command = Command::new(group.name.clone())
+        .about(group.short.clone())
+        .help_template(GROUP_HELP_TEMPLATE);
     if let Some(long) = &group.long
         && !long.is_empty()
     {

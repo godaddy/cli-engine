@@ -144,7 +144,7 @@ fn parsed_global_flags_cover_defaults_short_aliases_and_optional_values() {
         "project:list"
     );
     assert_eq!(
-        global_flags_from_matches(&matches),
+        global_flags_from_matches(&matches, "json"),
         GlobalFlags {
             output_format: "toon".to_owned(),
             verbose: "all".to_owned(),

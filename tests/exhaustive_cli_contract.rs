@@ -34,7 +34,7 @@ fn global_bool_flags_accept_full_documented_bool_matrix() {
         let matches = parser().try_get_matches_from(args);
         assert!(matches.is_ok(), "true value {value:?} should parse");
         let matches = matches.expect("checked ok");
-        let flags = global_flags_from_matches(&matches);
+        let flags = global_flags_from_matches(&matches, "json");
         assert!(flags.schema, "schema value {value:?}");
         assert!(flags.dry_run, "dry-run value {value:?}");
     }
@@ -49,7 +49,7 @@ fn global_bool_flags_accept_full_documented_bool_matrix() {
         let matches = parser().try_get_matches_from(args);
         assert!(matches.is_ok(), "false value {value:?} should parse");
         let matches = matches.expect("checked ok");
-        let flags = global_flags_from_matches(&matches);
+        let flags = global_flags_from_matches(&matches, "json");
         assert!(!flags.schema, "schema value {value:?}");
         assert!(!flags.dry_run, "dry-run value {value:?}");
     }
@@ -61,8 +61,8 @@ fn global_optional_value_flags_have_missing_value_defaults() {
         .try_get_matches_from(["my-cli", "--verbose", "--debug"])
         .expect("optional flags should accept omitted values");
     assert_eq!(command_path_from_matches("my-cli", &matches), "");
-    assert_eq!(global_flags_from_matches(&matches).verbose, "all");
-    assert_eq!(global_flags_from_matches(&matches).debug, "*");
+    assert_eq!(global_flags_from_matches(&matches, "json").verbose, "all");
+    assert_eq!(global_flags_from_matches(&matches, "json").debug, "*");
 }
 
 #[test]

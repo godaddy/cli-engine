@@ -3423,32 +3423,35 @@ fn raw_search_and_output_extraction_matches_legacy_bypass_helpers() {
     assert_eq!(extract_search_query(&["my-cli", "--search"]), "");
 
     assert_eq!(
-        extract_output_format(&["my-cli", "-o", "json", "--search", "foo"]),
+        extract_output_format(&["my-cli", "-o", "json", "--search", "foo"], "json"),
         "json"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "--output=human", "--search", "foo"]),
+        extract_output_format(&["my-cli", "--output=human", "--search", "foo"], "json"),
         "human"
     );
-    assert_eq!(extract_output_format(&["my-cli", "--output"]), "json");
     assert_eq!(
-        extract_output_format(&["my-cli", "--search", "foo"]),
+        extract_output_format(&["my-cli", "--output"], "json"),
         "json"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "project", "list", "--json"]),
+        extract_output_format(&["my-cli", "--search", "foo"], "json"),
         "json"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "project", "list", "--toon"]),
+        extract_output_format(&["my-cli", "project", "list", "--json"], "json"),
+        "json"
+    );
+    assert_eq!(
+        extract_output_format(&["my-cli", "project", "list", "--toon"], "json"),
         "toon"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "--toon", "project", "list"]),
+        extract_output_format(&["my-cli", "--toon", "project", "list"], "json"),
         "toon"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "project", "list", "--human"]),
+        extract_output_format(&["my-cli", "project", "list", "--human"], "json"),
         "human"
     );
 
@@ -8749,6 +8752,55 @@ impl AuthProvider for FakeProvider {
             Ok(self.environments.clone())
         }
     }
+}
+
+#[tokio::test]
+async fn auth_command_is_listed_under_configured_help_category() {
+    let module = Module::new("Workflows", |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects"))
+    });
+    let cli = Cli::new(
+        CliConfig::new("my-cli", "Dev tooling", "my-cli")
+            .with_auth_provider(Arc::new(FakeProvider::new("primary", "me")))
+            .with_default_auth_provider("primary")
+            .with_admin_category("Account")
+            .with_module(module),
+    );
+
+    // No discovery hook, so bare invocation renders the root long help.
+    let bare = cli.run(["my-cli"]).await;
+    // `auth` is folded into the curated category list (it would otherwise be
+    // visible only via clap's auto subcommand list, which the root template
+    // suppresses).
+    assert!(bare.rendered.contains("Account:"), "{}", bare.rendered);
+    assert!(bare.rendered.contains("auth"), "{}", bare.rendered);
+    // The root help template drops the global options wall.
+    assert!(!bare.rendered.contains("--fields"), "{}", bare.rendered);
+}
+
+#[tokio::test]
+async fn auth_command_uses_baked_in_default_category_without_override() {
+    let module = Module::new("Workflows", |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects"))
+    });
+    let cli = Cli::new(
+        CliConfig::new("my-cli", "Dev tooling", "my-cli")
+            .with_auth_provider(Arc::new(FakeProvider::new("primary", "me")))
+            .with_default_auth_provider("primary")
+            // No with_admin_category: auth gets the baked-in default category.
+            .with_module(module),
+    );
+
+    let bare = cli.run(["my-cli"]).await;
+    // Baked-in default category ("Admin"), not a generic "Commands" bucket.
+    assert!(bare.rendered.contains("Admin:"), "{}", bare.rendered);
+    assert!(bare.rendered.contains("auth"), "{}", bare.rendered);
+    // No generic "Commands:" heading (distinct from the built-in "Find Commands:").
+    assert!(
+        !bare.rendered.contains("\n  Commands:"),
+        "{}",
+        bare.rendered
+    );
 }
 
 #[derive(Debug)]
