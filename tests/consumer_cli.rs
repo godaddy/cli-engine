@@ -252,6 +252,22 @@ async fn bare_invocation_emits_discovery_envelope_for_explicit_json() {
 }
 
 #[tokio::test]
+async fn bare_invocation_rejects_invalid_output_format() {
+    let cli = consumer_cli_with_root_actions();
+
+    // An unrecognized explicit `--output` must error on the bare-root discovery
+    // path just as it does for a normal command, rather than silently coercing
+    // to JSON.
+    let bare = cli.run(["my-cli", "--output", "yaml"]).await;
+    assert_ne!(bare.exit_code, 0, "{}", bare.rendered);
+    assert!(
+        bare.rendered.contains("invalid output format"),
+        "{}",
+        bare.rendered
+    );
+}
+
+#[tokio::test]
 async fn bare_invocation_without_hook_falls_back_to_long_help() {
     let cli = consumer_cli();
 

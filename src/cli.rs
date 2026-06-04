@@ -1091,15 +1091,21 @@ impl Cli {
     /// envelope (light metadata + next actions). The output format has already
     /// resolved the TTY/env/flag policy, so this just branches on it.
     fn render_root(&self, middleware: &Middleware, actions: Vec<NextAction>) -> CliRunOutput {
-        let format: crate::output::OutputFormat = match middleware.output_format.parse() {
-            Ok(format) => format,
-            Err(err) => {
-                return CliRunOutput {
-                    exit_code: exit_code_for_error(&err),
-                    rendered: err.to_string(),
-                };
-            }
-        };
+        // Reject an invalid explicit `--output` here too, matching the normal
+        // command path (`Middleware::render_envelope`). `OutputFormat::from_str`
+        // is infallible and would otherwise silently coerce an unrecognized
+        // value (e.g. `--output yaml`) to JSON instead of reporting the error.
+        if !crate::output::is_valid_output_format(&middleware.output_format) {
+            let err = CliCoreError::InvalidOutputFormat(middleware.output_format.clone());
+            return CliRunOutput {
+                exit_code: exit_code_for_error(&err),
+                rendered: err.to_string(),
+            };
+        }
+        let format = middleware
+            .output_format
+            .parse()
+            .unwrap_or(crate::output::OutputFormat::Json);
         if format == crate::output::OutputFormat::Human {
             // Fold the suggested actions into the root long-about so they render
             // alongside the other curated sections (before Usage) instead of
