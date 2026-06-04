@@ -569,9 +569,6 @@ impl Cli {
         for command in commands {
             cli.add_command(command);
         }
-        // Registered last so `auth` appends to its category after module-defined
-        // entries, preserving the consumer's category ordering.
-        cli.register_auth_help_entry();
         cli
     }
 
@@ -905,17 +902,10 @@ impl Cli {
             if command_path.is_empty()
                 && let Some(root_next_actions) = &self.root_next_actions
             {
-                if let Err(err) = self.run_pre_run(
-                    &mut middleware,
-                    &command_path,
-                    &crate::middleware::ValueMap::new(),
-                ) {
-                    return self.finish_run(render_cli_error(
-                        &middleware,
-                        &err,
-                        &self.config.app_id,
-                    ));
-                }
+                // Bare-root discovery is static (help text / metadata + action
+                // pointers) and must always be available as a cold-start entry
+                // point, so we skip `pre_run` here — matching the no-hook
+                // bare-root path below, which also renders help without it.
                 let actions = root_next_actions();
                 return self.finish_run(self.render_root(&middleware, actions));
             }
@@ -1302,6 +1292,10 @@ impl Cli {
         } else {
             self.root.clone().subcommand(clap_group)
         };
+        // Categorize `auth` wherever it is ensured (construction or a later
+        // `register_auth_provider`), so it never falls into the generic
+        // "Commands" bucket. Idempotent via the `already_listed` guard.
+        self.register_auth_help_entry();
     }
 
     fn default_auth_provider(&self) -> String {

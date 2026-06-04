@@ -8803,6 +8803,27 @@ async fn auth_command_uses_baked_in_default_category_without_override() {
     );
 }
 
+#[tokio::test]
+async fn auth_registered_after_construction_is_categorized() {
+    let module = Module::new("Workflows", |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects"))
+    });
+    // Built with no auth provider; one is added post-construction.
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli").with_module(module));
+    cli.register_auth_provider(Arc::new(FakeProvider::new("primary", "me")));
+
+    let bare = cli.run(["my-cli"]).await;
+    // `auth` added by the later provider is still filed under the admin
+    // category, not the generic "Commands" bucket.
+    assert!(bare.rendered.contains("Admin:"), "{}", bare.rendered);
+    assert!(bare.rendered.contains("auth"), "{}", bare.rendered);
+    assert!(
+        !bare.rendered.contains("\n  Commands:"),
+        "{}",
+        bare.rendered
+    );
+}
+
 #[derive(Debug)]
 struct RecordingEnvProvider {
     envs: Arc<Mutex<Vec<String>>>,

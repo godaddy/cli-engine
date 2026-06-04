@@ -202,11 +202,16 @@ pub fn register_global_flags(command: Command) -> Command {
 /// without a real terminal.
 #[must_use]
 pub fn resolve_default_output_format(env_override: Option<&str>, is_tty: bool) -> String {
-    match env_override {
-        Some(value) if !value.trim().is_empty() => value.trim().to_owned(),
-        _ if is_tty => "human".to_owned(),
-        _ => "json".to_owned(),
+    if let Some(value) = env_override {
+        // Normalize case (env vars are commonly upper/mixed case) and ignore
+        // blank or unrecognized values, so a stray or miscased override can't
+        // break all command output — only a valid format is honored.
+        let normalized = value.trim().to_ascii_lowercase();
+        if crate::output::is_valid_output_format(&normalized) {
+            return normalized;
+        }
     }
+    if is_tty { "human" } else { "json" }.to_owned()
 }
 
 /// Derives the per-application output-format override env var from an app id,
@@ -475,16 +480,24 @@ mod tests {
     use super::{output_env_var, resolve_default_output_format};
 
     #[test]
-    fn default_output_format_follows_tty_then_env_override() {
+    fn default_output_format_follows_env_override_then_tty() {
         // TTY policy when no env override.
         assert_eq!(resolve_default_output_format(None, true), "human");
         assert_eq!(resolve_default_output_format(None, false), "json");
-        // Env override wins over the TTY policy in both directions.
+        // A valid env override wins over the TTY policy in both directions.
         assert_eq!(resolve_default_output_format(Some("json"), true), "json");
         assert_eq!(resolve_default_output_format(Some("human"), false), "human");
-        // Blank/empty env override is ignored.
+        // Env override is case-insensitive (env vars are commonly upper-cased).
+        assert_eq!(resolve_default_output_format(Some("JSON"), true), "json");
+        assert_eq!(
+            resolve_default_output_format(Some(" Human "), false),
+            "human"
+        );
+        // Blank or unrecognized env overrides are ignored (fall back to TTY).
         assert_eq!(resolve_default_output_format(Some("   "), false), "json");
         assert_eq!(resolve_default_output_format(Some(""), true), "human");
+        assert_eq!(resolve_default_output_format(Some("yaml"), false), "json");
+        assert_eq!(resolve_default_output_format(Some("yaml"), true), "human");
     }
 
     #[test]
