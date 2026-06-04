@@ -3455,6 +3455,24 @@ fn raw_search_and_output_extraction_matches_legacy_bypass_helpers() {
         "human"
     );
 
+    // When no format token is present, the supplied default is returned (a
+    // non-"json" default makes this distinct from a hardcoded fallback). A bare
+    // `--output` with no value behaves the same way.
+    assert_eq!(extract_output_format(&["my-cli"], "human"), "human");
+    assert_eq!(
+        extract_output_format(&["my-cli", "--search", "foo"], "toon"),
+        "toon"
+    );
+    assert_eq!(
+        extract_output_format(&["my-cli", "--output"], "human"),
+        "human"
+    );
+    // An explicit format still wins over the default.
+    assert_eq!(
+        extract_output_format(&["my-cli", "--human"], "json"),
+        "human"
+    );
+
     assert!(has_true_schema_flag(&["my-cli", "release", "--schema"]));
     assert!(has_true_schema_flag(&[
         "my-cli",

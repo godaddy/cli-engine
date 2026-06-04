@@ -66,6 +66,46 @@ fn global_optional_value_flags_have_missing_value_defaults() {
 }
 
 #[test]
+fn output_format_falls_back_to_default_when_not_given_explicitly() {
+    // With no explicit format flag, the resolved `default_format` must win.
+    // `--output` carries a clap `default_value("json")`, so this guards the
+    // `value_source == CommandLine` gate: a non-explicit default value must not
+    // be mistaken for a user-supplied `--output`, which would otherwise pin the
+    // format to "json" and defeat the TTY/env-aware default. A non-"json"
+    // default makes the distinction observable.
+    let matches = parser()
+        .try_get_matches_from(["my-cli"])
+        .expect("bare invocation parses");
+    assert_eq!(
+        global_flags_from_matches(&matches, "human").output_format,
+        "human"
+    );
+    assert_eq!(
+        global_flags_from_matches(&matches, "toon").output_format,
+        "toon"
+    );
+
+    // An explicit `--output`/shorthand overrides the default in every case.
+    let explicit = parser()
+        .try_get_matches_from(["my-cli", "--output", "toon"])
+        .expect("explicit output parses");
+    assert_eq!(
+        global_flags_from_matches(&explicit, "human").output_format,
+        "toon"
+    );
+    for (flag, expected) in [("--json", "json"), ("--toon", "toon"), ("--human", "human")] {
+        let matches = parser()
+            .try_get_matches_from(["my-cli", flag])
+            .expect("shorthand flag parses");
+        assert_eq!(
+            global_flags_from_matches(&matches, "human").output_format,
+            expected,
+            "{flag} shorthand should win over the default"
+        );
+    }
+}
+
+#[test]
 fn global_flags_reject_invalid_bool_and_numeric_inputs() {
     for args in [
         ["my-cli", "--schema=maybe"].as_slice(),
