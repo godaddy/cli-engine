@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.1.2...cli-engine-v0.1.3) (2026-06-05)
+
+
+### Features
+
+* agent-first root discovery, curated help, and TTY-aware output (DEVEX-695) ([#13](https://github.com/godaddy/cli-engine/issues/13)) ([791b335](https://github.com/godaddy/cli-engine/commit/791b335f8ec182ab8be4e2d29364fe27dc1aa8bf))
+
 ## [0.1.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.1.1...cli-engine-v0.1.2) (2026-06-01)
 
 
