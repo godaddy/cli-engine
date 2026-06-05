@@ -34,7 +34,7 @@ fn global_bool_flags_accept_full_documented_bool_matrix() {
         let matches = parser().try_get_matches_from(args);
         assert!(matches.is_ok(), "true value {value:?} should parse");
         let matches = matches.expect("checked ok");
-        let flags = global_flags_from_matches(&matches);
+        let flags = global_flags_from_matches(&matches, "json");
         assert!(flags.schema, "schema value {value:?}");
         assert!(flags.dry_run, "dry-run value {value:?}");
     }
@@ -49,7 +49,7 @@ fn global_bool_flags_accept_full_documented_bool_matrix() {
         let matches = parser().try_get_matches_from(args);
         assert!(matches.is_ok(), "false value {value:?} should parse");
         let matches = matches.expect("checked ok");
-        let flags = global_flags_from_matches(&matches);
+        let flags = global_flags_from_matches(&matches, "json");
         assert!(!flags.schema, "schema value {value:?}");
         assert!(!flags.dry_run, "dry-run value {value:?}");
     }
@@ -61,8 +61,48 @@ fn global_optional_value_flags_have_missing_value_defaults() {
         .try_get_matches_from(["my-cli", "--verbose", "--debug"])
         .expect("optional flags should accept omitted values");
     assert_eq!(command_path_from_matches("my-cli", &matches), "");
-    assert_eq!(global_flags_from_matches(&matches).verbose, "all");
-    assert_eq!(global_flags_from_matches(&matches).debug, "*");
+    assert_eq!(global_flags_from_matches(&matches, "json").verbose, "all");
+    assert_eq!(global_flags_from_matches(&matches, "json").debug, "*");
+}
+
+#[test]
+fn output_format_falls_back_to_default_when_not_given_explicitly() {
+    // With no explicit format flag, the resolved `default_format` must win.
+    // `--output` carries a clap `default_value("json")`, so this guards the
+    // `value_source == CommandLine` gate: a non-explicit default value must not
+    // be mistaken for a user-supplied `--output`, which would otherwise pin the
+    // format to "json" and defeat the TTY/env-aware default. A non-"json"
+    // default makes the distinction observable.
+    let matches = parser()
+        .try_get_matches_from(["my-cli"])
+        .expect("bare invocation parses");
+    assert_eq!(
+        global_flags_from_matches(&matches, "human").output_format,
+        "human"
+    );
+    assert_eq!(
+        global_flags_from_matches(&matches, "toon").output_format,
+        "toon"
+    );
+
+    // An explicit `--output`/shorthand overrides the default in every case.
+    let explicit = parser()
+        .try_get_matches_from(["my-cli", "--output", "toon"])
+        .expect("explicit output parses");
+    assert_eq!(
+        global_flags_from_matches(&explicit, "human").output_format,
+        "toon"
+    );
+    for (flag, expected) in [("--json", "json"), ("--toon", "toon"), ("--human", "human")] {
+        let matches = parser()
+            .try_get_matches_from(["my-cli", flag])
+            .expect("shorthand flag parses");
+        assert_eq!(
+            global_flags_from_matches(&matches, "human").output_format,
+            expected,
+            "{flag} shorthand should win over the default"
+        );
+    }
 }
 
 #[test]

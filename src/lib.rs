@@ -94,7 +94,8 @@ pub use auth::{
 };
 pub use cli::{
     ApplyFlags, BuildInfo, Cli, CliConfig, CliRunOutput, ExtraSearchDocs, InitDeps,
-    ModuleHelpEntry, OnShutdown, PreRun, RegisterFlags, ResolveMeta, build_root_long,
+    ModuleHelpEntry, OnShutdown, PreRun, RegisterFlags, ResolveMeta, RootNextActions,
+    build_root_long,
 };
 pub use command::{
     CommandContext, CommandFuture, CommandHandler, CommandResult, CommandResultMetadata,
@@ -106,9 +107,9 @@ pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };
 pub use flags::{
-    GlobalFlags, derive_bool_flags, derive_value_flags, extract_command_path,
-    extract_output_format, extract_search_query, global_flags_from_matches, has_true_schema_flag,
-    register_global_flags,
+    GlobalFlags, default_output_format, derive_bool_flags, derive_value_flags,
+    extract_command_path, extract_output_format, extract_search_query, global_flags_from_matches,
+    has_true_schema_flag, output_env_var, register_global_flags, resolve_default_output_format,
 };
 pub use guide::{GuideEntry, parse_guides, parse_guides_from_markdown};
 pub use middleware::{
