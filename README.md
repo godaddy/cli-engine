@@ -73,6 +73,27 @@ let module = Module::new("Platform Systems", register).with_guides_from_markdown
 For large guide directories, applications can use an embedding crate or a `build.rs` generated
 manifest that produces the same `(path, bytes)` pairs.
 
+## Output formats
+
+Commands render as `json`, `toon`, or `human`. The default is **context-aware**:
+an interactive terminal gets `human` output, while pipes, files, CI, and most
+agents (anything where stdout is not a TTY) get `json`. The resolved format is
+chosen by this precedence (highest first):
+
+1. An explicit flag on the invocation — `--output <json|toon|human>`, or the
+   `--json` / `--toon` / `--human` shorthands.
+2. The `${APP_ID}_OUTPUT` environment variable (e.g. `GODADDY_OUTPUT=json`,
+   `GDX_OUTPUT=json`). The name is derived from the app id (upper-cased,
+   non-alphanumerics replaced with `_`). The value is case-insensitive; blank or
+   unrecognized values are ignored and fall through to the TTY policy.
+3. The TTY policy: `human` on an interactive terminal, `json` otherwise.
+
+This keeps a human at a terminal from getting a wall of JSON while machine
+callers still get JSON automatically. An agent running in a PTY (which reads as
+interactive) can force machine output with either the env variable or an
+explicit flag. Streaming commands always emit newline-delimited JSON regardless
+of the resolved format.
+
 ## Documentation
 
 - [Concepts](docs/concepts.md)
