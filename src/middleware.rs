@@ -396,7 +396,7 @@ impl Middleware {
             .to_owned();
         let resolver = CredentialResolver::new(
             self.auth.clone(),
-            provider_name,
+            provider_name.clone(),
             resolved_env,
             command_path.to_owned(),
             tier_text,
@@ -418,10 +418,18 @@ impl Middleware {
             // An authorizer may have resolved the credential to make its
             // decision; reflect whatever it resolved in audit identity.
             let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
-            let result_tag = if resolver.had_auth_error() {
+            let had_auth_error = resolver.had_auth_error();
+            let result_tag = if had_auth_error {
                 "auth-error"
             } else {
                 "denied"
+            };
+            // Attribute auth-provider failures to the provider so telemetry can
+            // distinguish them from command backends.
+            let backend = if had_auth_error {
+                provider_name.as_str()
+            } else {
+                command_path
             };
             self.write_audit(command_path, &args, identity, result_tag)
                 .await;
@@ -430,7 +438,7 @@ impl Middleware {
                 &args,
                 resolver.peek(),
                 result_tag,
-                command_path,
+                backend,
                 &err.to_string(),
                 start,
             )
@@ -484,10 +492,14 @@ impl Middleware {
                 // classifying it as `auth-error` so audits match the prior
                 // eager behavior.
                 let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
-                let (result_tag, error_system) = if resolver.had_auth_error() {
-                    ("auth-error", command_path)
+                let (result_tag, error_system, activity_backend) = if resolver.had_auth_error() {
+                    // Render against the command path, but attribute the activity
+                    // backend to the auth provider so telemetry can distinguish
+                    // auth-provider failures from command backends.
+                    ("auth-error", command_path, provider_name.as_str())
                 } else {
-                    ("error", err.system().unwrap_or(&command_system))
+                    let system = err.system().unwrap_or(&command_system);
+                    ("error", system, system)
                 };
                 self.write_audit(command_path, &args, identity, result_tag)
                     .await;
@@ -496,7 +508,7 @@ impl Middleware {
                     &args,
                     resolver.peek(),
                     result_tag,
-                    error_system,
+                    activity_backend,
                     &err.to_string(),
                     start,
                 )

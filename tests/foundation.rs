@@ -6823,6 +6823,38 @@ async fn middleware_auth_error_audits_and_renders() {
 }
 
 #[tokio::test]
+async fn middleware_auth_error_activity_attributes_provider_backend() {
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+
+    let _output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |credential: CredentialResolver| {
+                credential.resolve().await?;
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("auth errors are rendered into middleware output");
+
+    // Auth-provider failures attribute the activity backend to the provider
+    // name, not the command path, so telemetry can distinguish them.
+    assert_eq!(activity.statuses().await, vec!["auth-error"]);
+    assert_eq!(activity.backends().await, vec!["missing"]);
+}
+
+#[tokio::test]
 async fn middleware_schema_short_circuit_renders_registered_schema_after_auth() {
     #[derive(Debug)]
     struct Thing;
@@ -9579,6 +9611,15 @@ impl CaptureActivity {
             .await
             .iter()
             .map(|event| event.args.clone())
+            .collect()
+    }
+
+    async fn backends(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.backend.clone())
             .collect()
     }
 }
