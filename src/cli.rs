@@ -811,6 +811,10 @@ impl Cli {
         if let Some(output) = self.try_run_search_bypass(&text_args) {
             return output;
         }
+        if let Some(parts) = group_help_target_parts(&self.root, &text_args, &self.config.name) {
+            let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
+            return self.finish_run(self.render_help_for_parts(&parts));
+        }
         if let Some(message) =
             unknown_group_command_message(&self.root, &text_args, &self.config.name)
         {
@@ -1209,13 +1213,23 @@ impl Cli {
             .get_many::<String>("command")
             .map(|values| values.map(String::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
+        self.render_help_for_parts(&parts)
+    }
+
+    /// Renders the curated help text for a resolved command path.
+    ///
+    /// Empty `parts` render the root help. A path that resolves to a group or
+    /// command renders that command's long help; an unresolved path returns the
+    /// standard "unknown command" guidance with a non-zero exit code. Shared by
+    /// the root `help <path>` command and the `<group> help` subcommand form.
+    fn render_help_for_parts(&self, parts: &[&str]) -> CliRunOutput {
         if parts.is_empty() {
             return CliRunOutput {
                 exit_code: 0,
                 rendered: self.root.clone().render_long_help().to_string(),
             };
         }
-        let Some(command) = find_help_target(&self.root, &parts) else {
+        let Some(command) = find_help_target(&self.root, parts) else {
             return CliRunOutput {
                 exit_code: 1,
                 rendered: format!(
@@ -1796,6 +1810,46 @@ fn unknown_group_command_message(
         return None;
     }
     None
+}
+
+/// Detects the `<group> help [sub...]` form and returns the command path whose
+/// help should be rendered.
+///
+/// clap suppresses the per-command `help` subcommand because the root disables
+/// it (the engine ships a curated root `help` command instead). That setting
+/// propagates to every subcommand and cannot be re-enabled per child, so
+/// `<group> help` would otherwise hit clap's "unrecognized subcommand" error
+/// even though the group's help listing advertises a `help` entry. We recognize
+/// the form here and render help for the group directly, matching clap's
+/// documented equivalence between `cmd group help sub` and `cmd help group sub`.
+///
+/// Only groups (commands that have subcommands) are matched: a group is pure
+/// subcommand dispatch, so a `help` token in that position is unambiguously a
+/// help request. Leaf commands may accept a literal `help` positional argument,
+/// so they are left for clap to parse (`<leaf> --help` still works).
+fn group_help_target_parts(
+    root: &Command,
+    args: &[String],
+    root_name: &str,
+) -> Option<Vec<String>> {
+    let bool_flags = derive_bool_flags(root);
+    let value_flags = derive_value_flags(root);
+    let positionals = positional_command_tokens(args, root_name, &bool_flags, &value_flags);
+    let help_index = positionals.iter().position(|token| token == "help")?;
+    // A leading `help` is the curated root help command; let it flow through.
+    if help_index == 0 {
+        return None;
+    }
+    let prefix = &positionals[..help_index];
+    let mut current = root;
+    for token in prefix {
+        current = current.find_subcommand(token)?;
+    }
+    // The token before `help` must resolve to a group; leaves are left to clap.
+    current.get_subcommands().next()?;
+    // `<group> help <sub...>` shows help for `<group> <sub...>`.
+    let suffix = &positionals[help_index + 1..];
+    Some(prefix.iter().chain(suffix).cloned().collect())
 }
 
 fn positional_command_tokens(

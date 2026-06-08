@@ -510,6 +510,44 @@ async fn cli_runtime_help_command_renders_root_and_command_help() {
 }
 
 #[tokio::test]
+async fn cli_runtime_group_help_subcommand_renders_group_help() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // `<group> help` uses clap's auto-generated help subcommand, distinct from
+    // the root-level `help <path>` form. It must render the group help rather
+    // than report the `help` token as an unknown command.
+    let group = cli.run(["my-cli", "project", "help"]).await;
+    assert_eq!(group.exit_code, 0);
+    assert!(
+        group.rendered.contains("Manage projects"),
+        "expected group help, got: {}",
+        group.rendered
+    );
+
+    // The same form must work for a leaf command's help subcommand argument.
+    let leaf = cli.run(["my-cli", "project", "help", "list"]).await;
+    assert_eq!(leaf.exit_code, 0);
+    assert!(
+        leaf.rendered.contains("List projects"),
+        "expected leaf help, got: {}",
+        leaf.rendered
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_help_command_matches_parser_find_leftover_args() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
