@@ -510,6 +510,205 @@ async fn cli_runtime_help_command_renders_root_and_command_help() {
 }
 
 #[tokio::test]
+async fn cli_runtime_group_help_subcommand_renders_group_help() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // The root disables clap's auto-generated help subcommand (the engine ships
+    // a curated root `help` command), and that setting propagates to every
+    // group. So `<group> help` is handled by an engine-level compatibility shim
+    // that renders the group help, rather than by a native clap help subcommand.
+    // It must render the group help rather than report `help` as unknown.
+    let group = cli.run(["my-cli", "project", "help"]).await;
+    assert_eq!(group.exit_code, 0);
+    assert!(
+        group.rendered.contains("Manage projects"),
+        "expected group help, got: {}",
+        group.rendered
+    );
+
+    // The same form must work for a leaf command's help subcommand argument.
+    let leaf = cli.run(["my-cli", "project", "help", "list"]).await;
+    assert_eq!(leaf.exit_code, 0);
+    assert!(
+        leaf.rendered.contains("List projects"),
+        "expected leaf help, got: {}",
+        leaf.rendered
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_group_help_preserves_global_flags() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // A global flag before the group must be preserved through the rewrite —
+    // its value (`json`) must not be dropped or mistaken for a positional, so
+    // parsing still succeeds and the group help renders.
+    let before = cli
+        .run(["my-cli", "--output", "json", "project", "help"])
+        .await;
+    assert_eq!(before.exit_code, 0, "rendered: {}", before.rendered);
+    assert!(
+        before.rendered.contains("Manage projects"),
+        "expected group help, got: {}",
+        before.rendered
+    );
+
+    // A `key=value` flag after the group must likewise survive in place.
+    let after = cli
+        .run(["my-cli", "project", "help", "--output=json"])
+        .await;
+    assert_eq!(after.exit_code, 0, "rendered: {}", after.rendered);
+    assert!(
+        after.rendered.contains("Manage projects"),
+        "expected group help, got: {}",
+        after.rendered
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_group_help_defers_to_consumer_help_command() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    // A consumer is free to register a real command literally named `help`
+    // under a group. The group-help shim must defer to it rather than hijack
+    // the invocation to render help.
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("help", "Consumer help command").no_auth(true),
+                async |_credential, _args| {
+                    Ok(CommandResult::new(json!({ "ran": "consumer-help" })))
+                },
+            ),
+        ),
+    );
+
+    let output = cli.run(["my-cli", "project", "help"]).await;
+    assert_eq!(output.exit_code, 0);
+    assert!(
+        output.rendered.contains("consumer-help"),
+        "expected the consumer help command to run, got: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_group_help_after_double_dash_is_literal() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // After `--`, positionals are literal operands, not command keywords. A
+    // `help` token there must NOT trigger the group-help shim; it is treated
+    // as a literal (unknown) subcommand name instead of rendering group help.
+    let literal = cli.run(["my-cli", "project", "--", "help"]).await;
+    assert_ne!(
+        literal.exit_code, 0,
+        "expected `help` after `--` to be a literal operand, got: {}",
+        literal.rendered
+    );
+    assert!(
+        !literal.rendered.contains("Manage projects"),
+        "expected no group help for a post-`--` `help`, got: {}",
+        literal.rendered
+    );
+
+    // A `help` *before* `--` is still a help request; the `--` only guards the
+    // suffix, so `<group> help -- <sub>` still renders the subcommand's help.
+    let before = cli.run(["my-cli", "project", "help", "--", "list"]).await;
+    assert_eq!(before.exit_code, 0, "rendered: {}", before.rendered);
+    assert!(
+        before.rendered.contains("List projects"),
+        "expected leaf help, got: {}",
+        before.rendered
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_nested_group_help_subcommand_renders_group_help() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    // A nested group: `project platform` is a group with its own leaf. The
+    // group-help shim must walk the full prefix and render the nested group's
+    // help for `<group> <subgroup> help`.
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_group(
+            RuntimeGroupSpec::new(GroupSpec::new("platform", "Manage platforms")).with_command(
+                RuntimeCommandSpec::new(
+                    CommandSpec::new("list", "List platforms").no_auth(true),
+                    async |_credential, _args| Ok(CommandResult::new(json!({}))),
+                ),
+            ),
+        ),
+    );
+
+    // `<group> <subgroup> help` renders the nested group's help.
+    let nested = cli.run(["my-cli", "project", "platform", "help"]).await;
+    assert_eq!(nested.exit_code, 0, "rendered: {}", nested.rendered);
+    assert!(
+        nested.rendered.contains("Manage platforms"),
+        "expected nested group help, got: {}",
+        nested.rendered
+    );
+
+    // `<group> <subgroup> help <leaf>` renders the nested leaf's help.
+    let leaf = cli
+        .run(["my-cli", "project", "platform", "help", "list"])
+        .await;
+    assert_eq!(leaf.exit_code, 0, "rendered: {}", leaf.rendered);
+    assert!(
+        leaf.rendered.contains("List platforms"),
+        "expected nested leaf help, got: {}",
+        leaf.rendered
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_help_command_matches_parser_find_leftover_args() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),

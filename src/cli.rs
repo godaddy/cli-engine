@@ -794,7 +794,7 @@ impl Cli {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let clap_args = normalize_optional_global_flags_before_command(&self.root, &text_args);
+        let mut clap_args = normalize_optional_global_flags_before_command(&self.root, &text_args);
         if has_root_version_flag(&text_args, &self.root, &self.config.name) {
             return self.finish_run(CliRunOutput {
                 exit_code: 0,
@@ -811,9 +811,43 @@ impl Cli {
         if let Some(output) = self.try_run_search_bypass(&text_args) {
             return output;
         }
-        if let Some(message) =
-            unknown_group_command_message(&self.root, &text_args, &self.config.name)
+        // Resolve the positional command path once and share it between the
+        // group-help rewrite and the unknown-command check below.
+        let bool_flags = derive_bool_flags(&self.root);
+        let value_flags = derive_value_flags(&self.root);
+        let positionals =
+            positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags);
+        // Positional tokens after a `--` separator are literal operands, not
+        // command keywords, so the group-help shim must not treat a `help`
+        // among them as a help request. Count the positionals that precede any
+        // `--` to mark where genuine command keywords end.
+        let command_keyword_count = match text_args.iter().position(|arg| arg == "--") {
+            Some(end) => positional_command_tokens(
+                &text_args[..end],
+                &self.config.name,
+                &bool_flags,
+                &value_flags,
+            )
+            .len(),
+            None => positionals.len(),
+        };
+        if let Some(parts) =
+            group_help_target_parts(&self.root, &positionals, command_keyword_count)
         {
+            // Rewrite `<group> help [sub...]` into the canonical
+            // `help <group> [sub...]` so it flows through the curated root
+            // `help` command, which also runs global-flag parsing and the
+            // `pre_run` hook (matching `help <group>` and bare-group help).
+            // Only the positional command tokens are reordered; every flag and
+            // its value is preserved in place so e.g. `--output json` survives.
+            clap_args = rewrite_group_help_args(
+                &clap_args,
+                &self.config.name,
+                &bool_flags,
+                &value_flags,
+                &parts,
+            );
+        } else if let Some(message) = unknown_group_command_message(&self.root, &positionals) {
             return self.finish_run(CliRunOutput {
                 exit_code: 1,
                 rendered: message,
@@ -1209,13 +1243,23 @@ impl Cli {
             .get_many::<String>("command")
             .map(|values| values.map(String::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
+        self.render_help_for_parts(&parts)
+    }
+
+    /// Renders the curated help text for a resolved command path.
+    ///
+    /// Empty `parts` render the root help. A path that resolves to a group or
+    /// command renders that command's long help; an unresolved path returns the
+    /// standard "unknown command" guidance with a non-zero exit code. Shared by
+    /// the root `help <path>` command and the `<group> help` subcommand form.
+    fn render_help_for_parts(&self, parts: &[&str]) -> CliRunOutput {
         if parts.is_empty() {
             return CliRunOutput {
                 exit_code: 0,
                 rendered: self.root.clone().render_long_help().to_string(),
             };
         }
-        let Some(command) = find_help_target(&self.root, &parts) else {
+        let Some(command) = find_help_target(&self.root, parts) else {
             return CliRunOutput {
                 exit_code: 1,
                 rendered: format!(
@@ -1767,14 +1811,7 @@ fn direct_subcommand<'command>(
     })
 }
 
-fn unknown_group_command_message(
-    root: &Command,
-    args: &[String],
-    root_name: &str,
-) -> Option<String> {
-    let bool_flags = derive_bool_flags(root);
-    let value_flags = derive_value_flags(root);
-    let positionals = positional_command_tokens(args, root_name, &bool_flags, &value_flags);
+fn unknown_group_command_message(root: &Command, positionals: &[String]) -> Option<String> {
     if positionals.is_empty() {
         return None;
     }
@@ -1782,7 +1819,7 @@ fn unknown_group_command_message(
     let mut current = root;
     let mut path = vec![root.get_name().to_owned()];
     for token in positionals {
-        if let Some(next) = current.find_subcommand(&token) {
+        if let Some(next) = current.find_subcommand(token) {
             current = next;
             path.push(next.get_name().to_owned());
             continue;
@@ -1796,6 +1833,123 @@ fn unknown_group_command_message(
         return None;
     }
     None
+}
+
+/// Detects the `<group> help [sub...]` form and returns the command path whose
+/// help should be rendered.
+///
+/// The engine ships a curated root `help` command, so it disables clap's
+/// auto-generated help subcommand on the root. That setting propagates to every
+/// subcommand and cannot be re-enabled per child, so `<group> help` would
+/// otherwise hit clap's "unrecognized subcommand" error even though the group's
+/// help listing advertises a `help` entry. We recognize the form here so the
+/// caller can route it through the curated help renderer, matching clap's
+/// documented equivalence between `cmd group help sub` and `cmd help group sub`.
+///
+/// Only groups (commands that have subcommands) are matched: a group is pure
+/// subcommand dispatch, so a `help` token in that position is unambiguously a
+/// help request. Leaf commands may accept a literal `help` positional argument,
+/// so they are left for clap to parse (`<leaf> --help` still works). A group
+/// that registers its own real `help` subcommand is likewise deferred to clap,
+/// which dispatches the user-defined command (only auto-generated help is
+/// suppressed).
+///
+/// `command_keyword_count` is the number of leading positionals that are
+/// genuine command keywords (those before any `--`). A `help` at or beyond that
+/// index is a literal operand after `--`, not a help request, so it is ignored.
+fn group_help_target_parts(
+    root: &Command,
+    positionals: &[String],
+    command_keyword_count: usize,
+) -> Option<Vec<String>> {
+    let help_index = positionals.iter().position(|token| token == "help")?;
+    // A leading `help` is the curated root help command; let it flow through.
+    if help_index == 0 {
+        return None;
+    }
+    // A `help` after a `--` separator is a literal operand; leave it for clap.
+    if help_index >= command_keyword_count {
+        return None;
+    }
+    let prefix = &positionals[..help_index];
+    let mut current = root;
+    for token in prefix {
+        current = current.find_subcommand(token)?;
+    }
+    // The token before `help` must resolve to a group; leaves are left to clap.
+    current.get_subcommands().next()?;
+    // Defer to clap when the group defines a real `help` subcommand of its own.
+    if current.find_subcommand("help").is_some() {
+        return None;
+    }
+    // `<group> help <sub...>` shows help for `<group> <sub...>`.
+    let suffix = &positionals[help_index + 1..];
+    Some(prefix.iter().chain(suffix).cloned().collect())
+}
+
+/// Rewrites a `<group> help [sub...]` invocation into the canonical
+/// `help <group> [sub...]` argument vector.
+///
+/// Only the positional command tokens are reordered (from `[group..., help,
+/// sub...]` to `[help, group..., sub...]`); every flag — including `key=value`
+/// forms, value-consuming flags, unknown flags that consume a value, and
+/// anything after `--` — is preserved in its original place. Reordering keeps
+/// the positional count unchanged, so the rewritten stream is filled slot for
+/// slot. `parts` is the resolved command path (group + subcommand) from
+/// [`group_help_target_parts`].
+fn rewrite_group_help_args(
+    clap_args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+    parts: &[String],
+) -> Vec<String> {
+    // New positional order: the curated `help` command, then the command path.
+    let mut next_positional = std::iter::once("help".to_owned())
+        .chain(parts.iter().cloned())
+        .peekable();
+    let mut out = Vec::with_capacity(clap_args.len());
+    let mut iter = clap_args.iter().peekable();
+    if iter
+        .peek()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+        && let Some(program) = iter.next()
+    {
+        out.push(program.clone());
+    }
+
+    let mut take_positional =
+        |fallback: &String| next_positional.next().unwrap_or(fallback.clone());
+
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            out.push(arg.clone());
+            // Everything after `--` is positional.
+            for rest in iter.by_ref() {
+                out.push(take_positional(rest));
+            }
+            break;
+        }
+        if arg.contains('=') || bool_flags.contains(arg) {
+            out.push(arg.clone());
+            continue;
+        }
+        if value_flags.contains(arg) || unknown_flag_consumes_value(arg, iter.peek()) {
+            out.push(arg.clone());
+            if let Some(value) = iter.next() {
+                out.push(value.clone());
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            out.push(arg.clone());
+            continue;
+        }
+        out.push(take_positional(arg));
+    }
+    // Defensive: emit any positionals not yet placed (counts normally match).
+    out.extend(next_positional);
+    out
 }
 
 fn positional_command_tokens(
