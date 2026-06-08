@@ -1,6 +1,6 @@
 use cli_engine::{
-    BuildInfo, Cli, CliConfig, CommandContext, CommandResult, CommandSpec, Credential, GroupSpec,
-    Module, RuntimeCommandSpec, RuntimeGroupSpec,
+    BuildInfo, Cli, CliConfig, CommandContext, CommandResult, CommandSpec, CredentialResolver,
+    GroupSpec, Module, RuntimeCommandSpec, RuntimeGroupSpec,
 };
 use serde_json::{Value, json};
 
@@ -23,7 +23,7 @@ fn greet_module() -> Module {
 fn greet_command() -> RuntimeCommandSpec {
     RuntimeCommandSpec::new_typed::<GreetArgs, _, _, _>(
         CommandSpec::from_args::<GreetArgs>("hello", "Say hello").no_auth(true),
-        async |_credential: Option<Credential>, args: GreetArgs| {
+        async |_credential: CredentialResolver, args: GreetArgs| {
             let messages: Vec<String> = (0..args.count)
                 .map(|_| format!("Hello, {}!", args.name))
                 .collect();
@@ -155,7 +155,7 @@ struct EchoArgs {
 fn positional_cli() -> Cli {
     let echo_command = RuntimeCommandSpec::new_typed::<EchoArgs, _, _, _>(
         CommandSpec::from_args::<EchoArgs>("echo", "Echo a message").no_auth(true),
-        async |_credential: Option<Credential>, args: EchoArgs| {
+        async |_credential: CredentialResolver, args: EchoArgs| {
             let msg = if args.uppercase {
                 args.message.to_uppercase()
             } else {
@@ -239,7 +239,7 @@ struct SearchArgs {
 fn flatten_cli() -> Cli {
     let search_command = RuntimeCommandSpec::new_typed::<SearchArgs, _, _, _>(
         CommandSpec::from_args::<SearchArgs>("find", "Search items").no_auth(true),
-        async |_credential: Option<Credential>, args: SearchArgs| {
+        async |_credential: CredentialResolver, args: SearchArgs| {
             Ok(CommandResult::new(json!({
                 "query": args.query,
                 "page_size": args.pagination.page_size,

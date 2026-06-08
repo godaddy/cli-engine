@@ -130,7 +130,7 @@ When a command has many flags, complex validation, or an existing `#[derive(clap
 use the typed path instead:
 
 ```rust
-use cli_engine::{CommandResult, CommandSpec, Credential, RuntimeCommandSpec};
+use cli_engine::{CommandResult, CommandSpec, CredentialResolver, RuntimeCommandSpec};
 use serde_json::json;
 
 #[derive(Debug, Clone, clap::Args)]
@@ -146,7 +146,7 @@ let command = RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
     CommandSpec::from_args::<ListArgs>("list", "List projects")
         .with_system("projects-api")
         .with_default_fields("id,name,status"),
-    async |_credential: Option<Credential>, args: ListArgs| {
+    async |_credential: CredentialResolver, args: ListArgs| {
         Ok(CommandResult::new(json!([
             {"id": "p1", "name": "Portal", "team": args.team, "limit": args.limit}
         ])))
@@ -219,7 +219,11 @@ Command checklist:
 - Set `.with_default_fields(...)` for list-style output.
 - Set `.with_json_schema::<T>()` when the response shape is known.
 - Add `clap::Arg` values with the exact user-facing flag names the CLI should expose.
-- Use `.no_auth(true)` only for commands that genuinely do not need credentials.
+- Credential resolution is lazy: handlers receive a `CredentialResolver`, and the auth flow runs
+  only when a handler calls `resolver.resolve().await?` (or `ctx.credential().await?`). Commands
+  that never ask for a credential — and `--schema`/`--dry-run` — never trigger authentication, so
+  you usually do not need `.no_auth(true)`. Set `.no_auth(true)` only to also suppress default-env
+  injection or to document that a command never authenticates.
 - Use `.with_tier(...)` or `.mutates(true)` for mutating commands so `--dry-run` can short-circuit them.
 - Prefer returning structured JSON values from handlers; let cli-engine render JSON, human, and TOON formats.
 - Prefer `CommandSpec::from_args::<T>()` + `RuntimeCommandSpec::new_typed` when the command has many flags, needs clap validation attributes, or when porting existing derive-based commands. Use the builder path for simple commands with one or two flags.

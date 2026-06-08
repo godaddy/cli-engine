@@ -55,7 +55,10 @@ fn cli_with_failing_auth() -> Cli {
         RuntimeGroupSpec::new(GroupSpec::new("deploy", "Deploy commands")).with_command(
             RuntimeCommandSpec::new_streaming(
                 CommandSpec::new("run", "Run a deploy"),
-                async |_ctx, sender: StreamSender| {
+                async |ctx, sender: StreamSender| {
+                    // Lazy resolution: request the credential so the provider's
+                    // auth failure surfaces and exits non-zero.
+                    ctx.credential().await?;
                     sender.send(json!({"status": "deploying"})).await;
                     Ok(())
                 },

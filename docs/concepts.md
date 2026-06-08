@@ -172,9 +172,11 @@ the bounded channel can fill and the handler will wait on `send` until the write
 
 ```rust
 async fn handler(
-    credential: Option<cli_engine::Credential>,
+    credential: cli_engine::CredentialResolver,
     args: cli_engine::middleware::ValueMap,
 ) -> cli_engine::Result<cli_engine::CommandResult> {
+    // Credential resolution is lazy: call `credential.resolve().await?` only
+    // when the command needs one. Commands that never ask skip authentication.
     Ok(cli_engine::CommandResult::new(serde_json::json!({ "ok": true })))
 }
 ```
@@ -188,7 +190,7 @@ Commands can also define arguments with `#[derive(clap::Args)]` structs instead 
 builders. This gives compile-time type safety from argument definition through handler consumption:
 
 ```rust
-use cli_engine::{CommandResult, CommandSpec, Credential, RuntimeCommandSpec};
+use cli_engine::{CommandResult, CommandSpec, CredentialResolver, RuntimeCommandSpec};
 use serde_json::json;
 
 #[derive(Debug, Clone, clap::Args)]
@@ -204,7 +206,7 @@ let command = RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
     CommandSpec::from_args::<ListArgs>("list", "List projects")
         .with_system("projects-api")
         .with_default_fields("id,name,status"),
-    async |_credential: Option<Credential>, args: ListArgs| {
+    async |_credential: CredentialResolver, args: ListArgs| {
         Ok(CommandResult::new(json!([
             {"id": "p1", "name": "Portal", "team": args.team}
         ])))

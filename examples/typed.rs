@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use cli_engine::{
-    BuildInfo, Cli, CliConfig, CommandResult, CommandSpec, Credential, GroupSpec, Module,
+    BuildInfo, Cli, CliConfig, CommandResult, CommandSpec, CredentialResolver, GroupSpec, Module,
     RuntimeCommandSpec, RuntimeGroupSpec,
 };
 use serde_json::json;
@@ -24,7 +24,7 @@ async fn main() -> ExitCode {
             .with_system("projects-api")
             .with_default_fields("id,name,status")
             .no_auth(true),
-        async |_credential: Option<Credential>, args: ListArgs| {
+        async |_credential: CredentialResolver, args: ListArgs| {
             Ok(CommandResult::new(json!([
                 {
                     "id": "project-1",

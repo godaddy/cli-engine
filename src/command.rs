@@ -6,8 +6,8 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    CommandMeta, Credential, Middleware, OutputSchema, Result, SchemaInfo, Tier,
-    middleware::ValueMap, output::NextAction,
+    CommandMeta, Credential, CredentialResolver, Middleware, OutputSchema, Result, SchemaInfo,
+    Tier, middleware::ValueMap, output::NextAction,
 };
 
 /// Sender half for streaming command output.
@@ -92,8 +92,8 @@ pub struct CommandResultMetadata {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct CommandContext {
-    /// Credential resolved by middleware. No-auth commands receive `None`.
-    pub credential: Option<Credential>,
+    /// Lazy credential resolver.
+    pub credential: CredentialResolver,
     /// Effective arguments, including defaults and framework-injected values.
     pub args: ValueMap,
     /// Arguments explicitly supplied by the user.
@@ -118,6 +118,31 @@ impl CommandContext {
     pub fn typed_args<T: clap::FromArgMatches>(&self) -> Result<T> {
         T::from_arg_matches(self.raw_matches.as_ref())
             .map_err(|e| crate::CliCoreError::Message(format!("argument parse error: {e}")))
+    }
+
+    /// Resolves the credential for this command, triggering the auth flow on
+    /// first use and memoizing the result.
+    ///
+    /// Convenience wrapper over [`self.credential.resolve()`](CredentialResolver::resolve).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is marked `no_auth`, or when the auth
+    /// provider fails to produce a credential.
+    pub async fn credential(&self) -> Result<Credential> {
+        self.credential.resolve().await
+    }
+
+    /// Resolves the credential when one is available, returning `Ok(None)` for
+    /// no-auth commands.
+    ///
+    /// Convenience wrapper over [`self.credential.try_resolve()`](CredentialResolver::try_resolve).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the auth provider error when resolution is attempted and fails.
+    pub async fn try_credential(&self) -> Result<Option<Credential>> {
+        self.credential.try_resolve().await
     }
 }
 
@@ -469,12 +494,14 @@ impl std::fmt::Debug for RuntimeCommandSpec {
 impl RuntimeCommandSpec {
     /// Creates a runtime command with the common handler shape.
     ///
-    /// The handler receives the optional credential and effective args. It
-    /// returns [`CommandResult`], where `data` must be JSON-serializable.
+    /// The handler receives a lazy [`CredentialResolver`] and the effective args.
+    /// Call `resolver.resolve().await?` only when the command actually needs a
+    /// credential; commands that ignore it never trigger an auth flow. The
+    /// handler returns [`CommandResult`], where `data` must be JSON-serializable.
     #[must_use]
     pub fn new<F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
     where
-        F: Fn(Option<Credential>, ValueMap) -> Fut + Send + Sync + 'static,
+        F: Fn(CredentialResolver, ValueMap) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Output>> + Send + 'static,
         Output: Into<CommandResult> + Send + 'static,
     {
@@ -530,9 +557,9 @@ impl RuntimeCommandSpec {
 
     /// Creates a runtime command with typed argument deserialization.
     ///
-    /// The handler receives the optional credential and the deserialized args
-    /// struct. Use with `CommandSpec::from_args::<T>()` to get end-to-end type
-    /// safety from argument definition through handler consumption.
+    /// The handler receives a lazy [`CredentialResolver`] and the deserialized
+    /// args struct. Use with `CommandSpec::from_args::<T>()` to get end-to-end
+    /// type safety from argument definition through handler consumption.
     ///
     /// If the handler also needs the command path, middleware, or user-supplied
     /// args, use [`RuntimeCommandSpec::new_with_context`] with
@@ -541,7 +568,7 @@ impl RuntimeCommandSpec {
     pub fn new_typed<T, F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
     where
         T: clap::FromArgMatches + Send + 'static,
-        F: Fn(Option<Credential>, T) -> Fut + Send + Sync + 'static,
+        F: Fn(CredentialResolver, T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Output>> + Send + 'static,
         Output: Into<CommandResult> + Send + 'static,
     {

@@ -15,10 +15,11 @@ use clap::{Arg, ArgAction, Command, value_parser};
 use cli_engine::transport;
 use cli_engine::{
     ActivityEmitter, ActivityEvent, Auditor, AuthProvider, Authorizer, Cli, CliConfig,
-    CommandContext, CommandMeta, CommandModule, CommandResult, CommandSpec, Credential, Dispatcher,
-    FieldInfo, GroupSpec, GuideEntry, HumanViewDef, HumanViewRegistry, Middleware,
-    MiddlewareRequest, Module, ModuleContext, ModuleHelpEntry, OutputField, OutputSchema, Result,
-    RuntimeCommandSpec, RuntimeGroupSpec, SchemaRegistry, TableColumn, Tier, TreeNode,
+    CommandContext, CommandMeta, CommandModule, CommandResult, CommandSpec, Credential,
+    CredentialResolver, Dispatcher, FieldInfo, GroupSpec, GuideEntry, HumanViewDef,
+    HumanViewRegistry, Middleware, MiddlewareRequest, Module, ModuleContext, ModuleHelpEntry,
+    OutputField, OutputSchema, Result, RuntimeCommandSpec, RuntimeGroupSpec, SchemaRegistry,
+    TableColumn, Tier, TreeNode,
     auth::commands::{
         auth_command_group, login_and_build, logout_result, status_result, to_status_entry,
     },
@@ -1859,7 +1860,10 @@ async fn cli_config_meta_resolver_can_adjust_command_metadata() {
         commands: vec![RuntimeCommandSpec::new_with_context(
             CommandSpec::new("whoami", "Show execution context"),
             async |context| {
-                let credential = context.credential.expect("credential should resolve");
+                let credential = context
+                    .credential()
+                    .await
+                    .expect("credential should resolve");
                 Ok(CommandResult::new(json!({
                         "identity": credential.identity,
                         "tier": context.middleware.reason
@@ -2929,7 +2933,11 @@ async fn runtime_command_context_exposes_args_user_args_path_and_middleware() {
                     "debug": context.middleware.debug,
                     "timeout_present": context.middleware.timeout.is_some(),
                     "app": context.middleware.app_id,
-                    "credential_present": context.credential.is_some()
+                    "credential_present": context
+                        .try_credential()
+                        .await
+                        .expect("try_credential")
+                        .is_some()
             })))
         },
     ));
@@ -3138,7 +3146,10 @@ async fn cli_runtime_uses_cli_default_provider_when_command_provider_is_unset() 
         commands: vec![RuntimeCommandSpec::new_with_context(
             CommandSpec::new("whoami", "Show execution context"),
             async |context| {
-                let credential = context.credential.expect("credential should resolve");
+                let credential = context
+                    .credential()
+                    .await
+                    .expect("credential should resolve");
                 Ok(CommandResult::new(json!({"identity": credential.identity})))
             },
         )],
@@ -3160,7 +3171,13 @@ async fn cli_runtime_middleware_auth_errors_render_once_and_exit_nonzero() {
         app_id: "my-cli".to_owned(),
         commands: vec![RuntimeCommandSpec::new_with_context(
             CommandSpec::new("secure", "Run secure command"),
-            async |_context| Ok(CommandResult::new(json!({"ok": true}))),
+            // Under lazy resolution the auth flow only runs when the handler
+            // asks for the credential, so request it to surface the missing
+            // provider error.
+            async |context| {
+                context.credential().await?;
+                Ok(CommandResult::new(json!({"ok": true})))
+            },
         )],
         ..CliConfig::default()
     });
@@ -5967,7 +5984,10 @@ async fn middleware_success_authz_audit_activity_and_fields() {
                 "",
                 false,
             ),
-            async |_credential| {
+            async |credential: CredentialResolver| {
+                // Resolve so the credential's identity propagates into metadata,
+                // audit, and activity under lazy resolution.
+                credential.resolve().await?;
                 Ok(CommandResult::new(
                     json!({"name": "thing", "status": "active"}),
                 ))
@@ -6100,8 +6120,11 @@ async fn middleware_fixed_env_overrides_only_auth_env_preserves_legacy() {
                 "",
                 false,
             ),
-            async |credential| {
-                assert_eq!(credential.expect("credential").env, "auth-prod");
+            async |credential: CredentialResolver| {
+                assert_eq!(
+                    credential.resolve().await.expect("credential").env,
+                    "auth-prod"
+                );
                 Ok(CommandResult::new(json!({"name": "thing"})))
             },
         )
@@ -6783,7 +6806,12 @@ async fn middleware_auth_error_audits_and_renders() {
                 "",
                 false,
             ),
-            async |_credential| Ok(CommandResult::new(json!({}))),
+            async |credential: CredentialResolver| {
+                // Lazy resolution surfaces the missing-provider error only when
+                // the handler asks for the credential.
+                credential.resolve().await?;
+                Ok(CommandResult::new(json!({})))
+            },
         )
         .await
         .expect("auth errors are rendered into middleware output");
@@ -8971,6 +8999,187 @@ impl AuthProvider for FakeProvider {
     }
 }
 
+/// Auth provider that counts how many times a credential is resolved, so lazy
+/// resolution behavior can be asserted directly.
+#[derive(Debug)]
+struct CountingProvider {
+    name: String,
+    calls: Arc<AtomicUsize>,
+}
+
+impl CountingProvider {
+    fn new(name: &str) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait]
+impl AuthProvider for CountingProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Credential {
+            token: "token".to_owned(),
+            env: env.to_owned(),
+            identity: "counted-user".to_owned(),
+            ..Credential::default()
+        })
+    }
+
+    async fn status(&self, env: &str) -> Result<Credential> {
+        self.get_credential(env, "", "").await
+    }
+
+    async fn logout(&self, _env: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_environments(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+/// Authorizer that always resolves the credential, to exercise memoization when
+/// both the authorizer and the handler ask.
+#[derive(Debug)]
+struct ResolvingAuthorizer;
+
+#[async_trait]
+impl Authorizer for ResolvingAuthorizer {
+    async fn authorize(
+        &self,
+        _command_path: &str,
+        _args: &serde_json::Map<String, serde_json::Value>,
+        credential: &CredentialResolver,
+        _reason: &str,
+        _tier: Tier,
+    ) -> Result<()> {
+        credential.try_resolve().await?;
+        Ok(())
+    }
+}
+
+fn counting_middleware(calls_provider: CountingProvider) -> Middleware {
+    let mut middleware = Middleware::new();
+    middleware.auth.register(Arc::new(calls_provider));
+    middleware.default_auth_provider = "counting".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware
+}
+
+#[tokio::test]
+async fn lazy_resolution_skips_auth_when_handler_ignores_credential() {
+    let (provider, calls) = CountingProvider::new("counting");
+    let middleware = counting_middleware(provider);
+
+    let output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
+        )
+        .await
+        .expect("command should succeed without resolving auth");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "handler that ignores the credential must not trigger auth"
+    );
+}
+
+#[tokio::test]
+async fn lazy_resolution_resolves_once_across_authz_and_handler() {
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    middleware.authz = Some(Arc::new(ResolvingAuthorizer));
+
+    middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |resolver: CredentialResolver| {
+                let credential = resolver.resolve().await?;
+                assert_eq!(credential.identity, "counted-user");
+                Ok(CommandResult::new(json!({"ok": true})))
+            },
+        )
+        .await
+        .expect("command should succeed");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "authorizer and handler must share a single memoized resolution"
+    );
+}
+
+#[tokio::test]
+async fn lazy_resolution_skips_auth_for_dry_run() {
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    middleware.dry_run = true;
+    middleware.verbose = "all".to_owned();
+
+    // A mutating tier makes dry-run short-circuit before the handler runs.
+    let mut meta = CommandMeta::default();
+    meta.auth_metadata
+        .insert("tier".to_owned(), "mutate".to_owned());
+    meta.dry_run_prompt = true;
+
+    let output = middleware
+        .run(
+            middleware_request(
+                meta,
+                "things:delete",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |resolver: CredentialResolver| {
+                // Would resolve, but dry-run short-circuits before reaching here.
+                resolver.resolve().await?;
+                Ok(CommandResult::new(json!({"ok": true})))
+            },
+        )
+        .await
+        .expect("dry-run should render");
+
+    assert!(
+        output.envelope.metadata.expect("metadata").dry_run,
+        "expected a dry-run envelope"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "dry-run must short-circuit before any auth resolution"
+    );
+}
+
 #[tokio::test]
 async fn auth_command_is_listed_under_configured_help_category() {
     let module = Module::new("Workflows", |_context| {
@@ -9401,7 +9610,7 @@ impl Authorizer for AllowAuthorizer {
         &self,
         _command_path: &str,
         _args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         _tier: Tier,
     ) -> Result<()> {
@@ -9420,7 +9629,7 @@ impl Authorizer for RecordingAuthorizer {
         &self,
         _command_path: &str,
         _args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         tier: Tier,
     ) -> Result<()> {
@@ -9446,7 +9655,7 @@ impl Authorizer for CaptureArgsAuthorizer {
         &self,
         _command_path: &str,
         args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         _tier: Tier,
     ) -> Result<()> {
@@ -9464,7 +9673,7 @@ impl Authorizer for DenyAuthorizer {
         &self,
         _command_path: &str,
         _args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         _tier: Tier,
     ) -> Result<()> {
