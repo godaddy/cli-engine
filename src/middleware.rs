@@ -151,6 +151,10 @@ impl CredentialResolver {
                         &inner.tier,
                     )
                     .await
+                    // Track the outcome of the latest attempt so a retry that
+                    // succeeds after an earlier failure does not leave the flag
+                    // stale and misclassify a later non-auth error.
+                    .inspect(|_| inner.auth_error.store(false, Ordering::Relaxed))
                     .inspect_err(|_| inner.auth_error.store(true, Ordering::Relaxed))
             })
             .await?;
@@ -446,9 +450,17 @@ impl Middleware {
             return self.render_error(&err, command_path, start, &user_args, &args, identity);
         }
 
-        if let Some(output) =
-            self.render_schema_if_requested(command_path, start, &user_args, &args, "")?
-        {
+        // If the authorizer resolved the credential, include its identity in the
+        // schema output metadata. `peek()` never triggers resolution, so schema
+        // still doesn't provoke auth on its own.
+        let schema_identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
+        if let Some(output) = self.render_schema_if_requested(
+            command_path,
+            start,
+            &user_args,
+            &args,
+            schema_identity,
+        )? {
             return Ok(output);
         }
 

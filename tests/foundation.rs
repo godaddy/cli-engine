@@ -6965,6 +6965,60 @@ async fn middleware_no_auth_schema_short_circuits_before_authorizer() {
     assert!(output.envelope.error.is_none());
 }
 
+#[tokio::test]
+async fn middleware_schema_includes_identity_when_authorizer_resolved() {
+    #[derive(Debug)]
+    struct Thing;
+
+    impl OutputSchema for Thing {
+        fn fields() -> &'static [OutputField] {
+            &[OutputField {
+                name: "name",
+                field_type: "string",
+                optional: false,
+            }]
+        }
+    }
+
+    let mut registry = SchemaRegistry::new();
+    registry.register::<Thing>("things:list");
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    // The authorizer resolves the credential; the schema short-circuit should
+    // then carry that identity into the output metadata.
+    middleware.authz = Some(Arc::new(ResolvingAuthorizer));
+    middleware.verbose = "all".to_owned();
+    middleware.schema = true;
+    middleware.schema_registry = registry;
+
+    let output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_resolver| {
+                Err::<CommandResult, _>(cli_engine::CliCoreError::message(
+                    "business logic should not run for schema",
+                ))
+            },
+        )
+        .await
+        .expect("schema should render");
+
+    assert_eq!(
+        output.envelope.metadata.expect("metadata").identity,
+        "counted-user"
+    );
+    // The authorizer resolved exactly once; schema rendering itself never
+    // triggers an additional resolution.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn envelope_omits_metadata_without_verbose_and_filters_selective_verbose() {
     let mut envelope = Envelope::success(json!({"name": "thing"}), "things-api");
