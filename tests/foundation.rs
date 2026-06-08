@@ -623,6 +623,49 @@ async fn cli_runtime_group_help_defers_to_consumer_help_command() {
 }
 
 #[tokio::test]
+async fn cli_runtime_group_help_after_double_dash_is_literal() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // After `--`, positionals are literal operands, not command keywords. A
+    // `help` token there must NOT trigger the group-help shim; it is treated
+    // as a literal (unknown) subcommand name instead of rendering group help.
+    let literal = cli.run(["my-cli", "project", "--", "help"]).await;
+    assert_ne!(
+        literal.exit_code, 0,
+        "expected `help` after `--` to be a literal operand, got: {}",
+        literal.rendered
+    );
+    assert!(
+        !literal.rendered.contains("Manage projects"),
+        "expected no group help for a post-`--` `help`, got: {}",
+        literal.rendered
+    );
+
+    // A `help` *before* `--` is still a help request; the `--` only guards the
+    // suffix, so `<group> help -- <sub>` still renders the subcommand's help.
+    let before = cli.run(["my-cli", "project", "help", "--", "list"]).await;
+    assert_eq!(before.exit_code, 0, "rendered: {}", before.rendered);
+    assert!(
+        before.rendered.contains("List projects"),
+        "expected leaf help, got: {}",
+        before.rendered
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_help_command_matches_parser_find_leftover_args() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),

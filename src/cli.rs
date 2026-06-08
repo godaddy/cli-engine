@@ -817,7 +817,23 @@ impl Cli {
         let value_flags = derive_value_flags(&self.root);
         let positionals =
             positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags);
-        if let Some(parts) = group_help_target_parts(&self.root, &positionals) {
+        // Positional tokens after a `--` separator are literal operands, not
+        // command keywords, so the group-help shim must not treat a `help`
+        // among them as a help request. Count the positionals that precede any
+        // `--` to mark where genuine command keywords end.
+        let command_keyword_count = match text_args.iter().position(|arg| arg == "--") {
+            Some(end) => positional_command_tokens(
+                &text_args[..end],
+                &self.config.name,
+                &bool_flags,
+                &value_flags,
+            )
+            .len(),
+            None => positionals.len(),
+        };
+        if let Some(parts) =
+            group_help_target_parts(&self.root, &positionals, command_keyword_count)
+        {
             // Rewrite `<group> help [sub...]` into the canonical
             // `help <group> [sub...]` so it flows through the curated root
             // `help` command, which also runs global-flag parsing and the
@@ -1837,10 +1853,22 @@ fn unknown_group_command_message(root: &Command, positionals: &[String]) -> Opti
 /// that registers its own real `help` subcommand is likewise deferred to clap,
 /// which dispatches the user-defined command (only auto-generated help is
 /// suppressed).
-fn group_help_target_parts(root: &Command, positionals: &[String]) -> Option<Vec<String>> {
+///
+/// `command_keyword_count` is the number of leading positionals that are
+/// genuine command keywords (those before any `--`). A `help` at or beyond that
+/// index is a literal operand after `--`, not a help request, so it is ignored.
+fn group_help_target_parts(
+    root: &Command,
+    positionals: &[String],
+    command_keyword_count: usize,
+) -> Option<Vec<String>> {
     let help_index = positionals.iter().position(|token| token == "help")?;
     // A leading `help` is the curated root help command; let it flow through.
     if help_index == 0 {
+        return None;
+    }
+    // A `help` after a `--` separator is a literal operand; leave it for clap.
+    if help_index >= command_keyword_count {
         return None;
     }
     let prefix = &positionals[..help_index];
