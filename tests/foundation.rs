@@ -666,6 +666,49 @@ async fn cli_runtime_group_help_after_double_dash_is_literal() {
 }
 
 #[tokio::test]
+async fn cli_runtime_nested_group_help_subcommand_renders_group_help() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    // A nested group: `project platform` is a group with its own leaf. The
+    // group-help shim must walk the full prefix and render the nested group's
+    // help for `<group> <subgroup> help`.
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_group(
+            RuntimeGroupSpec::new(GroupSpec::new("platform", "Manage platforms")).with_command(
+                RuntimeCommandSpec::new(
+                    CommandSpec::new("list", "List platforms").no_auth(true),
+                    async |_credential, _args| Ok(CommandResult::new(json!({}))),
+                ),
+            ),
+        ),
+    );
+
+    // `<group> <subgroup> help` renders the nested group's help.
+    let nested = cli.run(["my-cli", "project", "platform", "help"]).await;
+    assert_eq!(nested.exit_code, 0, "rendered: {}", nested.rendered);
+    assert!(
+        nested.rendered.contains("Manage platforms"),
+        "expected nested group help, got: {}",
+        nested.rendered
+    );
+
+    // `<group> <subgroup> help <leaf>` renders the nested leaf's help.
+    let leaf = cli
+        .run(["my-cli", "project", "platform", "help", "list"])
+        .await;
+    assert_eq!(leaf.exit_code, 0, "rendered: {}", leaf.rendered);
+    assert!(
+        leaf.rendered.contains("List platforms"),
+        "expected nested leaf help, got: {}",
+        leaf.rendered
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_help_command_matches_parser_find_leftover_args() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
