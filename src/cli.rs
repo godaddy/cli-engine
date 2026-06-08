@@ -794,7 +794,7 @@ impl Cli {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let clap_args = normalize_optional_global_flags_before_command(&self.root, &text_args);
+        let mut clap_args = normalize_optional_global_flags_before_command(&self.root, &text_args);
         if has_root_version_flag(&text_args, &self.root, &self.config.name) {
             return self.finish_run(CliRunOutput {
                 exit_code: 0,
@@ -811,13 +811,27 @@ impl Cli {
         if let Some(output) = self.try_run_search_bypass(&text_args) {
             return output;
         }
-        if let Some(parts) = group_help_target_parts(&self.root, &text_args, &self.config.name) {
-            let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
-            return self.finish_run(self.render_help_for_parts(&parts));
-        }
-        if let Some(message) =
-            unknown_group_command_message(&self.root, &text_args, &self.config.name)
-        {
+        // Resolve the positional command path once and share it between the
+        // group-help rewrite and the unknown-command check below.
+        let positionals = {
+            let bool_flags = derive_bool_flags(&self.root);
+            let value_flags = derive_value_flags(&self.root);
+            positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags)
+        };
+        if let Some(parts) = group_help_target_parts(&self.root, &positionals) {
+            // Rewrite `<group> help [sub...]` into the canonical
+            // `help <group> [sub...]` so it flows through the curated root
+            // `help` command, which also runs global-flag parsing and the
+            // `pre_run` hook (matching `help <group>` and bare-group help).
+            let program = text_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| self.config.name.clone());
+            clap_args = std::iter::once(program)
+                .chain(std::iter::once("help".to_owned()))
+                .chain(parts)
+                .collect();
+        } else if let Some(message) = unknown_group_command_message(&self.root, &positionals) {
             return self.finish_run(CliRunOutput {
                 exit_code: 1,
                 rendered: message,
@@ -1781,14 +1795,7 @@ fn direct_subcommand<'command>(
     })
 }
 
-fn unknown_group_command_message(
-    root: &Command,
-    args: &[String],
-    root_name: &str,
-) -> Option<String> {
-    let bool_flags = derive_bool_flags(root);
-    let value_flags = derive_value_flags(root);
-    let positionals = positional_command_tokens(args, root_name, &bool_flags, &value_flags);
+fn unknown_group_command_message(root: &Command, positionals: &[String]) -> Option<String> {
     if positionals.is_empty() {
         return None;
     }
@@ -1796,7 +1803,7 @@ fn unknown_group_command_message(
     let mut current = root;
     let mut path = vec![root.get_name().to_owned()];
     for token in positionals {
-        if let Some(next) = current.find_subcommand(&token) {
+        if let Some(next) = current.find_subcommand(token) {
             current = next;
             path.push(next.get_name().to_owned());
             continue;
@@ -1815,26 +1822,22 @@ fn unknown_group_command_message(
 /// Detects the `<group> help [sub...]` form and returns the command path whose
 /// help should be rendered.
 ///
-/// clap suppresses the per-command `help` subcommand because the root disables
-/// it (the engine ships a curated root `help` command instead). That setting
-/// propagates to every subcommand and cannot be re-enabled per child, so
-/// `<group> help` would otherwise hit clap's "unrecognized subcommand" error
-/// even though the group's help listing advertises a `help` entry. We recognize
-/// the form here and render help for the group directly, matching clap's
+/// The engine ships a curated root `help` command, so it disables clap's
+/// auto-generated help subcommand on the root. That setting propagates to every
+/// subcommand and cannot be re-enabled per child, so `<group> help` would
+/// otherwise hit clap's "unrecognized subcommand" error even though the group's
+/// help listing advertises a `help` entry. We recognize the form here so the
+/// caller can route it through the curated help renderer, matching clap's
 /// documented equivalence between `cmd group help sub` and `cmd help group sub`.
 ///
 /// Only groups (commands that have subcommands) are matched: a group is pure
 /// subcommand dispatch, so a `help` token in that position is unambiguously a
 /// help request. Leaf commands may accept a literal `help` positional argument,
-/// so they are left for clap to parse (`<leaf> --help` still works).
-fn group_help_target_parts(
-    root: &Command,
-    args: &[String],
-    root_name: &str,
-) -> Option<Vec<String>> {
-    let bool_flags = derive_bool_flags(root);
-    let value_flags = derive_value_flags(root);
-    let positionals = positional_command_tokens(args, root_name, &bool_flags, &value_flags);
+/// so they are left for clap to parse (`<leaf> --help` still works). A group
+/// that registers its own real `help` subcommand is likewise deferred to clap,
+/// which dispatches the user-defined command (only auto-generated help is
+/// suppressed).
+fn group_help_target_parts(root: &Command, positionals: &[String]) -> Option<Vec<String>> {
     let help_index = positionals.iter().position(|token| token == "help")?;
     // A leading `help` is the curated root help command; let it flow through.
     if help_index == 0 {
@@ -1847,6 +1850,10 @@ fn group_help_target_parts(
     }
     // The token before `help` must resolve to a group; leaves are left to clap.
     current.get_subcommands().next()?;
+    // Defer to clap when the group defines a real `help` subcommand of its own.
+    if current.find_subcommand("help").is_some() {
+        return None;
+    }
     // `<group> help <sub...>` shows help for `<group> <sub...>`.
     let suffix = &positionals[help_index + 1..];
     Some(prefix.iter().chain(suffix).cloned().collect())

@@ -526,9 +526,11 @@ async fn cli_runtime_group_help_subcommand_renders_group_help() {
         ),
     );
 
-    // `<group> help` uses clap's auto-generated help subcommand, distinct from
-    // the root-level `help <path>` form. It must render the group help rather
-    // than report the `help` token as an unknown command.
+    // The root disables clap's auto-generated help subcommand (the engine ships
+    // a curated root `help` command), and that setting propagates to every
+    // group. So `<group> help` is handled by an engine-level compatibility shim
+    // that renders the group help, rather than by a native clap help subcommand.
+    // It must render the group help rather than report `help` as unknown.
     let group = cli.run(["my-cli", "project", "help"]).await;
     assert_eq!(group.exit_code, 0);
     assert!(
@@ -544,6 +546,37 @@ async fn cli_runtime_group_help_subcommand_renders_group_help() {
         leaf.rendered.contains("List projects"),
         "expected leaf help, got: {}",
         leaf.rendered
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_group_help_defers_to_consumer_help_command() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    // A consumer is free to register a real command literally named `help`
+    // under a group. The group-help shim must defer to it rather than hijack
+    // the invocation to render help.
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("help", "Consumer help command").no_auth(true),
+                async |_credential, _args| {
+                    Ok(CommandResult::new(json!({ "ran": "consumer-help" })))
+                },
+            ),
+        ),
+    );
+
+    let output = cli.run(["my-cli", "project", "help"]).await;
+    assert_eq!(output.exit_code, 0);
+    assert!(
+        output.rendered.contains("consumer-help"),
+        "expected the consumer help command to run, got: {}",
+        output.rendered
     );
 }
 
