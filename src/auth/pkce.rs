@@ -1059,6 +1059,8 @@ async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result
 // module serialises all access so usage here is data-race-free.
 #[allow(unsafe_code)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     /// Serialises access to XDG_CONFIG_HOME (and restores it) so env-var tests
