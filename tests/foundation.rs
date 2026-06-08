@@ -550,6 +550,48 @@ async fn cli_runtime_group_help_subcommand_renders_group_help() {
 }
 
 #[tokio::test]
+async fn cli_runtime_group_help_preserves_global_flags() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // A global flag before the group must be preserved through the rewrite —
+    // its value (`json`) must not be dropped or mistaken for a positional, so
+    // parsing still succeeds and the group help renders.
+    let before = cli
+        .run(["my-cli", "--output", "json", "project", "help"])
+        .await;
+    assert_eq!(before.exit_code, 0, "rendered: {}", before.rendered);
+    assert!(
+        before.rendered.contains("Manage projects"),
+        "expected group help, got: {}",
+        before.rendered
+    );
+
+    // A `key=value` flag after the group must likewise survive in place.
+    let after = cli
+        .run(["my-cli", "project", "help", "--output=json"])
+        .await;
+    assert_eq!(after.exit_code, 0, "rendered: {}", after.rendered);
+    assert!(
+        after.rendered.contains("Manage projects"),
+        "expected group help, got: {}",
+        after.rendered
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_group_help_defers_to_consumer_help_command() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),

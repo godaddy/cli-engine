@@ -813,24 +813,24 @@ impl Cli {
         }
         // Resolve the positional command path once and share it between the
         // group-help rewrite and the unknown-command check below.
-        let positionals = {
-            let bool_flags = derive_bool_flags(&self.root);
-            let value_flags = derive_value_flags(&self.root);
-            positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags)
-        };
+        let bool_flags = derive_bool_flags(&self.root);
+        let value_flags = derive_value_flags(&self.root);
+        let positionals =
+            positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags);
         if let Some(parts) = group_help_target_parts(&self.root, &positionals) {
             // Rewrite `<group> help [sub...]` into the canonical
             // `help <group> [sub...]` so it flows through the curated root
             // `help` command, which also runs global-flag parsing and the
             // `pre_run` hook (matching `help <group>` and bare-group help).
-            let program = text_args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| self.config.name.clone());
-            clap_args = std::iter::once(program)
-                .chain(std::iter::once("help".to_owned()))
-                .chain(parts)
-                .collect();
+            // Only the positional command tokens are reordered; every flag and
+            // its value is preserved in place so e.g. `--output json` survives.
+            clap_args = rewrite_group_help_args(
+                &clap_args,
+                &self.config.name,
+                &bool_flags,
+                &value_flags,
+                &parts,
+            );
         } else if let Some(message) = unknown_group_command_message(&self.root, &positionals) {
             return self.finish_run(CliRunOutput {
                 exit_code: 1,
@@ -1857,6 +1857,71 @@ fn group_help_target_parts(root: &Command, positionals: &[String]) -> Option<Vec
     // `<group> help <sub...>` shows help for `<group> <sub...>`.
     let suffix = &positionals[help_index + 1..];
     Some(prefix.iter().chain(suffix).cloned().collect())
+}
+
+/// Rewrites a `<group> help [sub...]` invocation into the canonical
+/// `help <group> [sub...]` argument vector.
+///
+/// Only the positional command tokens are reordered (from `[group..., help,
+/// sub...]` to `[help, group..., sub...]`); every flag — including `key=value`
+/// forms, value-consuming flags, unknown flags that consume a value, and
+/// anything after `--` — is preserved in its original place. Reordering keeps
+/// the positional count unchanged, so the rewritten stream is filled slot for
+/// slot. `parts` is the resolved command path (group + subcommand) from
+/// [`group_help_target_parts`].
+fn rewrite_group_help_args(
+    clap_args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+    parts: &[String],
+) -> Vec<String> {
+    // New positional order: the curated `help` command, then the command path.
+    let mut next_positional = std::iter::once("help".to_owned())
+        .chain(parts.iter().cloned())
+        .peekable();
+    let mut out = Vec::with_capacity(clap_args.len());
+    let mut iter = clap_args.iter().peekable();
+    if iter
+        .peek()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+        && let Some(program) = iter.next()
+    {
+        out.push(program.clone());
+    }
+
+    let mut take_positional =
+        |fallback: &String| next_positional.next().unwrap_or(fallback.clone());
+
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            out.push(arg.clone());
+            // Everything after `--` is positional.
+            for rest in iter.by_ref() {
+                out.push(take_positional(rest));
+            }
+            break;
+        }
+        if arg.contains('=') || bool_flags.contains(arg) {
+            out.push(arg.clone());
+            continue;
+        }
+        if value_flags.contains(arg) || unknown_flag_consumes_value(arg, iter.peek()) {
+            out.push(arg.clone());
+            if let Some(value) = iter.next() {
+                out.push(value.clone());
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            out.push(arg.clone());
+            continue;
+        }
+        out.push(take_positional(arg));
+    }
+    // Defensive: emit any positionals not yet placed (counts normally match).
+    out.extend(next_positional);
+    out
 }
 
 fn positional_command_tokens(
