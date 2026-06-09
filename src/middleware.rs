@@ -1,10 +1,7 @@
 use std::{
     collections::BTreeMap,
     future::Future,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -146,7 +143,6 @@ struct ResolverInner {
     tier: String,
     no_auth: bool,
     cell: OnceCell<Credential>,
-    auth_error: AtomicBool,
 }
 
 impl std::fmt::Debug for CredentialResolver {
@@ -179,7 +175,6 @@ impl CredentialResolver {
                 tier,
                 no_auth,
                 cell: OnceCell::new(),
-                auth_error: AtomicBool::new(false),
             }),
         }
     }
@@ -210,11 +205,11 @@ impl CredentialResolver {
                         &inner.tier,
                     )
                     .await
-                    // Track the outcome of the latest attempt so a retry that
-                    // succeeds after an earlier failure does not leave the flag
-                    // stale and misclassify a later non-auth error.
-                    .inspect(|_| inner.auth_error.store(false, Ordering::Relaxed))
-                    .inspect_err(|_| inner.auth_error.store(true, Ordering::Relaxed))
+                    // Mark resolution failures so the engine can classify them as
+                    // `auth-error` based on the error a handler actually returns,
+                    // rather than tracking a separate side-channel flag that could
+                    // go stale if the handler swallows the failure.
+                    .map_err(|source| auth_resolution_error(&inner.provider, source))
             })
             .await?;
         Ok(credential.clone())
@@ -245,11 +240,19 @@ impl CredentialResolver {
     pub fn peek(&self) -> Option<&Credential> {
         self.inner.cell.get()
     }
+}
 
-    /// Reports whether a resolution attempt failed, so the engine can classify
-    /// the outcome as `auth-error` rather than a generic command error.
-    fn had_auth_error(&self) -> bool {
-        self.inner.auth_error.load(Ordering::Relaxed)
+/// Marks a credential-resolution failure so its auth origin is detectable via
+/// [`CliCoreError::is_auth`], leaving errors that are already auth-typed
+/// unchanged. Display is preserved except for the `auth: provider …:` prefix that
+/// the [`AuthProvider`](CliCoreError::AuthProvider) wrapper adds.
+fn auth_resolution_error(provider: &str, source: CliCoreError) -> CliCoreError {
+    match source {
+        auth @ (CliCoreError::MissingAuthProvider(_) | CliCoreError::AuthProvider { .. }) => auth,
+        other => CliCoreError::AuthProvider {
+            provider: provider.to_owned(),
+            source: Box::new(other),
+        },
     }
 }
 
@@ -482,7 +485,9 @@ impl Middleware {
             // An authorizer may have resolved the credential to make its
             // decision; reflect whatever it resolved in audit identity.
             let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
-            let had_auth_error = resolver.had_auth_error();
+            // Classify by the error the authorizer returned: a propagated
+            // resolution failure is auth-typed; a policy denial is not.
+            let had_auth_error = err.is_auth();
             let result_tag = if had_auth_error {
                 "auth-error"
             } else {
@@ -588,11 +593,13 @@ impl Middleware {
         let result = match command(resolver.clone()).await {
             Ok(result) => result.into(),
             Err(err) => {
-                // A lazy `resolve()` failure surfaces as a handler error; keep
-                // classifying it as `auth-error` so audits match the prior
-                // eager behavior.
+                // A deferred `resolve()` failure surfaces as a handler error;
+                // classify it as `auth-error` when the error the handler returned
+                // is itself auth-typed. A handler that swallows a resolution
+                // failure and then fails for another reason returns a non-auth
+                // error here, so it is not misclassified.
                 let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
-                let (result_tag, error_system, activity_backend) = if resolver.had_auth_error() {
+                let (result_tag, error_system, activity_backend) = if err.is_auth() {
                     // Render against the command path, but attribute the activity
                     // backend to the auth provider so telemetry can distinguish
                     // auth-provider failures from command backends.

@@ -156,6 +156,21 @@ impl CliCoreError {
         }
     }
 
+    /// Reports whether this error originates from credential resolution.
+    ///
+    /// True for [`MissingAuthProvider`](Self::MissingAuthProvider) and
+    /// [`AuthProvider`](Self::AuthProvider). The engine uses this to classify a
+    /// command outcome as `auth-error` rather than a generic command error, based
+    /// on the error a handler actually returns — so a handler that swallows a
+    /// resolution failure and then fails for another reason is not misclassified.
+    #[must_use]
+    pub fn is_auth(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingAuthProvider(_) | Self::AuthProvider { .. }
+        )
+    }
+
     /// Returns backend/system attribution when the error carries one.
     #[must_use]
     pub fn system(&self) -> Option<&str> {

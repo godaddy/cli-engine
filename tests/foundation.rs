@@ -9245,6 +9245,55 @@ async fn optional_skips_auth_when_handler_ignores_credential() {
 }
 
 #[tokio::test]
+async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() {
+    // Regression: an Optional handler that best-effort resolves, swallows the
+    // resolution failure, and then fails for an unrelated reason must be
+    // classified by the error it returns ("error"), not as "auth-error". The
+    // activity backend must be the command system, not the auth provider.
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+
+    let output = middleware
+        .run(
+            MiddlewareRequest {
+                meta: CommandMeta::default(),
+                command_path: "things:list",
+                system: "things-api",
+                user_args: value_map([]),
+                args: value_map([]),
+                default_fields: "",
+                auth: cli_engine::AuthRequirement::Optional,
+            },
+            async |resolver: CredentialResolver| {
+                // Best-effort identity; the missing provider makes this fail, and
+                // the handler deliberately ignores it.
+                let _maybe_credential = resolver.try_resolve().await.ok().flatten();
+                Err::<CommandResult, _>(cli_engine::CliCoreError::message_for_system(
+                    "things-api",
+                    "backend rejected request",
+                ))
+            },
+        )
+        .await
+        .expect("command error is rendered into middleware output");
+
+    assert_ne!(output.exit_code, 0);
+    assert_eq!(
+        activity.statuses().await,
+        vec!["error"],
+        "a swallowed auth failure must not promote a later command error to auth-error"
+    );
+    assert_eq!(
+        activity.backends().await,
+        vec!["things-api"],
+        "the backend must be the command system, not the auth provider"
+    );
+}
+
+#[tokio::test]
 async fn lazy_resolution_resolves_once_across_authz_and_handler() {
     let (provider, calls) = CountingProvider::new("counting");
     let mut middleware = counting_middleware(provider);
