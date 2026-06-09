@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.1.3...cli-engine-v0.2.0) (2026-06-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* `CommandSpec.no_auth` (bool) is replaced by `CommandSpec.auth` (`AuthRequirement`), and `MiddlewareRequest.no_auth` by `MiddlewareRequest.auth`. `CommandContext.credential` is now a `CredentialResolver` instead of `Option<Credential>`; `RuntimeCommandSpec::new` and `new_typed` handler closures receive a `CredentialResolver`; and `Authorizer::authorize` receives `&CredentialResolver` instead of `Option<&Credential>`. The `no_auth(true)` builder still works and maps to `AuthRequirement::None`; `auth_optional()` and `auth(AuthRequirement)` select the other policies.
+
+### Features
+
+* fail-closed authentication via AuthRequirement; populate PKCE identity ([#17](https://github.com/godaddy/cli-engine/issues/17)) ([34313bf](https://github.com/godaddy/cli-engine/commit/34313bf28b63270a151cd19de5d1f3b4665177e5))
+
+
+### Bug Fixes
+
+* render help for `<group> help` subcommand form ([#15](https://github.com/godaddy/cli-engine/issues/15)) ([c21db13](https://github.com/godaddy/cli-engine/commit/c21db1359a48d36caa0dd9f324cbc2a45ec84df7))
+
 ## [0.1.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.1.2...cli-engine-v0.1.3) (2026-06-05)
 
 
