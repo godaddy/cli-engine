@@ -60,7 +60,18 @@ fn middleware_request<'request>(
         user_args,
         args,
         default_fields,
-        no_auth,
+        auth: auth_requirement(no_auth),
+    }
+}
+
+/// Maps the legacy `no_auth` bool used by these helpers to an [`AuthRequirement`]:
+/// `true` means the command never authenticates, `false` keeps the fail-closed
+/// `Required` default.
+fn auth_requirement(no_auth: bool) -> cli_engine::AuthRequirement {
+    if no_auth {
+        cli_engine::AuthRequirement::None
+    } else {
+        cli_engine::AuthRequirement::Required
     }
 }
 
@@ -80,7 +91,7 @@ fn middleware_request_with_system<'request>(
         user_args,
         args,
         default_fields,
-        no_auth,
+        auth: auth_requirement(no_auth),
     }
 }
 
@@ -9164,9 +9175,14 @@ fn counting_middleware(calls_provider: CountingProvider) -> Middleware {
 }
 
 #[tokio::test]
-async fn lazy_resolution_skips_auth_when_handler_ignores_credential() {
+async fn required_default_resolves_before_handler_even_when_credential_ignored() {
+    // Fail-closed default: a `Required` command resolves the credential before the
+    // handler runs, even though this handler ignores it. The identity is therefore
+    // available to audit/activity without the handler doing anything.
+    let activity = Arc::new(CaptureActivity::default());
     let (provider, calls) = CountingProvider::new("counting");
-    let middleware = counting_middleware(provider);
+    let mut middleware = counting_middleware(provider);
+    middleware.activity = Some(activity.clone());
 
     let output = middleware
         .run(
@@ -9181,13 +9197,50 @@ async fn lazy_resolution_skips_auth_when_handler_ignores_credential() {
             async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
         )
         .await
-        .expect("command should succeed without resolving auth");
+        .expect("command should succeed");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a Required command must resolve the credential before the handler runs"
+    );
+    assert_eq!(activity.statuses().await, vec!["ok"]);
+    assert_eq!(
+        activity.identities().await,
+        vec!["counted-user"],
+        "engine-resolved identity must reach activity even when the handler ignores it"
+    );
+}
+
+#[tokio::test]
+async fn optional_skips_auth_when_handler_ignores_credential() {
+    // `Optional` defers resolution to the handler: a handler that ignores the
+    // credential triggers no auth flow.
+    let (provider, calls) = CountingProvider::new("counting");
+    let middleware = counting_middleware(provider);
+
+    let output = middleware
+        .run(
+            MiddlewareRequest {
+                meta: CommandMeta::default(),
+                command_path: "things:list",
+                system: "things",
+                user_args: value_map([]),
+                args: value_map([]),
+                default_fields: "",
+                auth: cli_engine::AuthRequirement::Optional,
+            },
+            async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
+        )
+        .await
+        .expect("optional command should succeed without resolving auth");
 
     assert_eq!(output.exit_code, 0);
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
-        "handler that ignores the credential must not trigger auth"
+        "an Optional command must not resolve when the handler ignores the credential"
     );
 }
 
@@ -9674,6 +9727,15 @@ impl CaptureActivity {
             .await
             .iter()
             .map(|event| event.backend.clone())
+            .collect()
+    }
+
+    async fn identities(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.identity.clone())
             .collect()
     }
 }

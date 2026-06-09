@@ -113,8 +113,8 @@ pub use flags::{
 };
 pub use guide::{GuideEntry, parse_guides, parse_guides_from_markdown};
 pub use middleware::{
-    ActivityEmitter, ActivityEvent, Auditor, Authorizer, CommandMeta, CredentialResolver,
-    Middleware, MiddlewareOutput, MiddlewareRequest,
+    ActivityEmitter, ActivityEvent, Auditor, AuthRequirement, Authorizer, CommandMeta,
+    CredentialResolver, Middleware, MiddlewareOutput, MiddlewareRequest,
 };
 pub use module::{CommandModule, Module, ModuleContext, ModuleRegister};
 pub use output::{

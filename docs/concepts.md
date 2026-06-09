@@ -175,8 +175,9 @@ async fn handler(
     credential: cli_engine::CredentialResolver,
     args: cli_engine::middleware::ValueMap,
 ) -> cli_engine::Result<cli_engine::CommandResult> {
-    // Credential resolution is lazy: call `credential.resolve().await?` only
-    // when the command needs one. Commands that never ask skip authentication.
+    // Auth is fail-closed by default: the engine resolves the credential before
+    // this handler runs, so `credential.resolve().await?` here is a memoized
+    // lookup. Mark the command `.auth_optional()` or `.no_auth(true)` to opt out.
     Ok(cli_engine::CommandResult::new(serde_json::json!({ "ok": true })))
 }
 ```

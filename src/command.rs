@@ -6,8 +6,8 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    CommandMeta, Credential, CredentialResolver, Middleware, OutputSchema, Result, SchemaInfo,
-    Tier, middleware::ValueMap, output::NextAction,
+    AuthRequirement, CommandMeta, Credential, CredentialResolver, Middleware, OutputSchema, Result,
+    SchemaInfo, Tier, middleware::ValueMap, output::NextAction,
 };
 
 /// Sender half for streaming command output.
@@ -166,8 +166,13 @@ pub struct CommandSpec {
     pub system: Option<String>,
     /// Default comma-separated field projection.
     pub default_fields: Option<String>,
-    /// Whether the command bypasses credential resolution.
-    pub no_auth: bool,
+    /// Authentication requirement enforced by the engine for this command.
+    ///
+    /// Defaults to [`AuthRequirement::Required`] (fail-closed). Use
+    /// [`auth_optional`](CommandSpec::auth_optional) for commands that should run
+    /// logged out, or [`no_auth`](CommandSpec::no_auth) for commands that never
+    /// authenticate.
+    pub auth: AuthRequirement,
     /// Auth provider name for this command.
     pub auth_provider: Option<String>,
     /// Risk tier used by authentication, authorization, and dry-run.
@@ -258,9 +263,36 @@ impl CommandSpec {
     }
 
     /// Marks the command as no-auth.
+    ///
+    /// `no_auth(true)` sets [`AuthRequirement::None`]: the command never resolves
+    /// a credential and default-env injection is suppressed. `no_auth(false)`
+    /// restores the default [`AuthRequirement::Required`].
     #[must_use]
     pub fn no_auth(mut self, no_auth: bool) -> Self {
-        self.no_auth = no_auth;
+        self.auth = if no_auth {
+            AuthRequirement::None
+        } else {
+            AuthRequirement::Required
+        };
+        self
+    }
+
+    /// Sets the command's [`AuthRequirement`] explicitly.
+    #[must_use]
+    pub fn auth(mut self, requirement: AuthRequirement) -> Self {
+        self.auth = requirement;
+        self
+    }
+
+    /// Marks authentication as optional ([`AuthRequirement::Optional`]).
+    ///
+    /// The engine does not resolve a credential before the handler runs; the
+    /// handler triggers the auth flow only by calling
+    /// [`CredentialResolver::resolve`]/[`try_resolve`](CredentialResolver::try_resolve).
+    /// Use for commands that should still run when the user is logged out.
+    #[must_use]
+    pub fn auth_optional(mut self) -> Self {
+        self.auth = AuthRequirement::Optional;
         self
     }
 

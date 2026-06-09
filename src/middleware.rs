@@ -62,13 +62,72 @@ impl CommandMeta {
     }
 }
 
-/// Lazily resolves the credential for a single command invocation.
+/// Declares whether a command requires an authenticated credential.
 ///
-/// Credential resolution — including any interactive browser/OAuth flow — is
-/// deferred until a handler or authorizer actually calls [`resolve`](Self::resolve)
-/// or [`try_resolve`](Self::try_resolve). Commands that never ask for a credential
-/// therefore never trigger an authentication flow, and `--schema`/`--dry-run`
-/// short-circuit before any resolution happens.
+/// This is the policy that the engine enforces; it is separate from the
+/// *mechanism* of resolution (see [`CredentialResolver`]). The default is
+/// [`Required`](AuthRequirement::Required), which fails closed: the engine
+/// resolves the credential before the handler runs, so a command that should be
+/// gated behind authentication cannot execute unauthenticated even if its
+/// handler never reads the credential, and audit/activity identity is always
+/// populated for it.
+///
+/// `--schema` and `--dry-run` short-circuit before the engine resolves a
+/// `Required` credential, so they never trigger an authentication flow on their
+/// own regardless of requirement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AuthRequirement {
+    /// The engine resolves the credential before the handler runs (fail-closed).
+    ///
+    /// A failure to resolve is rendered as an `auth-error` and the handler never
+    /// runs. This is the default.
+    #[default]
+    Required,
+    /// Resolution is deferred to the handler.
+    ///
+    /// The engine does not resolve a credential on the command's behalf; the
+    /// handler (or an authorizer) triggers the auth flow only by calling
+    /// [`CredentialResolver::resolve`]/[`try_resolve`](CredentialResolver::try_resolve).
+    /// Use for commands that behave differently when authenticated but must still
+    /// run when the user is logged out.
+    Optional,
+    /// The command never authenticates and has no credential.
+    ///
+    /// Equivalent to the legacy `no_auth(true)` marker: default-env injection is
+    /// suppressed and [`CredentialResolver::resolve`] returns an error.
+    None,
+}
+
+impl AuthRequirement {
+    /// Returns `true` when the command never authenticates.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Returns `true` when the engine must resolve the credential before the handler runs.
+    #[must_use]
+    pub fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
+
+    /// Returns `true` when resolution is deferred to the handler.
+    #[must_use]
+    pub fn is_optional(self) -> bool {
+        matches!(self, Self::Optional)
+    }
+}
+
+/// Resolves the credential for a single command invocation, memoizing the result.
+///
+/// Resolution — including any interactive browser/OAuth flow — runs at most once:
+/// a handler and an authorizer that both ask share a single resolution, and the
+/// engine resolves it up front for [`AuthRequirement::Required`] commands. For
+/// [`Optional`](AuthRequirement::Optional) commands resolution is deferred until a
+/// handler or authorizer calls [`resolve`](Self::resolve) or
+/// [`try_resolve`](Self::try_resolve), and `--schema`/`--dry-run` short-circuit
+/// before any resolution happens.
 ///
 /// The resolved credential is memoized: a handler and an authorizer that both
 /// ask share a single resolution. Clones share the same underlying state, so the
@@ -347,8 +406,8 @@ pub struct MiddlewareRequest<'request> {
     pub args: ValueMap,
     /// Default field projection when `--fields` is absent.
     pub default_fields: &'request str,
-    /// Whether credential resolution should be skipped.
-    pub no_auth: bool,
+    /// Authentication requirement enforced by the engine for this command.
+    pub auth: AuthRequirement,
 }
 
 impl Middleware {
@@ -377,8 +436,9 @@ impl Middleware {
             user_args,
             mut args,
             default_fields,
-            no_auth,
+            auth,
         } = request;
+        let no_auth = auth.is_none();
         let command_system = effective_request_system(system, command_path);
         if !no_auth && !self.env.is_empty() && !args.contains_key("env") {
             args.insert("env".to_owned(), Value::String(self.env.clone()));
@@ -497,6 +557,34 @@ impl Middleware {
             );
         }
 
+        // Fail closed by default: for `Required` commands the engine resolves the
+        // credential before the handler runs, so a command that must be
+        // authenticated cannot execute unauthenticated even if its handler never
+        // reads the credential, and its audit/activity identity is always
+        // populated. `--schema`/`--dry-run` return above, so they never reach this
+        // point; `Optional`/`None` commands defer resolution to the handler.
+        if auth.is_required()
+            && let Err(err) = resolver.resolve().await
+        {
+            // Mirror the handler-path auth-error treatment: classify as
+            // `auth-error` and attribute the activity backend to the auth provider
+            // so telemetry can distinguish auth-provider failures from command
+            // backends. Resolution failed, so there is no identity to record.
+            self.write_audit(command_path, &args, "", "auth-error")
+                .await;
+            self.emit_activity(
+                command_path,
+                &args,
+                resolver.peek(),
+                "auth-error",
+                provider_name.as_str(),
+                &err.to_string(),
+                start,
+            )
+            .await;
+            return self.render_error(&err, command_path, start, &user_args, &args, "");
+        }
+
         let result = match command(resolver.clone()).await {
             Ok(result) => result.into(),
             Err(err) => {
@@ -576,7 +664,7 @@ impl Middleware {
                 user_args,
                 args,
                 default_fields,
-                no_auth: true,
+                auth: AuthRequirement::None,
             },
             async move |_resolver| command().await,
         )

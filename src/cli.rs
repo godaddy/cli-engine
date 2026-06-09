@@ -987,7 +987,7 @@ impl Cli {
                         user_args,
                         args,
                         default_fields: &default_fields,
-                        no_auth: command.spec.no_auth,
+                        auth: command.spec.auth,
                     },
                     Arc::new(leaf.clone()),
                     streaming_handler,
@@ -1017,7 +1017,7 @@ impl Cli {
                     user_args,
                     args,
                     default_fields: &default_fields,
-                    no_auth: command.spec.no_auth,
+                    auth: command.spec.auth,
                 },
                 async move |credential| {
                     handler(CommandContext {
