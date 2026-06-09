@@ -9294,6 +9294,78 @@ async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() 
 }
 
 #[tokio::test]
+async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
+    // An Optional handler that requires the credential and propagates the
+    // resolution failure must be classified `auth-error`, with the backend
+    // attributed to the auth provider. Exercises the handler-path
+    // `err.is_auth()` branch (Required commands short-circuit earlier).
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+
+    let output = middleware
+        .run(
+            MiddlewareRequest {
+                meta: CommandMeta::default(),
+                command_path: "things:list",
+                system: "things-api",
+                user_args: value_map([]),
+                args: value_map([]),
+                default_fields: "",
+                auth: cli_engine::AuthRequirement::Optional,
+            },
+            async |resolver: CredentialResolver| {
+                resolver.resolve().await?;
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("auth error is rendered into middleware output");
+
+    assert_ne!(output.exit_code, 0);
+    assert_eq!(activity.statuses().await, vec!["auth-error"]);
+    assert_eq!(activity.backends().await, vec!["missing"]);
+}
+
+#[tokio::test]
+async fn authz_propagated_auth_failure_is_classified_auth_error() {
+    // An authorizer that resolves and propagates the failure is classified
+    // `auth-error`, backend attributed to the provider. Exercises the
+    // authz-path `err.is_auth()` branch.
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+    middleware.authz = Some(Arc::new(ResolvingAuthorizer));
+
+    let output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_resolver| Ok(CommandResult::new(json!({}))),
+        )
+        .await
+        .expect("auth error is rendered into middleware output");
+
+    assert_ne!(output.exit_code, 0);
+    assert_eq!(activity.statuses().await, vec!["auth-error"]);
+    assert_eq!(
+        activity.backends().await,
+        vec!["missing"],
+        "an authorizer's propagated auth failure attributes the provider backend"
+    );
+}
+
+#[tokio::test]
 async fn lazy_resolution_resolves_once_across_authz_and_handler() {
     let (provider, calls) = CountingProvider::new("counting");
     let mut middleware = counting_middleware(provider);
