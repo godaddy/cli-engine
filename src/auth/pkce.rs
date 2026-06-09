@@ -49,6 +49,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{SecondsFormat, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -108,9 +109,16 @@ pub struct PkceAuthProvider {
     app_id: String,
     env_prefix: String,
     allow_file_fallback: bool,
+    /// Prioritized JWT claim names used to derive `Credential.identity` from the
+    /// decoded access-token payload. First non-empty string claim wins.
+    identity_claims: Vec<String>,
     /// In-process token cache keyed by env.
     cache: Arc<RwLock<HashMap<String, StoredToken>>>,
 }
+
+/// Default prioritized claim names for deriving a human-readable identity.
+const DEFAULT_IDENTITY_CLAIMS: &[&str] =
+    &["email", "preferred_username", "username", "name", "sub"];
 
 impl PkceAuthProvider {
     /// Creates a new PKCE provider.
@@ -141,6 +149,10 @@ impl PkceAuthProvider {
             app_id: String::new(),
             env_prefix,
             allow_file_fallback: false,
+            identity_claims: DEFAULT_IDENTITY_CLAIMS
+                .iter()
+                .map(|claim| (*claim).to_owned())
+                .collect(),
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -189,6 +201,47 @@ impl PkceAuthProvider {
     pub fn with_file_fallback(mut self, enabled: bool) -> Self {
         self.allow_file_fallback = enabled;
         self
+    }
+
+    /// Overrides the prioritized JWT claim names used to derive
+    /// [`Credential::identity`](crate::Credential) from the decoded access-token
+    /// payload.
+    ///
+    /// The first claim whose value is a non-empty string wins. The default order
+    /// is `email`, `preferred_username`, `username`, `name`, `sub`. Use this when
+    /// the identity provider exposes the human identity under a non-standard
+    /// claim name.
+    #[must_use]
+    pub fn with_identity_claims(mut self, claims: &[impl AsRef<str>]) -> Self {
+        self.identity_claims = claims.iter().map(|c| c.as_ref().to_owned()).collect();
+        self
+    }
+
+    /// Builds a [`Credential`] from a stored token, deriving `identity` and `sub`
+    /// from the access-token JWT claims when present.
+    fn build_credential(&self, env: &str, token: &StoredToken) -> Credential {
+        let claims = decode_jwt_claims(&token.access_token);
+        let identity = claims
+            .as_ref()
+            .map(|claims| extract_identity(claims, &self.identity_claims))
+            .unwrap_or_default();
+        let sub = claims
+            .as_ref()
+            .and_then(|claims| claims.get("sub"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        Credential {
+            token: token.access_token.clone(),
+            env: env.to_owned(),
+            provider: self.name.clone(),
+            expires_at: chrono::DateTime::from_timestamp(token.expires_at, 0)
+                .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .unwrap_or_default(),
+            identity,
+            sub,
+            ..Credential::default()
+        }
     }
 
     fn effective_client_id(&self) -> String {
@@ -592,15 +645,7 @@ impl AuthProvider for PkceAuthProvider {
 
     async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
         let token = self.resolve_token(env).await?;
-        Ok(Credential {
-            token: token.access_token.clone(),
-            env: env.to_owned(),
-            provider: self.name.clone(),
-            expires_at: chrono::DateTime::from_timestamp(token.expires_at, 0)
-                .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
-                .unwrap_or_default(),
-            ..Credential::default()
-        })
+        Ok(self.build_credential(env, &token))
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
@@ -609,15 +654,7 @@ impl AuthProvider for PkceAuthProvider {
                 "not logged in for environment {env:?}"
             )));
         };
-        Ok(Credential {
-            token: token.access_token.clone(),
-            env: env.to_owned(),
-            provider: self.name.clone(),
-            expires_at: chrono::DateTime::from_timestamp(token.expires_at, 0)
-                .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
-                .unwrap_or_default(),
-            ..Credential::default()
-        })
+        Ok(self.build_credential(env, &token))
     }
 
     async fn logout(&self, env: &str) -> Result<()> {
@@ -978,6 +1015,31 @@ struct TokenResponse {
     refresh_token: Option<String>,
 }
 
+/// Decodes the claims (payload) segment of a JWT **without verifying the
+/// signature**.
+///
+/// The returned claims are used only to display a human-readable identity in
+/// `auth status` and audit logs — never for trust or authorization decisions, so
+/// signature verification is intentionally skipped. Opaque (non-JWT) tokens and
+/// any decode/parse failure yield `None`, leaving the identity blank.
+fn decode_jwt_claims(token: &str) -> Option<Map<String, Value>> {
+    // A JWT is `header.payload.signature`; the payload is the middle segment,
+    // base64url-encoded without padding.
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Returns the first claim value that is a non-empty string, in priority order.
+fn extract_identity(claims: &Map<String, Value>, priority: &[String]) -> String {
+    priority
+        .iter()
+        .filter_map(|name| claims.get(name).and_then(Value::as_str))
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result<StoredToken> {
     let body: TokenResponse = response
         .json()
@@ -997,6 +1059,8 @@ async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result
 // module serialises all access so usage here is data-race-free.
 #[allow(unsafe_code)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     /// Serialises access to XDG_CONFIG_HOME (and restores it) so env-var tests
@@ -1335,5 +1399,86 @@ mod tests {
         let provider = test_provider();
         let envs = provider.list_environments().await.expect("list");
         assert!(envs.is_empty(), "expected empty list for a fresh provider");
+    }
+
+    /// Builds an unsigned-looking JWT (`header.payload.signature`) whose payload
+    /// is the given claims object, base64url-encoded without padding.
+    fn make_jwt(claims: &Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("serialize claims"));
+        format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn decode_jwt_claims_extracts_payload() {
+        let token = make_jwt(&json!({"email": "user@example.com", "sub": "abc123"}));
+        let claims = decode_jwt_claims(&token).expect("claims decode");
+        assert_eq!(
+            claims.get("email").and_then(Value::as_str),
+            Some("user@example.com")
+        );
+        assert_eq!(claims.get("sub").and_then(Value::as_str), Some("abc123"));
+    }
+
+    #[test]
+    fn decode_jwt_claims_returns_none_for_non_jwt() {
+        assert!(decode_jwt_claims("opaque-access-token").is_none());
+        assert!(decode_jwt_claims("only.two").is_none());
+        // Valid structure but the payload is not valid base64/JSON.
+        assert!(decode_jwt_claims("aaa.!!!.bbb").is_none());
+    }
+
+    #[test]
+    fn extract_identity_honors_priority_and_skips_empty() {
+        let priority: Vec<String> = DEFAULT_IDENTITY_CLAIMS
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect();
+        // `email` is empty, so the next non-empty claim (`preferred_username`) wins.
+        let claims = serde_json::from_value(json!({
+            "email": "",
+            "preferred_username": "jdoe",
+            "name": "Jane Doe",
+        }))
+        .expect("claims map");
+        assert_eq!(extract_identity(&claims, &priority), "jdoe");
+
+        // No matching claim yields an empty identity.
+        let empty = serde_json::from_value(json!({"unrelated": "x"})).expect("claims map");
+        assert_eq!(extract_identity(&empty, &priority), "");
+    }
+
+    #[test]
+    fn build_credential_populates_identity_and_sub() {
+        let provider = test_provider();
+        let token = valid_token(&make_jwt(&json!({
+            "email": "user@example.com",
+            "sub": "subject-1",
+        })));
+        let credential = provider.build_credential("prod", &token);
+        assert_eq!(credential.identity, "user@example.com");
+        assert_eq!(credential.sub, "subject-1");
+        assert_eq!(credential.env, "prod");
+        assert_eq!(credential.provider, "test");
+    }
+
+    #[test]
+    fn build_credential_leaves_identity_blank_for_opaque_token() {
+        let provider = test_provider();
+        let token = valid_token("opaque-token");
+        let credential = provider.build_credential("prod", &token);
+        assert_eq!(credential.identity, "");
+        assert_eq!(credential.sub, "");
+    }
+
+    #[test]
+    fn with_identity_claims_overrides_selection() {
+        let provider = test_provider().with_identity_claims(&["custom_user"]);
+        let token = valid_token(&make_jwt(&json!({
+            "email": "ignored@example.com",
+            "custom_user": "picked",
+        })));
+        let credential = provider.build_credential("prod", &token);
+        assert_eq!(credential.identity, "picked");
     }
 }

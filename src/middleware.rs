@@ -8,6 +8,7 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tokio::sync::OnceCell;
 
 use crate::{
     CommandResult, Credential, Dispatcher, Result, SchemaRegistry, Tier,
@@ -58,15 +59,218 @@ impl CommandMeta {
     }
 }
 
+/// Declares whether a command requires an authenticated credential.
+///
+/// This is the policy that the engine enforces; it is separate from the
+/// *mechanism* of resolution (see [`CredentialResolver`]). The default is
+/// [`Required`](AuthRequirement::Required), which fails closed: the engine
+/// resolves the credential before the handler runs, so a command that should be
+/// gated behind authentication cannot execute unauthenticated even if its
+/// handler never reads the credential, and audit/activity identity is always
+/// populated for it.
+///
+/// `--schema` and `--dry-run` short-circuit before the engine resolves a
+/// `Required` credential, so they never trigger an authentication flow on their
+/// own regardless of requirement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AuthRequirement {
+    /// The engine resolves the credential before the handler runs (fail-closed).
+    ///
+    /// A failure to resolve is rendered as an `auth-error` and the handler never
+    /// runs. This is the default.
+    #[default]
+    Required,
+    /// Resolution is deferred to the handler.
+    ///
+    /// The engine does not resolve a credential on the command's behalf; the
+    /// handler (or an authorizer) triggers the auth flow only by calling
+    /// [`CredentialResolver::resolve`]/[`try_resolve`](CredentialResolver::try_resolve).
+    /// Use for commands that behave differently when authenticated but must still
+    /// run when the user is logged out.
+    Optional,
+    /// The command never authenticates and has no credential.
+    ///
+    /// Equivalent to the legacy `no_auth(true)` marker: default-env injection is
+    /// suppressed and [`CredentialResolver::resolve`] returns an error.
+    None,
+}
+
+impl AuthRequirement {
+    /// Returns `true` when the command never authenticates.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Returns `true` when the engine must resolve the credential before the handler runs.
+    #[must_use]
+    pub fn is_required(self) -> bool {
+        matches!(self, Self::Required)
+    }
+
+    /// Returns `true` when resolution is deferred to the handler.
+    #[must_use]
+    pub fn is_optional(self) -> bool {
+        matches!(self, Self::Optional)
+    }
+}
+
+/// Resolves the credential for a single command invocation, memoizing the result.
+///
+/// Resolution — including any interactive browser/OAuth flow — runs at most once:
+/// a handler and an authorizer that both ask share a single resolution, and the
+/// engine resolves it up front for [`AuthRequirement::Required`] commands. For
+/// [`Optional`](AuthRequirement::Optional) commands resolution is deferred until a
+/// handler or authorizer calls [`resolve`](Self::resolve) or
+/// [`try_resolve`](Self::try_resolve), and `--schema`/`--dry-run` short-circuit
+/// before any resolution happens.
+///
+/// The resolved credential is memoized: a handler and an authorizer that both
+/// ask share a single resolution. Clones share the same underlying state, so the
+/// engine can observe (via [`peek`](Self::peek)) whatever a handler resolved.
+#[derive(Clone)]
+pub struct CredentialResolver {
+    inner: Arc<ResolverInner>,
+}
+
+#[derive(Debug)]
+struct ResolverInner {
+    auth: Dispatcher,
+    provider: String,
+    env: String,
+    command_path: String,
+    tier: String,
+    no_auth: bool,
+    cell: OnceCell<Credential>,
+}
+
+impl std::fmt::Debug for CredentialResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialResolver")
+            .field("provider", &self.inner.provider)
+            .field("env", &self.inner.env)
+            .field("no_auth", &self.inner.no_auth)
+            .field("resolved", &self.inner.cell.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialResolver {
+    fn new(
+        auth: Dispatcher,
+        provider: String,
+        env: String,
+        command_path: String,
+        tier: String,
+        no_auth: bool,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ResolverInner {
+                auth,
+                provider,
+                env,
+                command_path,
+                tier,
+                no_auth,
+                cell: OnceCell::new(),
+            }),
+        }
+    }
+
+    /// Resolves the credential, memoizing the result after the first success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is marked [`no_auth`](crate::CommandSpec::no_auth)
+    /// (such commands have no credential), or when the auth provider fails to
+    /// produce one.
+    pub async fn resolve(&self) -> Result<Credential> {
+        if self.inner.no_auth {
+            return Err(CliCoreError::message(
+                "command is marked no_auth and has no credential",
+            ));
+        }
+        let inner = &self.inner;
+        let credential = inner
+            .cell
+            .get_or_try_init(async || {
+                inner
+                    .auth
+                    .get_credential(
+                        &inner.provider,
+                        &inner.env,
+                        &inner.command_path,
+                        &inner.tier,
+                    )
+                    .await
+                    // Mark resolution failures so the engine can classify them as
+                    // `auth-error` based on the error a handler actually returns,
+                    // rather than tracking a separate side-channel flag that could
+                    // go stale if the handler swallows the failure.
+                    .map_err(|source| auth_resolution_error(&inner.provider, source))
+            })
+            .await?;
+        Ok(credential.clone())
+    }
+
+    /// Resolves the credential when one is available.
+    ///
+    /// Returns `Ok(None)` for no-auth commands, `Ok(Some(_))` on success, and
+    /// propagates the provider error on failure. Use this for commands whose
+    /// auth is genuinely optional; most commands should call
+    /// [`resolve`](Self::resolve) instead.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the auth provider error when resolution is attempted and fails.
+    pub async fn try_resolve(&self) -> Result<Option<Credential>> {
+        if self.inner.no_auth {
+            return Ok(None);
+        }
+        self.resolve().await.map(Some)
+    }
+
+    /// Returns the memoized credential without triggering resolution.
+    ///
+    /// Yields `None` until something resolves the credential. Used by the engine
+    /// to record identity in audit/activity output after a handler runs.
+    #[must_use]
+    pub fn peek(&self) -> Option<&Credential> {
+        self.inner.cell.get()
+    }
+}
+
+/// Marks a credential-resolution failure so its auth origin is detectable via
+/// [`CliCoreError::is_auth`], leaving errors that are already auth-typed
+/// unchanged. Display is preserved except for the `auth: provider …:` prefix that
+/// the [`AuthProvider`](CliCoreError::AuthProvider) wrapper adds.
+fn auth_resolution_error(provider: &str, source: CliCoreError) -> CliCoreError {
+    match source {
+        auth @ (CliCoreError::MissingAuthProvider(_) | CliCoreError::AuthProvider { .. }) => auth,
+        other => CliCoreError::AuthProvider {
+            provider: provider.to_owned(),
+            source: Box::new(other),
+        },
+    }
+}
+
 #[async_trait]
-/// Authorization hook called after credential resolution and before business logic.
+/// Authorization hook called before business logic.
+///
+/// The authorizer receives a [`CredentialResolver`] rather than an
+/// already-resolved credential so authorization remains lazy: an authorizer that
+/// does not need identity never triggers a credential/auth flow. Call
+/// [`CredentialResolver::try_resolve`] only when a decision actually depends on
+/// the credential.
 pub trait Authorizer: Send + Sync + std::fmt::Debug {
     /// Verifies whether `command_path` may run with the provided args, reason, and tier.
     async fn authorize(
         &self,
         command_path: &str,
         args: &ValueMap,
-        credential: Option<&Credential>,
+        credential: &CredentialResolver,
         reason: &str,
         tier: Tier,
     ) -> Result<()>;
@@ -205,8 +409,8 @@ pub struct MiddlewareRequest<'request> {
     pub args: ValueMap,
     /// Default field projection when `--fields` is absent.
     pub default_fields: &'request str,
-    /// Whether credential resolution should be skipped.
-    pub no_auth: bool,
+    /// Authentication requirement enforced by the engine for this command.
+    pub auth: AuthRequirement,
 }
 
 impl Middleware {
@@ -223,7 +427,7 @@ impl Middleware {
         command: F,
     ) -> Result<MiddlewareOutput>
     where
-        F: FnOnce(Option<Credential>) -> Fut + Send,
+        F: FnOnce(CredentialResolver) -> Fut + Send,
         Fut: Future<Output = Result<Output>> + Send,
         Output: Into<CommandResult>,
     {
@@ -235,75 +439,75 @@ impl Middleware {
             user_args,
             mut args,
             default_fields,
-            no_auth,
+            auth,
         } = request;
+        let no_auth = auth.is_none();
         let command_system = effective_request_system(system, command_path);
         if !no_auth && !self.env.is_empty() && !args.contains_key("env") {
             args.insert("env".to_owned(), Value::String(self.env.clone()));
         }
 
-        let credential = if no_auth {
-            None
-        } else {
-            let provider_name = meta
-                .provider()
-                .filter(|provider| !provider.is_empty())
-                .unwrap_or(&self.default_auth_provider);
-            let resolved_env = meta.fixed_env().unwrap_or(&self.env);
-            let tier_text = meta.auth_metadata.get("tier").map_or("", String::as_str);
-            match self
-                .auth
-                .get_credential(provider_name, resolved_env, command_path, tier_text)
-                .await
-            {
-                Ok(credential) => Some(credential),
-                Err(err) => {
-                    self.write_audit(command_path, &args, "", "auth-error")
-                        .await;
-                    self.emit_activity(
-                        command_path,
-                        &args,
-                        None,
-                        "auth-error",
-                        provider_name,
-                        &err.to_string(),
-                        start,
-                    )
-                    .await;
-                    return self.render_error(&err, command_path, start, &user_args, &args, "");
-                }
-            }
-        };
-        let identity = credential
-            .as_ref()
-            .map_or("", |credential| credential.identity.as_str());
+        // Build a lazy resolver instead of resolving eagerly. No auth flow runs
+        // until a handler or authorizer actually asks for the credential, so
+        // commands that never use it (and `--schema`/`--dry-run`) skip auth.
+        let provider_name = meta
+            .provider()
+            .filter(|provider| !provider.is_empty())
+            .unwrap_or(&self.default_auth_provider)
+            .to_owned();
+        let resolved_env = meta.fixed_env().unwrap_or(&self.env).to_owned();
+        let tier_text = meta
+            .auth_metadata
+            .get("tier")
+            .map_or("", String::as_str)
+            .to_owned();
+        let resolver = CredentialResolver::new(
+            self.auth.clone(),
+            provider_name.clone(),
+            resolved_env,
+            command_path.to_owned(),
+            tier_text,
+            no_auth,
+        );
 
         if no_auth
             && let Some(output) =
-                self.render_schema_if_requested(command_path, start, &user_args, &args, identity)?
+                self.render_schema_if_requested(command_path, start, &user_args, &args, "")?
         {
             return Ok(output);
         }
 
         if let Some(authz) = &self.authz
             && let Err(err) = authz
-                .authorize(
-                    command_path,
-                    &args,
-                    credential.as_ref(),
-                    &self.reason,
-                    meta.tier(),
-                )
+                .authorize(command_path, &args, &resolver, &self.reason, meta.tier())
                 .await
         {
-            self.write_audit(command_path, &args, identity, "denied")
+            // An authorizer may have resolved the credential to make its
+            // decision; reflect whatever it resolved in audit identity.
+            let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
+            // Classify by the error the authorizer returned: a propagated
+            // resolution failure is auth-typed; a policy denial is not.
+            let had_auth_error = err.is_auth();
+            let result_tag = if had_auth_error {
+                "auth-error"
+            } else {
+                "denied"
+            };
+            // Attribute auth-provider failures to the provider so telemetry can
+            // distinguish them from command backends.
+            let backend = if had_auth_error {
+                provider_name.as_str()
+            } else {
+                command_path
+            };
+            self.write_audit(command_path, &args, identity, result_tag)
                 .await;
             self.emit_activity(
                 command_path,
                 &args,
-                credential.as_ref(),
-                "denied",
-                command_path,
+                resolver.peek(),
+                result_tag,
+                backend,
                 &err.to_string(),
                 start,
             )
@@ -311,19 +515,28 @@ impl Middleware {
             return self.render_error(&err, command_path, start, &user_args, &args, identity);
         }
 
-        if let Some(output) =
-            self.render_schema_if_requested(command_path, start, &user_args, &args, identity)?
-        {
+        // If the authorizer resolved the credential, include its identity in the
+        // schema output metadata. `peek()` never triggers resolution, so schema
+        // still doesn't provoke auth on its own.
+        let schema_identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
+        if let Some(output) = self.render_schema_if_requested(
+            command_path,
+            start,
+            &user_args,
+            &args,
+            schema_identity,
+        )? {
             return Ok(output);
         }
 
         if self.dry_run && meta.dry_run_prompt {
+            let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
             self.write_audit(command_path, &args, identity, "dry-run")
                 .await;
             self.emit_activity(
                 command_path,
                 &args,
-                credential.as_ref(),
+                resolver.peek(),
                 "dry-run",
                 command_path,
                 "",
@@ -349,18 +562,60 @@ impl Middleware {
             );
         }
 
-        let result = match command(credential.clone()).await {
+        // Fail closed by default: for `Required` commands the engine resolves the
+        // credential before the handler runs, so a command that must be
+        // authenticated cannot execute unauthenticated even if its handler never
+        // reads the credential, and its audit/activity identity is always
+        // populated. `--schema`/`--dry-run` return above, so they never reach this
+        // point; `Optional`/`None` commands defer resolution to the handler.
+        if auth.is_required()
+            && let Err(err) = resolver.resolve().await
+        {
+            // Mirror the handler-path auth-error treatment: classify as
+            // `auth-error` and attribute the activity backend to the auth provider
+            // so telemetry can distinguish auth-provider failures from command
+            // backends. Resolution failed, so there is no identity to record.
+            self.write_audit(command_path, &args, "", "auth-error")
+                .await;
+            self.emit_activity(
+                command_path,
+                &args,
+                resolver.peek(),
+                "auth-error",
+                provider_name.as_str(),
+                &err.to_string(),
+                start,
+            )
+            .await;
+            return self.render_error(&err, command_path, start, &user_args, &args, "");
+        }
+
+        let result = match command(resolver.clone()).await {
             Ok(result) => result.into(),
             Err(err) => {
-                let error_system = err.system().unwrap_or(&command_system);
-                self.write_audit(command_path, &args, identity, "error")
+                // A deferred `resolve()` failure surfaces as a handler error;
+                // classify it as `auth-error` when the error the handler returned
+                // is itself auth-typed. A handler that swallows a resolution
+                // failure and then fails for another reason returns a non-auth
+                // error here, so it is not misclassified.
+                let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
+                let (result_tag, error_system, activity_backend) = if err.is_auth() {
+                    // Render against the command path, but attribute the activity
+                    // backend to the auth provider so telemetry can distinguish
+                    // auth-provider failures from command backends.
+                    ("auth-error", command_path, provider_name.as_str())
+                } else {
+                    let system = err.system().unwrap_or(&command_system);
+                    ("error", system, system)
+                };
+                self.write_audit(command_path, &args, identity, result_tag)
                     .await;
                 self.emit_activity(
                     command_path,
                     &args,
-                    credential.as_ref(),
-                    "error",
-                    error_system,
+                    resolver.peek(),
+                    result_tag,
+                    activity_backend,
                     &err.to_string(),
                     start,
                 )
@@ -368,11 +623,13 @@ impl Middleware {
                 return self.render_error(&err, error_system, start, &user_args, &args, identity);
             }
         };
+        // The handler may have resolved the credential; surface its identity.
+        let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
         self.write_audit(command_path, &args, identity, "ok").await;
         self.emit_activity(
             command_path,
             &args,
-            credential.as_ref(),
+            resolver.peek(),
             "ok",
             &command_system,
             "",
@@ -414,9 +671,9 @@ impl Middleware {
                 user_args,
                 args,
                 default_fields,
-                no_auth: true,
+                auth: AuthRequirement::None,
             },
-            async move |_credential| command().await,
+            async move |_resolver| command().await,
         )
         .await
     }

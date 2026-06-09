@@ -130,7 +130,7 @@ When a command has many flags, complex validation, or an existing `#[derive(clap
 use the typed path instead:
 
 ```rust
-use cli_engine::{CommandResult, CommandSpec, Credential, RuntimeCommandSpec};
+use cli_engine::{CommandResult, CommandSpec, CredentialResolver, RuntimeCommandSpec};
 use serde_json::json;
 
 #[derive(Debug, Clone, clap::Args)]
@@ -146,7 +146,7 @@ let command = RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
     CommandSpec::from_args::<ListArgs>("list", "List projects")
         .with_system("projects-api")
         .with_default_fields("id,name,status"),
-    async |_credential: Option<Credential>, args: ListArgs| {
+    async |_credential: CredentialResolver, args: ListArgs| {
         Ok(CommandResult::new(json!([
             {"id": "p1", "name": "Portal", "team": args.team, "limit": args.limit}
         ])))
@@ -219,7 +219,17 @@ Command checklist:
 - Set `.with_default_fields(...)` for list-style output.
 - Set `.with_json_schema::<T>()` when the response shape is known.
 - Add `clap::Arg` values with the exact user-facing flag names the CLI should expose.
-- Use `.no_auth(true)` only for commands that genuinely do not need credentials.
+- Authentication is fail-closed by default (`AuthRequirement::Required`): the engine resolves the
+  credential before the handler runs, so a command that should be gated cannot execute
+  unauthenticated even if its handler never reads the credential. Handlers receive a
+  `CredentialResolver`; for `Required` commands the credential is already resolved, so
+  `resolver.resolve().await?` (or `ctx.credential().await?`) is a memoized lookup. `--schema` and
+  `--dry-run` short-circuit before resolution, so they never trigger an auth flow.
+- Use `.auth_optional()` for commands that must run while logged out and only enrich output when a
+  credential happens to be present; the engine does not resolve on their behalf, so the handler
+  decides via `resolver.try_resolve().await?`. Use `.no_auth(true)` for commands that never
+  authenticate (this also suppresses default-env injection). Forgetting these annotations only
+  over-prompts; it never lets a gated command run unauthenticated.
 - Use `.with_tier(...)` or `.mutates(true)` for mutating commands so `--dry-run` can short-circuit them.
 - Prefer returning structured JSON values from handlers; let cli-engine render JSON, human, and TOON formats.
 - Prefer `CommandSpec::from_args::<T>()` + `RuntimeCommandSpec::new_typed` when the command has many flags, needs clap validation attributes, or when porting existing derive-based commands. Use the builder path for simple commands with one or two flags.

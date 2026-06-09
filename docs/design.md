@@ -202,7 +202,7 @@ fn list_projects() -> RuntimeCommandSpec {
         CommandSpec::from_args::<ListArgs>("list", "List projects")
             .with_system("projects-api")
             .with_default_fields("id,name,status"),
-        async |_credential: Option<Credential>, args: ListArgs| {
+        async |_credential: CredentialResolver, args: ListArgs| {
             Ok(CommandResult::new(json!([
                 {"id": "p1", "name": "Portal", "team": args.team, "limit": args.limit}
             ])))
@@ -286,7 +286,13 @@ The provider process contract and transport injectors are described in
 [Authentication and Transport](auth.md).
 
 Authorization is optional and supplied by an `Authorizer` attached to middleware. The authorizer
-receives command path, effective args, optional credential, reason, and tier.
+receives command path, effective args, a `CredentialResolver`, reason, and tier. Authentication
+policy is declared per command via `AuthRequirement` and defaults to `Required` (fail-closed): the
+engine resolves the credential before the handler runs and renders an `auth-error` if it cannot, so
+a command that should be gated cannot execute unauthenticated. The `CredentialResolver` memoizes a
+single resolution shared by the engine, the authorizer, and the handler. `Optional` commands defer
+resolution to the handler, `None` commands never authenticate, and `--schema`/`--dry-run`
+short-circuit before resolution so they never trigger an auth flow.
 
 Auditors and activity emitters are also pluggable traits. They receive enough context to record
 success, auth failures, authorization denials, dry-runs, command errors, and command duration.

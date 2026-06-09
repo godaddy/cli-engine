@@ -15,10 +15,11 @@ use clap::{Arg, ArgAction, Command, value_parser};
 use cli_engine::transport;
 use cli_engine::{
     ActivityEmitter, ActivityEvent, Auditor, AuthProvider, Authorizer, Cli, CliConfig,
-    CommandContext, CommandMeta, CommandModule, CommandResult, CommandSpec, Credential, Dispatcher,
-    FieldInfo, GroupSpec, GuideEntry, HumanViewDef, HumanViewRegistry, Middleware,
-    MiddlewareRequest, Module, ModuleContext, ModuleHelpEntry, OutputField, OutputSchema, Result,
-    RuntimeCommandSpec, RuntimeGroupSpec, SchemaRegistry, TableColumn, Tier, TreeNode,
+    CommandContext, CommandMeta, CommandModule, CommandResult, CommandSpec, Credential,
+    CredentialResolver, Dispatcher, FieldInfo, GroupSpec, GuideEntry, HumanViewDef,
+    HumanViewRegistry, Middleware, MiddlewareRequest, Module, ModuleContext, ModuleHelpEntry,
+    OutputField, OutputSchema, Result, RuntimeCommandSpec, RuntimeGroupSpec, SchemaRegistry,
+    TableColumn, Tier, TreeNode,
     auth::commands::{
         auth_command_group, login_and_build, logout_result, status_result, to_status_entry,
     },
@@ -59,7 +60,18 @@ fn middleware_request<'request>(
         user_args,
         args,
         default_fields,
-        no_auth,
+        auth: auth_requirement(no_auth),
+    }
+}
+
+/// Maps the legacy `no_auth` bool used by these helpers to an [`AuthRequirement`]:
+/// `true` means the command never authenticates, `false` keeps the fail-closed
+/// `Required` default.
+fn auth_requirement(no_auth: bool) -> cli_engine::AuthRequirement {
+    if no_auth {
+        cli_engine::AuthRequirement::None
+    } else {
+        cli_engine::AuthRequirement::Required
     }
 }
 
@@ -79,7 +91,7 @@ fn middleware_request_with_system<'request>(
         user_args,
         args,
         default_fields,
-        no_auth,
+        auth: auth_requirement(no_auth),
     }
 }
 
@@ -1859,7 +1871,10 @@ async fn cli_config_meta_resolver_can_adjust_command_metadata() {
         commands: vec![RuntimeCommandSpec::new_with_context(
             CommandSpec::new("whoami", "Show execution context"),
             async |context| {
-                let credential = context.credential.expect("credential should resolve");
+                let credential = context
+                    .credential()
+                    .await
+                    .expect("credential should resolve");
                 Ok(CommandResult::new(json!({
                         "identity": credential.identity,
                         "tier": context.middleware.reason
@@ -2929,7 +2944,11 @@ async fn runtime_command_context_exposes_args_user_args_path_and_middleware() {
                     "debug": context.middleware.debug,
                     "timeout_present": context.middleware.timeout.is_some(),
                     "app": context.middleware.app_id,
-                    "credential_present": context.credential.is_some()
+                    "credential_present": context
+                        .try_credential()
+                        .await
+                        .expect("try_credential")
+                        .is_some()
             })))
         },
     ));
@@ -3138,7 +3157,10 @@ async fn cli_runtime_uses_cli_default_provider_when_command_provider_is_unset() 
         commands: vec![RuntimeCommandSpec::new_with_context(
             CommandSpec::new("whoami", "Show execution context"),
             async |context| {
-                let credential = context.credential.expect("credential should resolve");
+                let credential = context
+                    .credential()
+                    .await
+                    .expect("credential should resolve");
                 Ok(CommandResult::new(json!({"identity": credential.identity})))
             },
         )],
@@ -3160,7 +3182,13 @@ async fn cli_runtime_middleware_auth_errors_render_once_and_exit_nonzero() {
         app_id: "my-cli".to_owned(),
         commands: vec![RuntimeCommandSpec::new_with_context(
             CommandSpec::new("secure", "Run secure command"),
-            async |_context| Ok(CommandResult::new(json!({"ok": true}))),
+            // Under lazy resolution the auth flow only runs when the handler
+            // asks for the credential, so request it to surface the missing
+            // provider error.
+            async |context| {
+                context.credential().await?;
+                Ok(CommandResult::new(json!({"ok": true})))
+            },
         )],
         ..CliConfig::default()
     });
@@ -5967,7 +5995,10 @@ async fn middleware_success_authz_audit_activity_and_fields() {
                 "",
                 false,
             ),
-            async |_credential| {
+            async |credential: CredentialResolver| {
+                // Resolve so the credential's identity propagates into metadata,
+                // audit, and activity under lazy resolution.
+                credential.resolve().await?;
                 Ok(CommandResult::new(
                     json!({"name": "thing", "status": "active"}),
                 ))
@@ -6100,8 +6131,11 @@ async fn middleware_fixed_env_overrides_only_auth_env_preserves_legacy() {
                 "",
                 false,
             ),
-            async |credential| {
-                assert_eq!(credential.expect("credential").env, "auth-prod");
+            async |credential: CredentialResolver| {
+                assert_eq!(
+                    credential.resolve().await.expect("credential").env,
+                    "auth-prod"
+                );
                 Ok(CommandResult::new(json!({"name": "thing"})))
             },
         )
@@ -6783,7 +6817,12 @@ async fn middleware_auth_error_audits_and_renders() {
                 "",
                 false,
             ),
-            async |_credential| Ok(CommandResult::new(json!({}))),
+            async |credential: CredentialResolver| {
+                // Lazy resolution surfaces the missing-provider error only when
+                // the handler asks for the credential.
+                credential.resolve().await?;
+                Ok(CommandResult::new(json!({})))
+            },
         )
         .await
         .expect("auth errors are rendered into middleware output");
@@ -6792,6 +6831,38 @@ async fn middleware_auth_error_audits_and_renders() {
     assert_eq!(error.code, "ERROR");
     assert!(error.message.contains("auth: no provider registered"));
     assert_eq!(audit.results().await, vec!["auth-error"]);
+}
+
+#[tokio::test]
+async fn middleware_auth_error_activity_attributes_provider_backend() {
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+
+    let _output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |credential: CredentialResolver| {
+                credential.resolve().await?;
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("auth errors are rendered into middleware output");
+
+    // Auth-provider failures attribute the activity backend to the provider
+    // name, not the command path, so telemetry can distinguish them.
+    assert_eq!(activity.statuses().await, vec!["auth-error"]);
+    assert_eq!(activity.backends().await, vec!["missing"]);
 }
 
 #[tokio::test]
@@ -6903,6 +6974,60 @@ async fn middleware_no_auth_schema_short_circuits_before_authorizer() {
         }))
     );
     assert!(output.envelope.error.is_none());
+}
+
+#[tokio::test]
+async fn middleware_schema_includes_identity_when_authorizer_resolved() {
+    #[derive(Debug)]
+    struct Thing;
+
+    impl OutputSchema for Thing {
+        fn fields() -> &'static [OutputField] {
+            &[OutputField {
+                name: "name",
+                field_type: "string",
+                optional: false,
+            }]
+        }
+    }
+
+    let mut registry = SchemaRegistry::new();
+    registry.register::<Thing>("things:list");
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    // The authorizer resolves the credential; the schema short-circuit should
+    // then carry that identity into the output metadata.
+    middleware.authz = Some(Arc::new(ResolvingAuthorizer));
+    middleware.verbose = "all".to_owned();
+    middleware.schema = true;
+    middleware.schema_registry = registry;
+
+    let output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_resolver| {
+                Err::<CommandResult, _>(cli_engine::CliCoreError::message(
+                    "business logic should not run for schema",
+                ))
+            },
+        )
+        .await
+        .expect("schema should render");
+
+    assert_eq!(
+        output.envelope.metadata.expect("metadata").identity,
+        "counted-user"
+    );
+    // The authorizer resolved exactly once; schema rendering itself never
+    // triggers an additional resolution.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -8971,6 +9096,350 @@ impl AuthProvider for FakeProvider {
     }
 }
 
+/// Auth provider that counts how many times a credential is resolved, so lazy
+/// resolution behavior can be asserted directly.
+#[derive(Debug)]
+struct CountingProvider {
+    name: String,
+    calls: Arc<AtomicUsize>,
+}
+
+impl CountingProvider {
+    fn new(name: &str) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait]
+impl AuthProvider for CountingProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Credential {
+            token: "token".to_owned(),
+            env: env.to_owned(),
+            identity: "counted-user".to_owned(),
+            ..Credential::default()
+        })
+    }
+
+    async fn status(&self, env: &str) -> Result<Credential> {
+        self.get_credential(env, "", "").await
+    }
+
+    async fn logout(&self, _env: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_environments(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+}
+
+/// Authorizer that always resolves the credential, to exercise memoization when
+/// both the authorizer and the handler ask.
+#[derive(Debug)]
+struct ResolvingAuthorizer;
+
+#[async_trait]
+impl Authorizer for ResolvingAuthorizer {
+    async fn authorize(
+        &self,
+        _command_path: &str,
+        _args: &serde_json::Map<String, serde_json::Value>,
+        credential: &CredentialResolver,
+        _reason: &str,
+        _tier: Tier,
+    ) -> Result<()> {
+        credential.try_resolve().await?;
+        Ok(())
+    }
+}
+
+fn counting_middleware(calls_provider: CountingProvider) -> Middleware {
+    let mut middleware = Middleware::new();
+    middleware.auth.register(Arc::new(calls_provider));
+    middleware.default_auth_provider = "counting".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware
+}
+
+#[tokio::test]
+async fn required_default_resolves_before_handler_even_when_credential_ignored() {
+    // Fail-closed default: a `Required` command resolves the credential before the
+    // handler runs, even though this handler ignores it. The identity is therefore
+    // available to audit/activity without the handler doing anything.
+    let activity = Arc::new(CaptureActivity::default());
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    middleware.activity = Some(activity.clone());
+
+    let output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
+        )
+        .await
+        .expect("command should succeed");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a Required command must resolve the credential before the handler runs"
+    );
+    assert_eq!(activity.statuses().await, vec!["ok"]);
+    assert_eq!(
+        activity.identities().await,
+        vec!["counted-user"],
+        "engine-resolved identity must reach activity even when the handler ignores it"
+    );
+}
+
+#[tokio::test]
+async fn optional_skips_auth_when_handler_ignores_credential() {
+    // `Optional` defers resolution to the handler: a handler that ignores the
+    // credential triggers no auth flow.
+    let (provider, calls) = CountingProvider::new("counting");
+    let middleware = counting_middleware(provider);
+
+    let output = middleware
+        .run(
+            MiddlewareRequest {
+                meta: CommandMeta::default(),
+                command_path: "things:list",
+                system: "things",
+                user_args: value_map([]),
+                args: value_map([]),
+                default_fields: "",
+                auth: cli_engine::AuthRequirement::Optional,
+            },
+            async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
+        )
+        .await
+        .expect("optional command should succeed without resolving auth");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "an Optional command must not resolve when the handler ignores the credential"
+    );
+}
+
+#[tokio::test]
+async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() {
+    // Regression: an Optional handler that best-effort resolves, swallows the
+    // resolution failure, and then fails for an unrelated reason must be
+    // classified by the error it returns ("error"), not as "auth-error". The
+    // activity backend must be the command system, not the auth provider.
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+
+    let output = middleware
+        .run(
+            MiddlewareRequest {
+                meta: CommandMeta::default(),
+                command_path: "things:list",
+                system: "things-api",
+                user_args: value_map([]),
+                args: value_map([]),
+                default_fields: "",
+                auth: cli_engine::AuthRequirement::Optional,
+            },
+            async |resolver: CredentialResolver| {
+                // Best-effort identity; the missing provider makes this fail, and
+                // the handler deliberately ignores it.
+                let _maybe_credential = resolver.try_resolve().await.ok().flatten();
+                Err::<CommandResult, _>(cli_engine::CliCoreError::message_for_system(
+                    "things-api",
+                    "backend rejected request",
+                ))
+            },
+        )
+        .await
+        .expect("command error is rendered into middleware output");
+
+    assert_ne!(output.exit_code, 0);
+    assert_eq!(
+        activity.statuses().await,
+        vec!["error"],
+        "a swallowed auth failure must not promote a later command error to auth-error"
+    );
+    assert_eq!(
+        activity.backends().await,
+        vec!["things-api"],
+        "the backend must be the command system, not the auth provider"
+    );
+}
+
+#[tokio::test]
+async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
+    // An Optional handler that requires the credential and propagates the
+    // resolution failure must be classified `auth-error`, with the backend
+    // attributed to the auth provider. Exercises the handler-path
+    // `err.is_auth()` branch (Required commands short-circuit earlier).
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+
+    let output = middleware
+        .run(
+            MiddlewareRequest {
+                meta: CommandMeta::default(),
+                command_path: "things:list",
+                system: "things-api",
+                user_args: value_map([]),
+                args: value_map([]),
+                default_fields: "",
+                auth: cli_engine::AuthRequirement::Optional,
+            },
+            async |resolver: CredentialResolver| {
+                resolver.resolve().await?;
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("auth error is rendered into middleware output");
+
+    assert_ne!(output.exit_code, 0);
+    assert_eq!(activity.statuses().await, vec!["auth-error"]);
+    assert_eq!(activity.backends().await, vec!["missing"]);
+}
+
+#[tokio::test]
+async fn authz_propagated_auth_failure_is_classified_auth_error() {
+    // An authorizer that resolves and propagates the failure is classified
+    // `auth-error`, backend attributed to the provider. Exercises the
+    // authz-path `err.is_auth()` branch.
+    let activity = Arc::new(CaptureActivity::default());
+    let mut middleware = Middleware::new();
+    middleware.default_auth_provider = "missing".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.activity = Some(activity.clone());
+    middleware.authz = Some(Arc::new(ResolvingAuthorizer));
+
+    let output = middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_resolver| Ok(CommandResult::new(json!({}))),
+        )
+        .await
+        .expect("auth error is rendered into middleware output");
+
+    assert_ne!(output.exit_code, 0);
+    assert_eq!(activity.statuses().await, vec!["auth-error"]);
+    assert_eq!(
+        activity.backends().await,
+        vec!["missing"],
+        "an authorizer's propagated auth failure attributes the provider backend"
+    );
+}
+
+#[tokio::test]
+async fn lazy_resolution_resolves_once_across_authz_and_handler() {
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    middleware.authz = Some(Arc::new(ResolvingAuthorizer));
+
+    middleware
+        .run(
+            middleware_request(
+                CommandMeta::default(),
+                "things:list",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |resolver: CredentialResolver| {
+                let credential = resolver.resolve().await?;
+                assert_eq!(credential.identity, "counted-user");
+                Ok(CommandResult::new(json!({"ok": true})))
+            },
+        )
+        .await
+        .expect("command should succeed");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "authorizer and handler must share a single memoized resolution"
+    );
+}
+
+#[tokio::test]
+async fn lazy_resolution_skips_auth_for_dry_run() {
+    let (provider, calls) = CountingProvider::new("counting");
+    let mut middleware = counting_middleware(provider);
+    middleware.dry_run = true;
+    middleware.verbose = "all".to_owned();
+
+    // A mutating tier makes dry-run short-circuit before the handler runs.
+    let mut meta = CommandMeta::default();
+    meta.auth_metadata
+        .insert("tier".to_owned(), "mutate".to_owned());
+    meta.dry_run_prompt = true;
+
+    let output = middleware
+        .run(
+            middleware_request(
+                meta,
+                "things:delete",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |resolver: CredentialResolver| {
+                // Would resolve, but dry-run short-circuits before reaching here.
+                resolver.resolve().await?;
+                Ok(CommandResult::new(json!({"ok": true})))
+            },
+        )
+        .await
+        .expect("dry-run should render");
+
+    assert!(
+        output.envelope.metadata.expect("metadata").dry_run,
+        "expected a dry-run envelope"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "dry-run must short-circuit before any auth resolution"
+    );
+}
+
 #[tokio::test]
 async fn auth_command_is_listed_under_configured_help_category() {
     let module = Module::new("Workflows", |_context| {
@@ -9372,6 +9841,24 @@ impl CaptureActivity {
             .map(|event| event.args.clone())
             .collect()
     }
+
+    async fn backends(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.backend.clone())
+            .collect()
+    }
+
+    async fn identities(&self) -> Vec<String> {
+        self.events
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.identity.clone())
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -9401,7 +9888,7 @@ impl Authorizer for AllowAuthorizer {
         &self,
         _command_path: &str,
         _args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         _tier: Tier,
     ) -> Result<()> {
@@ -9420,7 +9907,7 @@ impl Authorizer for RecordingAuthorizer {
         &self,
         _command_path: &str,
         _args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         tier: Tier,
     ) -> Result<()> {
@@ -9446,7 +9933,7 @@ impl Authorizer for CaptureArgsAuthorizer {
         &self,
         _command_path: &str,
         args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         _tier: Tier,
     ) -> Result<()> {
@@ -9464,7 +9951,7 @@ impl Authorizer for DenyAuthorizer {
         &self,
         _command_path: &str,
         _args: &serde_json::Map<String, serde_json::Value>,
-        _credential: Option<&Credential>,
+        _credential: &CredentialResolver,
         _reason: &str,
         _tier: Tier,
     ) -> Result<()> {
