@@ -547,8 +547,10 @@ impl PkceAuthProvider {
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let token = self.run_pkce_flow_with(env, scopes).await?;
-        self.delete_token_from_keychain(env).await;
-        self.cache.write().await.remove(env);
+        // Persist first — the keychain write overwrites the existing entry for
+        // this env — and only update the in-memory cache after a successful
+        // save. This avoids destroying a still-valid token if the save fails
+        // (e.g. keychain unavailable and file fallback disabled).
         self.save_token_to_keychain(env, &token).await?;
         self.store_cached_token(env, token.clone()).await;
         Ok(token)
@@ -1298,10 +1300,8 @@ mod tests {
         })));
         provider.store_cached_token("dev", token).await;
 
-        let meta = crate::middleware::CommandMeta {
-            scopes: vec!["apps.app-registry:read".to_owned()],
-            ..crate::middleware::CommandMeta::default()
-        };
+        let mut meta = crate::middleware::CommandMeta::default();
+        meta.set_scopes(vec!["apps.app-registry:read".to_owned()]);
         let req = CredentialRequest {
             env: "dev",
             command: "app:list",
