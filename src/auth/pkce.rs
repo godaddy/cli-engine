@@ -68,6 +68,17 @@ struct StoredToken {
     access_token: String,
     expires_at: i64,
     refresh_token: Option<String>,
+    /// Scopes the token was obtained with (granted by the authorization server,
+    /// or the requested set when the server does not echo `scope`). Lets scope
+    /// coverage work for opaque access tokens and IdPs that do not expose scopes
+    /// in the access token itself. Not secret, so excluded from zeroization.
+    ///
+    /// `#[serde(default)]` keeps tokens written before this field was added
+    /// loadable from the keychain (they decode with an empty set, falling back to
+    /// the JWT `scope`/`scp` claim as before).
+    #[serde(default)]
+    #[zeroize(skip)]
+    scopes: Vec<String>,
 }
 
 impl std::fmt::Debug for StoredToken {
@@ -83,6 +94,7 @@ impl std::fmt::Debug for StoredToken {
                     &"None"
                 },
             )
+            .field("scopes", &self.scopes)
             .finish()
     }
 }
@@ -530,7 +542,9 @@ impl PkceAuthProvider {
                 return Ok(Some(token));
             }
             if let Some(refresh_token) = token.refresh_token.as_deref()
-                && let Ok(mut refreshed) = self.refresh_access_token(refresh_token).await
+                && let Ok(mut refreshed) = self
+                    .refresh_access_token(refresh_token, &token.scopes)
+                    .await
             {
                 if refreshed.refresh_token.is_none() {
                     refreshed.refresh_token = Some(refresh_token.to_owned());
@@ -546,7 +560,7 @@ impl PkceAuthProvider {
     /// Runs a fresh interactive PKCE flow requesting exactly `scopes`, replacing
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
-        let token = self.run_pkce_flow_with(env, scopes).await?;
+        let token = self.run_pkce_flow_with(scopes).await?;
         // Persist first — the keychain write overwrites the existing entry for
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails
@@ -558,7 +572,7 @@ impl PkceAuthProvider {
 
     /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
     /// default login and for scope step-up, which requests a wider union).
-    async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
+    async fn run_pkce_flow_with(&self, scopes: &[String]) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
         let client_id = self.effective_client_id();
@@ -595,7 +609,7 @@ impl PkceAuthProvider {
 
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
-        self.exchange_code_for_token(&code, &code_verifier, env)
+        self.exchange_code_for_token(&code, &code_verifier, scopes)
             .await
     }
 
@@ -603,7 +617,7 @@ impl PkceAuthProvider {
         &self,
         code: &str,
         code_verifier: &str,
-        env: &str,
+        requested_scopes: &[String],
     ) -> Result<StoredToken> {
         let redirect_uri = self.effective_redirect_uri();
         let client_id = self.effective_client_id();
@@ -631,10 +645,14 @@ impl PkceAuthProvider {
             )));
         }
 
-        parse_token_response(response, env).await
+        parse_token_response(response, requested_scopes).await
     }
 
-    async fn refresh_access_token(&self, refresh_token: &str) -> Result<StoredToken> {
+    async fn refresh_access_token(
+        &self,
+        refresh_token: &str,
+        prior_scopes: &[String],
+    ) -> Result<StoredToken> {
         let client_id = self.effective_client_id();
         let token_url = self.effective_token_url();
         let params = [
@@ -657,7 +675,7 @@ impl PkceAuthProvider {
             )));
         }
 
-        parse_token_response(response, "").await
+        parse_token_response(response, prior_scopes).await
     }
 }
 
@@ -681,45 +699,23 @@ impl AuthProvider for PkceAuthProvider {
         // `auth login --scope X` logs out first; resolving defaults and then
         // stepping up would open the browser twice).
         if let Some(token) = self.existing_token(env).await? {
-            // The access token is a JWT carrying its granted scopes; if it
-            // already covers everything the command needs, no re-auth is needed.
-            let granted = scopes_from_jwt(&token.access_token);
-            let missing: Vec<&str> = required
-                .iter()
-                .filter(|scope| !granted.iter().any(|have| have == *scope))
-                .map(String::as_str)
-                .collect();
-            if missing.is_empty() {
-                return Ok(self.build_credential(env, &token));
+            // Decide based on what the token grants (JWT claim plus the scopes it
+            // was obtained with). Step-up means re-consent: the authorization
+            // server has no silent scope-expansion grant, so in non-interactive
+            // contexts we fail fast rather than hang on the callback timeout.
+            let granted = granted_scopes(&token);
+            match plan_step_up(&self.scopes, &granted, required, session_is_interactive()) {
+                StepUp::Covered => return Ok(self.build_credential(env, &token)),
+                StepUp::MissingNonInteractive(missing) => {
+                    return Err(missing_scope_error(env, &missing));
+                }
+                // Union (defaults ∪ already-granted ∪ required) so step-up never
+                // drops scopes acquired by an earlier login or step-up.
+                StepUp::Reauthenticate(union) => {
+                    let token = self.reauthenticate(env, &union).await?;
+                    return Ok(self.build_credential(env, &token));
+                }
             }
-
-            // Step-up means re-consent: the authorization server has no silent
-            // scope-expansion grant. Fail fast in non-interactive contexts
-            // rather than hang on the local callback timeout. Treat the session
-            // as interactive if any stdio stream is a TTY, so redirecting one
-            // (e.g. capturing stderr to a log) doesn't block a user who can
-            // still complete the browser flow.
-            let interactive = std::io::stdin().is_terminal()
-                || std::io::stdout().is_terminal()
-                || std::io::stderr().is_terminal();
-            if !interactive {
-                let display = missing.join(", ");
-                let hint = missing
-                    .iter()
-                    .map(|scope| format!("--scope {scope}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                return Err(CliCoreError::message(format!(
-                    "access token for {env:?} is missing required scope(s): {display}; \
-                     run `auth login --env {env} {hint}` in an interactive terminal"
-                )));
-            }
-
-            // Union (defaults ∪ already-granted ∪ required) so step-up never
-            // drops scopes acquired by an earlier login or step-up.
-            let union = union_scopes(&self.scopes, &granted, required);
-            let token = self.reauthenticate(env, &union).await?;
-            return Ok(self.build_credential(env, &token));
         }
 
         // No usable token: authenticate once, requesting defaults ∪ required.
@@ -1093,6 +1089,8 @@ struct TokenResponse {
     access_token: String,
     expires_in: Option<i64>,
     refresh_token: Option<String>,
+    /// Space-delimited scopes the server actually granted, when it echoes them.
+    scope: Option<String>,
 }
 
 /// Decodes the claims (payload) segment of a JWT **without verifying the
@@ -1125,19 +1123,112 @@ fn union_scopes(defaults: &[String], granted: &[String], required: &[String]) ->
     union
 }
 
-/// Reads the space-delimited `scope` claim from a JWT access token.
+/// Reads the granted scopes from a JWT access token.
 ///
-/// Returns an empty list for opaque (non-JWT) tokens or tokens without a
-/// `scope` claim, which forces scope step-up to treat them as missing scopes.
+/// OAuth uses a space-delimited `scope` string (RFC), but some IdPs (e.g. Azure
+/// AD) use `scp`, and either may be encoded as a JSON array — so all of those
+/// forms are accepted. Returns an empty list for opaque (non-JWT) tokens or
+/// tokens without a recognized scope claim; coverage then falls back to the
+/// scopes recorded on the [`StoredToken`] (see [`granted_scopes`]).
 fn scopes_from_jwt(token: &str) -> Vec<String> {
-    decode_jwt_claims(token)
-        .and_then(|claims| {
-            claims
-                .get("scope")
-                .and_then(Value::as_str)
-                .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
-        })
-        .unwrap_or_default()
+    let Some(claims) = decode_jwt_claims(token) else {
+        return Vec::new();
+    };
+    for key in ["scope", "scp"] {
+        if let Some(value) = claims.get(key) {
+            let scopes = scopes_from_claim(value);
+            if !scopes.is_empty() {
+                return scopes;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Parses a scope claim that may be a space-delimited string or a JSON array of
+/// (possibly space-delimited) strings.
+fn scopes_from_claim(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(scope) => scope.split_whitespace().map(str::to_owned).collect(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .flat_map(str::split_whitespace)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// All scopes an access token is known to carry: the JWT `scope`/`scp` claim
+/// plus the scopes recorded when the token was obtained. The recorded scopes
+/// make coverage work for opaque tokens and IdPs that omit scopes from the
+/// access token.
+fn granted_scopes(token: &StoredToken) -> Vec<String> {
+    let mut scopes = scopes_from_jwt(&token.access_token);
+    for scope in &token.scopes {
+        if !scopes.contains(scope) {
+            scopes.push(scope.clone());
+        }
+    }
+    scopes
+}
+
+/// The action scope step-up should take for a token, given what it already
+/// grants and what the command requires. Pure so the decision is unit-testable
+/// without real TTY detection or a browser flow.
+#[derive(Debug, PartialEq, Eq)]
+enum StepUp {
+    /// The token already covers every required scope.
+    Covered,
+    /// Re-authenticate requesting this scope set (defaults ∪ granted ∪ required).
+    Reauthenticate(Vec<String>),
+    /// Scopes are missing but the session is non-interactive, so step-up cannot
+    /// prompt; carries the missing scopes for the error message.
+    MissingNonInteractive(Vec<String>),
+}
+
+fn plan_step_up(
+    defaults: &[String],
+    granted: &[String],
+    required: &[String],
+    interactive: bool,
+) -> StepUp {
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|scope| !granted.iter().any(|have| have == *scope))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        StepUp::Covered
+    } else if interactive {
+        StepUp::Reauthenticate(union_scopes(defaults, granted, required))
+    } else {
+        StepUp::MissingNonInteractive(missing)
+    }
+}
+
+/// Treats the session as interactive if any stdio stream is a TTY, so
+/// redirecting one (e.g. capturing stderr) does not block a user who can still
+/// complete the browser flow.
+fn session_is_interactive() -> bool {
+    std::io::stdin().is_terminal()
+        || std::io::stdout().is_terminal()
+        || std::io::stderr().is_terminal()
+}
+
+/// Error returned when required scopes are missing and step-up cannot prompt.
+fn missing_scope_error(env: &str, missing: &[String]) -> CliCoreError {
+    let display = missing.join(", ");
+    let hint = missing
+        .iter()
+        .map(|scope| format!("--scope {scope}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    CliCoreError::message(format!(
+        "access token for {env:?} is missing required scope(s): {display}; \
+         run `auth login --env {env} {hint}` in an interactive terminal"
+    ))
 }
 
 /// Returns the first claim value that is a non-empty string, in priority order.
@@ -1150,17 +1241,35 @@ fn extract_identity(claims: &Map<String, Value>, priority: &[String]) -> String 
         .to_owned()
 }
 
-async fn parse_token_response(response: reqwest::Response, _env: &str) -> Result<StoredToken> {
+async fn parse_token_response(
+    response: reqwest::Response,
+    requested_scopes: &[String],
+) -> Result<StoredToken> {
     let body: TokenResponse = response
         .json()
         .await
         .map_err(|err| CliCoreError::message(format!("failed to parse token response: {err}")))?;
     let expires_in = body.expires_in.unwrap_or(3600);
     let expires_at = Utc::now().timestamp() + expires_in;
+    // Record what the token grants: the server's echoed `scope` when present,
+    // otherwise the scopes we asked for. This is the coverage signal for opaque
+    // tokens, which carry no readable scope claim.
+    let scopes = body
+        .scope
+        .as_deref()
+        .map(|scope| {
+            scope
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|scopes| !scopes.is_empty())
+        .unwrap_or_else(|| requested_scopes.to_vec());
     Ok(StoredToken {
         access_token: body.access_token,
         expires_at,
         refresh_token: body.refresh_token,
+        scopes,
     })
 }
 
@@ -1223,6 +1332,18 @@ mod tests {
             access_token: access_token.to_owned(),
             expires_at: Utc::now().timestamp() + 3600,
             refresh_token: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn token_with_scopes(access_token: &str, scopes: &[&str]) -> StoredToken {
+        // No struct-update from `valid_token`: StoredToken is `Drop`
+        // (ZeroizeOnDrop), so fields cannot be moved out of another instance.
+        StoredToken {
+            access_token: access_token.to_owned(),
+            expires_at: Utc::now().timestamp() + 3600,
+            refresh_token: None,
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
         }
     }
 
@@ -1232,6 +1353,7 @@ mod tests {
             // Older than the expiry buffer so is_valid() returns false.
             expires_at: Utc::now().timestamp() - TOKEN_EXPIRY_BUFFER_SECS - 1,
             refresh_token: None,
+            scopes: Vec::new(),
         }
     }
 
@@ -1269,6 +1391,77 @@ mod tests {
     fn scopes_from_jwt_parses_scope_claim() {
         let token = make_jwt(&json!({ "scope": "a b c" }));
         assert_eq!(scopes_from_jwt(&token), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn scopes_from_jwt_parses_scp_and_array_claims() {
+        // Azure-style `scp` array.
+        let scp = make_jwt(&json!({ "scp": ["a", "b"] }));
+        assert_eq!(scopes_from_jwt(&scp), vec!["a", "b"]);
+        // `scope` encoded as an array.
+        let array = make_jwt(&json!({ "scope": ["a", "b c"] }));
+        assert_eq!(scopes_from_jwt(&array), vec!["a", "b", "c"]);
+        // Empty `scope` falls through to `scp`.
+        let mixed = make_jwt(&json!({ "scope": "", "scp": ["x"] }));
+        assert_eq!(scopes_from_jwt(&mixed), vec!["x"]);
+    }
+
+    #[test]
+    fn granted_scopes_uses_recorded_scopes_for_opaque_token() {
+        // An opaque (non-JWT) token carries no readable claim, so coverage comes
+        // from the scopes recorded when it was obtained.
+        let token = token_with_scopes("opaque-token", &["a", "b"]);
+        assert_eq!(granted_scopes(&token), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn plan_step_up_covers_reauths_and_fails_non_interactive() {
+        let defaults = vec!["base".to_owned()];
+        let granted = vec!["base".to_owned(), "read".to_owned()];
+        let read = vec!["read".to_owned()];
+        let write = vec!["write".to_owned()];
+
+        // Already covered.
+        assert_eq!(
+            plan_step_up(&defaults, &granted, &read, true),
+            StepUp::Covered
+        );
+        // Missing + interactive → reauth requesting the union.
+        assert_eq!(
+            plan_step_up(&defaults, &granted, &write, true),
+            StepUp::Reauthenticate(vec![
+                "base".to_owned(),
+                "read".to_owned(),
+                "write".to_owned()
+            ])
+        );
+        // Missing + non-interactive → fail fast, carrying the missing scopes.
+        assert_eq!(
+            plan_step_up(&defaults, &granted, &write, false),
+            StepUp::MissingNonInteractive(vec!["write".to_owned()])
+        );
+    }
+
+    /// An opaque cached token whose recorded scopes cover the requirement is
+    /// returned without starting a flow — proving coverage no longer depends on
+    /// a readable JWT scope claim.
+    #[tokio::test]
+    async fn get_credential_for_uses_recorded_scopes_for_opaque_token() {
+        let provider = test_provider();
+        provider
+            .store_cached_token("dev", token_with_scopes("opaque-token", &["read", "write"]))
+            .await;
+
+        let meta = crate::middleware::CommandMeta {
+            scopes: vec!["read".to_owned()],
+            ..crate::middleware::CommandMeta::default()
+        };
+        let req = CredentialRequest::new("dev", "app:list", "read", &meta);
+        let credential = provider
+            .get_credential_for(&req)
+            .await
+            .expect("recorded scopes cover the requirement");
+        assert_eq!(credential.token, "opaque-token");
     }
 
     #[test]
