@@ -155,9 +155,11 @@ struct ResolverInner {
     /// previously-resolved (narrower) credential.
     state: Mutex<ResolveState>,
     /// Write-once mirror of the first resolved credential so [`CredentialResolver::peek`]
-    /// can lend a reference without holding a lock. Identity is stable across
-    /// step-up, so a later wider credential need not replace it for
-    /// audit/activity purposes.
+    /// can lend a reference without holding a lock. `peek` (used for audit/activity
+    /// identity) therefore reflects the *first* resolved credential and is not
+    /// replaced by a later step-up. This assumes step-up re-authenticates the same
+    /// user — the expected case, though a browser flow could in principle return a
+    /// different account.
     cell: OnceCell<Credential>,
 }
 

@@ -123,9 +123,13 @@ fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> String {
 /// JSON array (multiple values) or a single string.
 fn string_vec_arg(args: &serde_json::Map<String, Value>, name: &str) -> Vec<String> {
     match args.get(name) {
+        // Drop empty strings: an empty scope token is never valid and only
+        // produces confusing auth-server errors.
         Some(Value::Array(items)) => items
             .iter()
-            .filter_map(|item| item.as_str().map(str::to_owned))
+            .filter_map(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
             .collect(),
         Some(Value::String(value)) if !value.is_empty() => vec![value.clone()],
         _ => Vec::new(),
