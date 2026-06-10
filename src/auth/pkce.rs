@@ -713,6 +713,7 @@ impl AuthProvider for PkceAuthProvider {
                 // drops scopes acquired by an earlier login or step-up.
                 StepUp::Reauthenticate(union) => {
                     let token = self.reauthenticate(env, &union).await?;
+                    ensure_granted(env, &token, required)?;
                     return Ok(self.build_credential(env, &token));
                 }
             }
@@ -721,6 +722,7 @@ impl AuthProvider for PkceAuthProvider {
         // No usable token: authenticate once, requesting defaults ∪ required.
         let union = union_scopes(&self.scopes, &[], required);
         let token = self.reauthenticate(env, &union).await?;
+        ensure_granted(env, &token, required)?;
         Ok(self.build_credential(env, &token))
     }
 
@@ -1217,6 +1219,33 @@ fn session_is_interactive() -> bool {
         || std::io::stderr().is_terminal()
 }
 
+/// Confirms a freshly (re)authenticated token actually grants `required`.
+///
+/// Re-consent does not guarantee the authorization server grants every requested
+/// scope (it may decline by policy). When the difference is detectable — the
+/// token is a JWT exposing its scopes, or the token response echoed a narrower
+/// `scope` — return a clear error instead of handing back an under-scoped token
+/// that the API would later reject with a 403, and instead of re-prompting in a
+/// loop the server will keep refusing. (For opaque tokens whose grant the server
+/// does not echo, the recorded scopes equal what was requested, so an undetected
+/// decline still surfaces downstream as a 403.)
+fn ensure_granted(env: &str, token: &StoredToken, required: &[String]) -> Result<()> {
+    let granted = granted_scopes(token);
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|scope| !granted.iter().any(|have| have == *scope))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CliCoreError::message(format!(
+            "authorization server did not grant required scope(s) for {env:?}: {}",
+            missing.join(", ")
+        )))
+    }
+}
+
 /// Error returned when required scopes are missing and step-up cannot prompt.
 fn missing_scope_error(env: &str, missing: &[String]) -> CliCoreError {
     let display = missing.join(", ");
@@ -1412,6 +1441,26 @@ mod tests {
         // from the scopes recorded when it was obtained.
         let token = token_with_scopes("opaque-token", &["a", "b"]);
         assert_eq!(granted_scopes(&token), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ensure_granted_rejects_a_token_missing_required_scopes() {
+        let required = vec!["a".to_owned(), "b".to_owned()];
+        // JWT that exposes only `a` → `b` is detectably not granted.
+        let jwt = valid_token(&make_jwt(&json!({ "scope": "a" })));
+        let err = ensure_granted("dev", &jwt, &required).expect_err("b is not granted");
+        assert!(
+            err.to_string().contains("did not grant required scope(s)"),
+            "{err}"
+        );
+        assert!(err.to_string().contains('b'), "{err}");
+
+        // A token granting both passes.
+        let ok = valid_token(&make_jwt(&json!({ "scope": "a b" })));
+        ensure_granted("dev", &ok, &required).expect("both granted");
+        // Recorded scopes (opaque token) also satisfy the check.
+        let opaque = token_with_scopes("opaque", &["a", "b"]);
+        ensure_granted("dev", &opaque, &required).expect("recorded scopes granted");
     }
 
     #[test]
