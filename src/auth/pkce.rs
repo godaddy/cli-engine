@@ -709,7 +709,7 @@ impl AuthProvider for PkceAuthProvider {
                     .join(" ");
                 return Err(CliCoreError::message(format!(
                     "access token for {env:?} is missing required scope(s): {display}; \
-                     run `auth login {hint}` in an interactive terminal"
+                     run `auth login --env {env} {hint}` in an interactive terminal"
                 )));
             }
 
