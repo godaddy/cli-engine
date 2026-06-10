@@ -144,6 +144,31 @@ impl CommandContext {
     pub async fn try_credential(&self) -> Result<Option<Credential>> {
         self.credential.try_resolve().await
     }
+
+    /// Resolves a credential that additionally covers `extra` scopes, on top of
+    /// the command's declared scopes.
+    ///
+    /// Use this when the required scopes are only known at runtime (for example
+    /// a generic API caller that derives scopes from the target endpoint). A
+    /// scope-aware auth provider re-authenticates when the cached token does not
+    /// already cover the requested set.
+    ///
+    /// Convenience wrapper over
+    /// [`self.credential.resolve_with_scopes()`](CredentialResolver::resolve_with_scopes).
+    ///
+    /// If the handler also issues HTTP requests through the transport bearer
+    /// injector, call this **before** the first request: the injector resolves
+    /// and caches a scope-unaware token, so stepping up afterwards would not
+    /// affect requests it already authorized. See
+    /// [`CredentialResolver::resolve_with_scopes`] for the full ordering note.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is marked `no_auth`, or when the auth
+    /// provider fails to produce a credential.
+    pub async fn credential_with_scopes(&self, extra: &[String]) -> Result<Credential> {
+        self.credential.resolve_with_scopes(extra).await
+    }
 }
 
 /// Declarative leaf command metadata and parser arguments.
@@ -307,6 +332,30 @@ impl CommandSpec {
     #[must_use]
     pub fn with_auth_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.auth_metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Declares the OAuth scopes this command requires.
+    ///
+    /// Sugar over [`with_auth_metadata`](CommandSpec::with_auth_metadata) with the
+    /// `"scopes"` key (whitespace-joined). The scopes surface on
+    /// [`CommandMeta::scopes`](crate::CommandMeta) and reach the auth provider via
+    /// [`CredentialRequest`](crate::CredentialRequest); a provider that supports
+    /// scope step-up re-authenticates when the cached token lacks them.
+    #[must_use]
+    pub fn with_scopes(mut self, scopes: &[impl AsRef<str>]) -> Self {
+        let joined = scopes
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Mirror `CommandMeta::set_scopes`: an empty list clears the key rather
+        // than leaving an empty-but-present `auth_metadata["scopes"]`.
+        if joined.is_empty() {
+            self.auth_metadata.remove("scopes");
+        } else {
+            self.auth_metadata.insert("scopes".to_owned(), joined);
+        }
         self
     }
 

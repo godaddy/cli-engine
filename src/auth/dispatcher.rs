@@ -2,7 +2,8 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 
-use super::{AuthProvider, Credential};
+use super::{AuthProvider, Credential, CredentialRequest};
+use crate::middleware::CommandMeta;
 use crate::{CliCoreError, Result};
 
 /// Routes auth operations to registered providers by name.
@@ -77,13 +78,41 @@ impl Dispatcher {
         self.get(name)?.get_credential(env, command, tier).await
     }
 
+    /// Gets a credential from a named provider, passing the command's full
+    /// [`CredentialRequest`] so metadata-aware providers (e.g. OAuth scope
+    /// step-up) can act on it.
+    pub async fn get_credential_for(
+        &self,
+        name: &str,
+        req: &CredentialRequest<'_>,
+    ) -> Result<Credential> {
+        self.get(name)?.get_credential_for(req).await
+    }
+
     /// Clears any cached credential, ignoring logout failures, then authenticates.
     pub async fn login(&self, name: &str, env: &str) -> Result<Credential> {
+        self.login_with_scopes(name, env, &[]).await
+    }
+
+    /// Like [`login`](Dispatcher::login), but requests `additional_scopes` on top
+    /// of the provider's defaults.
+    ///
+    /// The scopes are carried as [`CommandMeta::scopes`] on a synthesized
+    /// request; providers without scope support ignore them.
+    pub async fn login_with_scopes(
+        &self,
+        name: &str,
+        env: &str,
+        additional_scopes: &[String],
+    ) -> Result<Credential> {
         let provider = self.get(name)?;
         if let Err(err) = provider.logout(env).await {
             tracing::debug!(provider = name, error = %err, "ignoring logout error before login");
         }
-        provider.get_credential(env, "", "").await
+        let mut meta = CommandMeta::default();
+        meta.set_scopes(additional_scopes.to_vec());
+        let req = CredentialRequest::new(env, "", "", &meta);
+        provider.get_credential_for(&req).await
     }
 
     /// Gets cached credential status from a named provider.
@@ -174,6 +203,10 @@ impl AuthProvider for SingleProvider {
         self.dispatcher
             .get_credential(&self.name, env, command, tier)
             .await
+    }
+
+    async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
+        self.dispatcher.get_credential_for(&self.name, req).await
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {

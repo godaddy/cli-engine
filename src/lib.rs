@@ -89,9 +89,9 @@ pub mod transport;
 pub mod tree;
 
 pub use auth::{
-    AuthLoginResult, AuthProvider, AuthStatusEntry, CACHE_TTL, Credential, Dispatcher,
-    SingleProvider, StatusEntry, auth_command_group, login_and_build, logout_result, status_result,
-    to_status_entry,
+    AuthLoginResult, AuthProvider, AuthStatusEntry, CACHE_TTL, Credential, CredentialRequest,
+    Dispatcher, SingleProvider, StatusEntry, auth_command_group, login_and_build,
+    login_and_build_with_scopes, logout_result, status_result, to_status_entry,
 };
 pub use cli::{
     ApplyFlags, Argv0LinkMethod, Argv0Route, BuildInfo, Cli, CliConfig, CliRunOutput,

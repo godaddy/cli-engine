@@ -8,10 +8,10 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
-    CommandResult, Credential, Dispatcher, Result, SchemaRegistry, Tier,
+    CommandResult, Credential, CredentialRequest, Dispatcher, Result, SchemaRegistry, Tier,
     error::{CliCoreError, exit_code_for_error},
     output::{
         Envelope, HumanViewRegistry, OutputFormat, PipelineOpts, apply_pipeline,
@@ -56,6 +56,23 @@ impl CommandMeta {
     #[must_use]
     pub fn fixed_env(&self) -> Option<&str> {
         self.auth_metadata.get("fixed_env").map(String::as_str)
+    }
+
+    /// Sets the OAuth scopes, keeping [`scopes`](CommandMeta::scopes) and
+    /// `auth_metadata["scopes"]` consistent.
+    ///
+    /// `scopes` is documented as derived from `auth_metadata["scopes"]`, so any
+    /// code that synthesizes or widens scopes (e.g. runtime step-up) should use
+    /// this rather than assigning the field directly, so metadata-aware providers
+    /// reading `auth_metadata` see the same set. An empty list removes the key.
+    pub fn set_scopes(&mut self, scopes: Vec<String>) {
+        if scopes.is_empty() {
+            self.auth_metadata.remove("scopes");
+        } else {
+            self.auth_metadata
+                .insert("scopes".to_owned(), scopes.join(" "));
+        }
+        self.scopes = scopes;
     }
 }
 
@@ -118,17 +135,23 @@ impl AuthRequirement {
 
 /// Resolves the credential for a single command invocation, memoizing the result.
 ///
-/// Resolution — including any interactive browser/OAuth flow — runs at most once:
-/// a handler and an authorizer that both ask share a single resolution, and the
-/// engine resolves it up front for [`AuthRequirement::Required`] commands. For
-/// [`Optional`](AuthRequirement::Optional) commands resolution is deferred until a
-/// handler or authorizer calls [`resolve`](Self::resolve) or
-/// [`try_resolve`](Self::try_resolve), and `--schema`/`--dry-run` short-circuit
-/// before any resolution happens.
+/// Resolution — including any interactive browser/OAuth flow — runs once for a
+/// given scope set: a handler and an authorizer that both ask share a single
+/// resolution, and the engine resolves it up front for
+/// [`AuthRequirement::Required`] commands. For [`Optional`](AuthRequirement::Optional)
+/// commands resolution is deferred until a handler or authorizer calls
+/// [`resolve`](Self::resolve) or [`try_resolve`](Self::try_resolve), and
+/// `--schema`/`--dry-run` short-circuit before any resolution happens.
 ///
-/// The resolved credential is memoized: a handler and an authorizer that both
-/// ask share a single resolution. Clones share the same underlying state, so the
-/// engine can observe (via [`peek`](Self::peek)) whatever a handler resolved.
+/// [`resolve_with_scopes`](Self::resolve_with_scopes) may trigger an *additional*
+/// resolution when it needs scopes the memoized credential does not yet cover
+/// (OAuth scope step-up); a scope-aware provider then re-authenticates for the
+/// wider set. Resolutions are serialized, so concurrent callers never launch
+/// overlapping interactive flows.
+///
+/// The resolved credential is memoized: callers that need no new scopes share a
+/// single resolution. Clones share the same underlying state, so the engine can
+/// observe (via [`peek`](Self::peek)) whatever a handler resolved.
 #[derive(Clone)]
 pub struct CredentialResolver {
     inner: Arc<ResolverInner>,
@@ -142,7 +165,26 @@ struct ResolverInner {
     command_path: String,
     tier: String,
     no_auth: bool,
+    /// Static command metadata; `meta.scopes` are always requested.
+    meta: CommandMeta,
+    /// Authoritative resolved credential plus the scopes it was requested with.
+    /// Serializes concurrent resolution and lets scope step-up replace a
+    /// previously-resolved (narrower) credential.
+    state: Mutex<ResolveState>,
+    /// Write-once mirror of the first resolved credential so [`CredentialResolver::peek`]
+    /// can lend a reference without holding a lock. `peek` (used for audit/activity
+    /// identity) therefore reflects the *first* resolved credential and is not
+    /// replaced by a later step-up. That is sound because step-up is required to
+    /// re-authenticate the *same* identity: [`resolve_scopes`](CredentialResolver::resolve_scopes)
+    /// aborts if a step-up returns a different account, so the mirrored identity
+    /// always matches the identity that performed every action in the command.
     cell: OnceCell<Credential>,
+}
+
+#[derive(Debug, Default)]
+struct ResolveState {
+    credential: Option<Credential>,
+    requested: Vec<String>,
 }
 
 impl std::fmt::Debug for CredentialResolver {
@@ -165,6 +207,7 @@ impl CredentialResolver {
         command_path: String,
         tier: String,
         no_auth: bool,
+        meta: CommandMeta,
     ) -> Self {
         Self {
             inner: Arc::new(ResolverInner {
@@ -174,6 +217,8 @@ impl CredentialResolver {
                 command_path,
                 tier,
                 no_auth,
+                meta,
+                state: Mutex::new(ResolveState::default()),
                 cell: OnceCell::new(),
             }),
         }
@@ -192,27 +237,96 @@ impl CredentialResolver {
                 "command is marked no_auth and has no credential",
             ));
         }
+        self.resolve_scopes(&[]).await
+    }
+
+    /// Resolves a credential that additionally covers `extra` scopes (on top of
+    /// the command's declared [`CommandMeta::scopes`]).
+    ///
+    /// Used by handlers whose required scopes are only known at runtime (for
+    /// example a generic `api call` that derives scopes from the target
+    /// endpoint). A scope-aware auth provider re-authenticates when the cached
+    /// token does not already cover the requested set.
+    ///
+    /// # Ordering with the transport injector
+    ///
+    /// The HTTP transport's bearer injector resolves its token through the
+    /// provider's scope-*unaware* path and caches the first token it sees for the
+    /// injector's lifetime. So when a handler both steps up scopes and makes HTTP
+    /// calls through that injector, call `resolve_with_scopes` (or
+    /// [`CommandContext::credential_with_scopes`](crate::CommandContext::credential_with_scopes))
+    /// **before** the first request: that populates the provider cache with the
+    /// wider-scoped token, which the injector then picks up. Resolving after the
+    /// injector's first `inject` would send the narrower token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is marked
+    /// [`no_auth`](crate::CommandSpec::no_auth), or when the auth provider fails
+    /// to produce a credential.
+    pub async fn resolve_with_scopes(&self, extra: &[String]) -> Result<Credential> {
+        if self.inner.no_auth {
+            return Err(CliCoreError::message(
+                "command is marked no_auth and has no credential",
+            ));
+        }
+        self.resolve_scopes(extra).await
+    }
+
+    /// Shared resolution: returns the memoized credential when it already covers
+    /// the wanted scopes, otherwise (re)authenticates requesting the union and
+    /// updates the memoized credential.
+    async fn resolve_scopes(&self, extra: &[String]) -> Result<Credential> {
         let inner = &self.inner;
+        let mut want = inner.meta.scopes.clone();
+        for scope in extra {
+            if !want.contains(scope) {
+                want.push(scope.clone());
+            }
+        }
+
+        let mut state = inner.state.lock().await;
+        if let Some(credential) = &state.credential
+            && want.iter().all(|scope| state.requested.contains(scope))
+        {
+            return Ok(credential.clone());
+        }
+
+        let mut requested = state.requested.clone();
+        for scope in &want {
+            if !requested.contains(scope) {
+                requested.push(scope.clone());
+            }
+        }
+        let mut meta = inner.meta.clone();
+        meta.set_scopes(requested.clone());
+        let req = CredentialRequest::new(&inner.env, &inner.command_path, &inner.tier, &meta);
         let credential = inner
-            .cell
-            .get_or_try_init(async || {
-                inner
-                    .auth
-                    .get_credential(
-                        &inner.provider,
-                        &inner.env,
-                        &inner.command_path,
-                        &inner.tier,
-                    )
-                    .await
-                    // Mark resolution failures so the engine can classify them as
-                    // `auth-error` based on the error a handler actually returns,
-                    // rather than tracking a separate side-channel flag that could
-                    // go stale if the handler swallows the failure.
-                    .map_err(|source| auth_resolution_error(&inner.provider, source))
-            })
-            .await?;
-        Ok(credential.clone())
+            .auth
+            .get_credential_for(&inner.provider, &req)
+            .await
+            // Mark resolution failures so the engine can classify them as
+            // `auth-error` based on the error a handler actually returns.
+            .map_err(|source| auth_resolution_error(&inner.provider, source))?;
+        // Guard against a step-up that re-authenticates as a *different* identity.
+        // `peek` (audit/activity identity) reflects the first resolution, so a
+        // silent account switch would misattribute the elevated action. Abort
+        // rather than proceed under a mismatched identity.
+        if let Some(previous) = &state.credential {
+            let previous_key = identity_key(previous);
+            let new_key = identity_key(&credential);
+            if !previous_key.is_empty() && !new_key.is_empty() && previous_key != new_key {
+                return Err(CliCoreError::message(format!(
+                    "scope step-up authenticated as a different identity \
+                     (was {previous_key:?}, now {new_key:?}); aborting"
+                )));
+            }
+        }
+        state.credential = Some(credential.clone());
+        state.requested = requested;
+        // Mirror the first resolution for `peek`; ignored once already set.
+        drop(inner.cell.set(credential.clone()));
+        Ok(credential)
     }
 
     /// Resolves the credential when one is available.
@@ -253,6 +367,17 @@ fn auth_resolution_error(provider: &str, source: CliCoreError) -> CliCoreError {
             provider: provider.to_owned(),
             source: Box::new(other),
         },
+    }
+}
+
+/// Stable identity discriminator for a credential: the subject (`sub`) when set,
+/// otherwise the human identity. Empty when the provider exposes neither, in
+/// which case the step-up identity guard cannot (and does not) compare.
+fn identity_key(credential: &Credential) -> &str {
+    if credential.sub.is_empty() {
+        credential.identity.as_str()
+    } else {
+        credential.sub.as_str()
     }
 }
 
@@ -468,6 +593,7 @@ impl Middleware {
             command_path.to_owned(),
             tier_text,
             no_auth,
+            meta.clone(),
         );
 
         if no_auth

@@ -3125,6 +3125,16 @@ fn command_spec_metadata_matches_legacy_annotation_resolver_behavior() {
 }
 
 #[test]
+fn command_spec_with_scopes_round_trips_through_metadata() {
+    let spec = CommandSpec::new("get", "Get").with_scopes(&["commerce.business:read", "x:y"]);
+
+    let meta = spec.metadata();
+
+    assert_eq!(meta.auth_metadata["scopes"], "commerce.business:read x:y");
+    assert_eq!(meta.scopes, vec!["commerce.business:read", "x:y"]);
+}
+
+#[test]
 fn command_spec_metadata_leaves_provider_unset_by_default() {
     let spec = CommandSpec::new("list", "List");
 
@@ -6095,6 +6105,84 @@ async fn middleware_run_does_not_override_explicit_env_arg() {
         .expect("middleware success should render");
 
     assert_eq!(authz.args().await[0].get("env"), Some(&json!("staging")));
+}
+
+#[tokio::test]
+async fn middleware_passes_command_scopes_to_provider_and_supports_step_up() {
+    let recorded = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+    let mut middleware = Middleware::new();
+    middleware.auth.register(Arc::new(RecordingScopeProvider {
+        scopes: Arc::clone(&recorded),
+    }));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.app_id = "test-app".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.env = "prod".to_owned();
+
+    let mut meta = CommandMeta::default();
+    meta.set_scopes(vec!["base:read".to_owned()]);
+    middleware
+        .run(
+            middleware_request(meta, "things:list", value_map([]), value_map([]), "", false),
+            async |credential: CredentialResolver| {
+                // Static command scopes reach the provider.
+                credential.resolve().await.expect("resolve");
+                // A runtime-required scope triggers a re-resolution requesting
+                // the union of declared + extra scopes.
+                credential
+                    .resolve_with_scopes(&["extra:write".to_owned()])
+                    .await
+                    .expect("resolve with scopes");
+                // Already-covered scopes do not re-call the provider.
+                credential
+                    .resolve_with_scopes(&["extra:write".to_owned()])
+                    .await
+                    .expect("resolve with covered scopes");
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("middleware success should render");
+
+    let calls = recorded.lock().await.clone();
+    assert_eq!(calls.len(), 2, "third request was already covered");
+    assert_eq!(calls[0], vec!["base:read"]);
+    assert_eq!(calls[1], vec!["base:read", "extra:write"]);
+}
+
+#[tokio::test]
+async fn middleware_aborts_step_up_that_switches_identity() {
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(SwitchingIdentityProvider {
+            calls: Arc::new(Mutex::new(0)),
+        }));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.app_id = "test-app".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.env = "prod".to_owned();
+
+    let mut meta = CommandMeta::default();
+    meta.set_scopes(vec!["base:read".to_owned()]);
+    middleware
+        .run(
+            middleware_request(meta, "things:list", value_map([]), value_map([]), "", false),
+            async |credential: CredentialResolver| {
+                // First resolution authenticates as user-a (also the `peek` identity).
+                credential.resolve().await.expect("first resolve");
+                // Step-up forces a fresh resolution; the provider returns user-b,
+                // so the engine must refuse rather than misattribute the action.
+                let err = credential
+                    .resolve_with_scopes(&["extra:write".to_owned()])
+                    .await
+                    .expect_err("identity switch during step-up must abort");
+                assert!(err.to_string().contains("different identity"), "{err}");
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("middleware renders");
 }
 
 #[tokio::test]
@@ -9530,6 +9618,106 @@ impl AuthProvider for RecordingEnvProvider {
             identity: "tester".to_owned(),
             ..Credential::default()
         })
+    }
+
+    async fn status(&self, env: &str) -> Result<Credential> {
+        self.get_credential(env, "", "").await
+    }
+
+    async fn logout(&self, _env: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_environments(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Records the `meta.scopes` of every `get_credential_for` call, so tests can
+/// assert that command scopes (and runtime step-up scopes) reach the provider.
+#[derive(Debug)]
+struct RecordingScopeProvider {
+    scopes: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl AuthProvider for RecordingScopeProvider {
+    fn name(&self) -> &str {
+        "primary"
+    }
+
+    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
+        // Reached only if the framework bypasses get_credential_for; record an
+        // empty scope set so such a regression is visible.
+        self.scopes.lock().await.push(Vec::new());
+        Ok(Credential {
+            token: "token".to_owned(),
+            env: env.to_owned(),
+            ..Credential::default()
+        })
+    }
+
+    async fn get_credential_for(
+        &self,
+        req: &cli_engine::CredentialRequest<'_>,
+    ) -> Result<Credential> {
+        self.scopes.lock().await.push(req.meta.scopes.clone());
+        Ok(Credential {
+            token: "token".to_owned(),
+            env: req.env.to_owned(),
+            ..Credential::default()
+        })
+    }
+
+    async fn status(&self, env: &str) -> Result<Credential> {
+        self.get_credential(env, "", "").await
+    }
+
+    async fn logout(&self, _env: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_environments(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Returns identity `user-a` on its first credential call and `user-b` after,
+/// so a step-up re-resolution observes a different account.
+#[derive(Debug)]
+struct SwitchingIdentityProvider {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl SwitchingIdentityProvider {
+    async fn next_credential(&self, env: &str) -> Credential {
+        let mut calls = self.calls.lock().await;
+        *calls += 1;
+        let sub = if *calls == 1 { "user-a" } else { "user-b" };
+        Credential {
+            token: "token".to_owned(),
+            env: env.to_owned(),
+            sub: sub.to_owned(),
+            ..Credential::default()
+        }
+    }
+}
+
+#[async_trait]
+impl AuthProvider for SwitchingIdentityProvider {
+    fn name(&self) -> &str {
+        "primary"
+    }
+
+    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
+        Ok(self.next_credential(env).await)
+    }
+
+    async fn get_credential_for(
+        &self,
+        req: &cli_engine::CredentialRequest<'_>,
+    ) -> Result<Credential> {
+        Ok(self.next_credential(req.env).await)
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
