@@ -111,12 +111,7 @@ impl Dispatcher {
         }
         let mut meta = CommandMeta::default();
         meta.set_scopes(additional_scopes.to_vec());
-        let req = CredentialRequest {
-            env,
-            command: "",
-            tier: "",
-            meta: &meta,
-        };
+        let req = CredentialRequest::new(env, "", "", &meta);
         provider.get_credential_for(&req).await
     }
 

@@ -288,12 +288,7 @@ impl CredentialResolver {
         }
         let mut meta = inner.meta.clone();
         meta.set_scopes(requested.clone());
-        let req = CredentialRequest {
-            env: &inner.env,
-            command: &inner.command_path,
-            tier: &inner.tier,
-            meta: &meta,
-        };
+        let req = CredentialRequest::new(&inner.env, &inner.command_path, &inner.tier, &meta);
         let credential = inner
             .auth
             .get_credential_for(&inner.provider, &req)

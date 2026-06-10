@@ -44,7 +44,13 @@ use crate::middleware::CommandMeta;
 /// [`CommandMeta`], so a provider can read richer metadata — for example an
 /// OAuth provider reading [`CommandMeta::scopes`] to decide whether the cached
 /// token is sufficient. Providers that do not need metadata can ignore it.
+///
+/// Marked `#[non_exhaustive]` because the framework constructs it (providers only
+/// read it) and more request fields may be added over time; build one with
+/// [`CredentialRequest::new`] rather than a struct literal so adding a field is
+/// not a breaking change for downstream crates.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct CredentialRequest<'req> {
     /// Target environment name.
     pub env: &'req str,
@@ -54,6 +60,24 @@ pub struct CredentialRequest<'req> {
     pub tier: &'req str,
     /// Metadata for the command requesting the credential.
     pub meta: &'req CommandMeta,
+}
+
+impl<'req> CredentialRequest<'req> {
+    /// Creates a request from the routing fields and command metadata.
+    #[must_use]
+    pub fn new(
+        env: &'req str,
+        command: &'req str,
+        tier: &'req str,
+        meta: &'req CommandMeta,
+    ) -> Self {
+        Self {
+            env,
+            command,
+            tier,
+            meta,
+        }
+    }
 }
 
 #[async_trait]
@@ -88,4 +112,21 @@ pub trait AuthProvider: Send + Sync + std::fmt::Debug {
 
     /// Lists environments with cached credentials.
     async fn list_environments(&self) -> Result<Vec<String>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_request_new_sets_all_fields() {
+        let meta = CommandMeta::default();
+        let req = CredentialRequest::new("dev", "app:list", "read", &meta);
+        assert_eq!(req.env, "dev");
+        assert_eq!(req.command, "app:list");
+        assert_eq!(req.tier, "read");
+        // `Copy` is preserved (using `req` after copying it must compile).
+        let copy = req;
+        assert_eq!(copy.env, req.env);
+    }
 }
