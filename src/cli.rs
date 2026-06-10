@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     io::Write,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::{Arc, Mutex},
     time::Duration,
@@ -116,6 +117,57 @@ pub type RootNextActions = Arc<dyn Fn() -> Vec<NextAction> + Send + Sync>;
 /// [`CliConfig::with_admin_category`].
 const DEFAULT_ADMIN_CATEGORY: &str = "Admin";
 
+/// How the engine behaves when invoked under a registered alternative `argv[0]`
+/// name (busybox/git-style multi-call dispatch).
+///
+/// A route is selected when the binary's `argv[0]` basename — or the name given
+/// to the hidden `argv0` command — matches a key registered via
+/// [`CliConfig::with_argv0_alias`] or [`CliConfig::with_argv0_personality`]. An
+/// `argv[0]` that matches no route falls through to the default CLI, so existing
+/// applications that register no routes are unaffected.
+#[derive(Clone)]
+pub enum Argv0Route {
+    /// Rewrite the invocation into these canonical subcommand tokens and run it
+    /// through the normal command tree, with the real argument tail appended.
+    ///
+    /// For example, an `Alias(vec!["project".into(), "list".into()])` registered
+    /// under `pl` makes `pl --team x` behave exactly like `project list --team x`.
+    Alias(Vec<String>),
+    /// Run an entirely separate CLI application built from the returned
+    /// [`CliConfig`] (its own root name, commands, flags, and auth). The
+    /// configuration is built lazily, only when the route is actually dispatched,
+    /// so registering a personality costs nothing for invocations that never hit it.
+    Personality(Arc<dyn Fn() -> CliConfig + Send + Sync>),
+}
+
+impl std::fmt::Debug for Argv0Route {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alias(tokens) => formatter.debug_tuple("Alias").field(tokens).finish(),
+            Self::Personality(_) => formatter.write_str("Personality(..)"),
+        }
+    }
+}
+
+/// On-disk mechanism used by [`Cli::create_link`] to materialize an alternative
+/// `argv[0]` name so the binary can be invoked under it.
+///
+/// Installers pick the mechanism that suits the platform and environment;
+/// self-healing code can re-run [`Cli::create_link`] to restore a deleted link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Argv0LinkMethod {
+    /// A symbolic link to the target executable (`<name>` on Unix, `<name>.exe`
+    /// on Windows). On Windows this may require Developer Mode or elevation.
+    SoftLink,
+    /// A hard link to the target executable (`<name>` on Unix, `<name>.exe` on
+    /// Windows). The link must live on the same volume as the target.
+    HardLink,
+    /// A small shim script that forwards to the target via the `argv0` command:
+    /// a `<name>.cmd` batch file on Windows, or an executable `<name>` shell
+    /// script on Unix. Useful when links are unavailable or inconvenient.
+    Script,
+}
+
 /// Declarative configuration for a CLI application.
 ///
 /// Use [`CliConfig::new`] for the common path and chain `with_*` methods for
@@ -172,6 +224,14 @@ pub struct CliConfig {
     /// admin modules (e.g. godaddy's `env`). When unset, defaults to `"Admin"`;
     /// set it to match a consumer's own taxonomy (e.g. gdx's "Administration").
     pub admin_category: Option<String>,
+    /// Alternative `argv[0]` names this binary may be invoked as, mapped to the
+    /// behavior the engine should take (busybox/git-style multi-call dispatch).
+    ///
+    /// Keyed by the bare alternative name (no path, no extension). Empty by
+    /// default, in which case argv0 dispatch is inert and behavior is identical
+    /// to a binary that never opted in. Populate via [`CliConfig::with_argv0_alias`]
+    /// and [`CliConfig::with_argv0_personality`].
+    pub argv0_routes: BTreeMap<String, Argv0Route>,
 }
 
 impl CliConfig {
@@ -345,6 +405,61 @@ impl CliConfig {
         self.admin_category = Some(category.into());
         self
     }
+
+    /// Registers an alternative `argv[0]` name that acts as a shortcut to a
+    /// command path on this same CLI.
+    ///
+    /// When the binary is invoked under `name` (via symlink, hardlink, copy, or
+    /// the hidden `argv0` command), the engine behaves as if the user had typed
+    /// `command_path` followed by the real argument tail, routed through the
+    /// normal command tree. For example:
+    ///
+    /// ```
+    /// use cli_engine::CliConfig;
+    ///
+    /// // Invoking the binary as `pl --team platform` runs `project list --team platform`.
+    /// let config = CliConfig::new("my-cli", "Team CLI", "my-cli")
+    ///     .with_argv0_alias("pl", ["project", "list"]);
+    /// ```
+    #[must_use]
+    pub fn with_argv0_alias(
+        mut self,
+        name: impl Into<String>,
+        command_path: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let tokens = command_path.into_iter().map(Into::into).collect();
+        self.argv0_routes
+            .insert(name.into(), Argv0Route::Alias(tokens));
+        self
+    }
+
+    /// Registers an alternative `argv[0]` name that runs an entirely separate CLI
+    /// application.
+    ///
+    /// When the binary is invoked under `name`, the engine builds a fresh
+    /// [`CliConfig`] from `build` and runs that application instead — its own root
+    /// name, commands, flags, and auth. The closure runs lazily, only when the
+    /// route is dispatched, so unused personalities cost nothing. The personality
+    /// presents the name from its own [`CliConfig`] in help and usage output.
+    ///
+    /// ```
+    /// use cli_engine::CliConfig;
+    ///
+    /// let config = CliConfig::new("my-cli", "Team CLI", "my-cli")
+    ///     .with_argv0_personality("legacy-tool", || {
+    ///         CliConfig::new("legacy-tool", "Legacy compatibility shim", "legacy-tool")
+    ///     });
+    /// ```
+    #[must_use]
+    pub fn with_argv0_personality(
+        mut self,
+        name: impl Into<String>,
+        build: impl Fn() -> CliConfig + Send + Sync + 'static,
+    ) -> Self {
+        self.argv0_routes
+            .insert(name.into(), Argv0Route::Personality(Arc::new(build)));
+        self
+    }
 }
 
 impl std::fmt::Debug for CliConfig {
@@ -374,6 +489,10 @@ impl std::fmt::Debug for CliConfig {
             .field("has_extra_search_docs", &self.extra_search_docs.is_some())
             .field("has_root_next_actions", &self.root_next_actions.is_some())
             .field("admin_category", &self.admin_category)
+            .field(
+                "argv0_routes",
+                &self.argv0_routes.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -780,6 +899,179 @@ impl Cli {
         self
     }
 
+    /// Resolves busybox/git-style `argv[0]` dispatch before the normal pipeline.
+    ///
+    /// Returns [`Argv0Outcome::Proceed`] with the (possibly rewritten) argument
+    /// vector to feed the normal command pipeline, or [`Argv0Outcome::Handled`]
+    /// with a fully rendered result when a personality ran or an explicit `argv0`
+    /// invocation was rejected. When no routes are registered this is inert and
+    /// returns the arguments unchanged.
+    async fn resolve_argv0(&self, text_args: Vec<String>) -> Argv0Outcome {
+        if self.config.argv0_routes.is_empty() {
+            return Argv0Outcome::Proceed(text_args);
+        }
+
+        // The hidden `argv0` meta-command (`<bin> argv0 <name> [args...]`) forces
+        // a route without an actual symlink. It is recognized positionally as the
+        // first argument after the program name and is never registered with clap,
+        // so it stays absent from `--help`, `tree`, and `--search`.
+        let explicit = text_args.get(1).map(String::as_str) == Some("argv0");
+        let (name, rest) = if explicit {
+            match text_args.get(2) {
+                None => {
+                    return Argv0Outcome::Handled(self.finish_run(argv0_error(
+                        "the argv0 command requires a name to dispatch as",
+                    )));
+                }
+                // Normalize the explicit name the same way as a symlink basename
+                // so a route registered as `whatever` matches whether the caller
+                // passed `whatever`, `whatever.exe`, or a `.cmd` shim's `whatever.cmd`.
+                Some(name) => (
+                    program_basename(name),
+                    text_args
+                        .get(3..)
+                        .map(<[String]>::to_vec)
+                        .unwrap_or_default(),
+                ),
+            }
+        } else {
+            let name = text_args
+                .first()
+                .map(|arg| program_basename(arg))
+                .unwrap_or_default();
+            let rest = text_args
+                .get(1..)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default();
+            (name, rest)
+        };
+
+        match self.config.argv0_routes.get(&name) {
+            Some(Argv0Route::Alias(tokens)) => {
+                // Rewrite as `<canonical-name> <tokens...> <rest...>`. Element 0 is
+                // the canonical name so the downstream program-name skip applies.
+                let mut rewritten = Vec::with_capacity(1 + tokens.len() + rest.len());
+                rewritten.push(self.config.name.clone());
+                rewritten.extend(tokens.iter().cloned());
+                rewritten.extend(rest);
+                Argv0Outcome::Proceed(rewritten)
+            }
+            Some(Argv0Route::Personality(build)) => {
+                // Hand off to an independent CLI built lazily from the route. Its
+                // own config name leads so its help/usage and program-name skip
+                // render correctly. `Box::pin` breaks the recursive `async fn`.
+                let config = build();
+                let bin = config.name.clone();
+                let alt = Self::new(config);
+                let mut alt_args = Vec::with_capacity(1 + rest.len());
+                alt_args.push(bin);
+                alt_args.extend(rest);
+                Argv0Outcome::Handled(Box::pin(alt.run(alt_args)).await)
+            }
+            None if explicit => Argv0Outcome::Handled(self.finish_run(argv0_error(&format!(
+                "{name:?} is not a registered argv0 name; known names: {}",
+                self.known_argv0_names()
+            )))),
+            None => {
+                // Unregistered name (e.g. the binary renamed to something we do not
+                // recognize): fall through to the default CLI. Normalizing element 0
+                // to the canonical name lets a renamed binary parse as the default
+                // application instead of treating its name as a command token.
+                let mut rewritten = Vec::with_capacity(1 + rest.len());
+                rewritten.push(self.config.name.clone());
+                rewritten.extend(rest);
+                Argv0Outcome::Proceed(rewritten)
+            }
+        }
+    }
+
+    /// Comma-separated, sorted list of registered alternative `argv[0]` names,
+    /// used in the error shown for an unknown explicit `argv0` invocation.
+    fn known_argv0_names(&self) -> String {
+        self.config
+            .argv0_routes
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Returns the registered alternative `argv[0]` names, sorted.
+    ///
+    /// Useful for install or self-healing code that iterates the names and calls
+    /// [`Cli::create_link`] for each.
+    #[must_use]
+    pub fn argv0_names(&self) -> Vec<&str> {
+        self.config
+            .argv0_routes
+            .keys()
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Creates an on-disk link in `dir` that lets the binary be invoked under the
+    /// registered alternative `argv[0]` name `name`, using `method`.
+    ///
+    /// `target` is the executable the link points at; pass `None` to use the
+    /// current executable ([`std::env::current_exe`]), which is the common choice
+    /// for install and self-healing code. The file name follows the platform and
+    /// method: a symlink or hard link is `<name>` on Unix and `<name>.exe` on
+    /// Windows; a [`Argv0LinkMethod::Script`] shim is `<name>.cmd` on Windows and
+    /// an executable `<name>` shell script on Unix.
+    ///
+    /// The call is create-if-missing: if the destination already exists it is left
+    /// untouched and its path is returned, so re-running to restore a deleted link
+    /// is safe. The directory is created if necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `name` is not a registered route, if the current
+    /// executable cannot be resolved (when `target` is `None`), or if the
+    /// directory or link cannot be created (e.g. insufficient privilege for a
+    /// Windows symlink, or a hard link across volumes).
+    pub fn create_link(
+        &self,
+        name: &str,
+        dir: impl AsRef<Path>,
+        target: Option<&Path>,
+        method: Argv0LinkMethod,
+    ) -> std::io::Result<PathBuf> {
+        if !self.config.argv0_routes.contains_key(name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name:?} is not a registered argv0 name"),
+            ));
+        }
+
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+        let link = dir.join(argv0_link_file_name(name, method));
+        // Create-if-missing keeps install/self-healing idempotent. `symlink_metadata`
+        // does not follow links, so a present-but-dangling link still counts.
+        if std::fs::symlink_metadata(&link).is_ok() {
+            return Ok(link);
+        }
+
+        let resolved_target;
+        let target = match target {
+            Some(target) => target,
+            None => {
+                resolved_target = std::env::current_exe()?;
+                resolved_target.as_path()
+            }
+        };
+
+        match method {
+            Argv0LinkMethod::SoftLink => create_symlink(target, &link)?,
+            Argv0LinkMethod::HardLink => std::fs::hard_link(target, &link)?,
+            Argv0LinkMethod::Script => {
+                std::fs::write(&link, argv0_script_contents(target, name))?;
+                make_executable(&link)?;
+            }
+        }
+        Ok(link)
+    }
+
     /// Runs the CLI with provided args and captures the rendered result.
     pub async fn run<I, S>(&self, args: I) -> CliRunOutput
     where
@@ -794,6 +1086,10 @@ impl Cli {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let text_args = match self.resolve_argv0(text_args).await {
+            Argv0Outcome::Handled(output) => return output,
+            Argv0Outcome::Proceed(args) => args,
+        };
         let mut clap_args = normalize_optional_global_flags_before_command(&self.root, &text_args);
         if has_root_version_flag(&text_args, &self.root, &self.config.name) {
             return self.finish_run(CliRunOutput {
@@ -1996,10 +2292,93 @@ fn unknown_flag_consumes_value(arg: &str, next: Option<&&String>) -> bool {
 
 fn arg_matches_root_name(arg: &str, root_name: &str) -> bool {
     arg == root_name
-        || std::path::Path::new(arg)
+        || Path::new(arg)
             .file_stem()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n == root_name)
+}
+
+/// Outcome of [`Cli::resolve_argv0`]: either rewritten arguments to feed the
+/// normal pipeline, or a fully rendered result to return immediately.
+enum Argv0Outcome {
+    /// Continue the normal run pipeline with these arguments.
+    Proceed(Vec<String>),
+    /// Return this already-rendered result without further processing.
+    Handled(CliRunOutput),
+}
+
+/// Extracts the bare program name from an `argv[0]` value, dropping any directory
+/// path and file extension (e.g. `/usr/bin/pl` or `pl.exe` both yield `pl`).
+/// Falls back to the raw value when no file stem can be derived.
+fn program_basename(arg: &str) -> String {
+    Path::new(arg)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map_or_else(|| arg.to_owned(), ToOwned::to_owned)
+}
+
+/// Renders a clap-style usage error for a rejected explicit `argv0` invocation.
+fn argv0_error(message: &str) -> CliRunOutput {
+    CliRunOutput {
+        exit_code: 2,
+        rendered: format!("error: {message}\n"),
+    }
+}
+
+/// File name for an alternative `argv[0]` link, per method and host platform.
+fn argv0_link_file_name(name: &str, method: Argv0LinkMethod) -> String {
+    let extension = match method {
+        Argv0LinkMethod::Script if cfg!(windows) => ".cmd",
+        // Unix scripts are extension-less executables; links carry `.exe` on Windows.
+        Argv0LinkMethod::Script => "",
+        _ if cfg!(windows) => ".exe",
+        _ => "",
+    };
+    format!("{name}{extension}")
+}
+
+/// Contents of an alternative `argv[0]` shim script that forwards to `target`
+/// via the explicit `argv0` command. A `.cmd` batch file on Windows, an
+/// executable POSIX shell script elsewhere.
+fn argv0_script_contents(target: &Path, name: &str) -> String {
+    let target = target.display();
+    if cfg!(windows) {
+        format!("@\"{target}\" argv0 {name} %*\r\n")
+    } else {
+        format!("#!/bin/sh\nexec \"{target}\" argv0 {name} \"$@\"\n")
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink creation is not supported on this platform",
+    ))
+}
+
+/// Marks a freshly written shim script executable on Unix; a no-op elsewhere.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn register_runtime_group_schemas(
