@@ -1265,7 +1265,7 @@ mod tests {
         let granted = vec!["b".to_owned(), "c".to_owned()];
         let required = vec!["c".to_owned(), "d".to_owned()];
         assert_eq!(
-            super::union_scopes(&defaults, &granted, &required),
+            union_scopes(&defaults, &granted, &required),
             vec!["a", "b", "c", "d"]
         );
     }
