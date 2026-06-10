@@ -1,4 +1,4 @@
-use clap::Arg;
+use clap::{Arg, ArgAction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -54,8 +54,11 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
                         .long("scope")
                         .short('s')
                         .value_name("SCOPE")
-                        .num_args(0..)
-                        .help("Additional OAuth scope to request (repeatable)"),
+                        // One scope per occurrence, repeatable: `--scope a --scope b`.
+                        // `ArgAction::Append` requires a value, so a bare `--scope`
+                        // is rejected rather than silently doing nothing.
+                        .action(ArgAction::Append)
+                        .help("Additional OAuth scope to request (repeatable, one per flag)"),
                 ),
             async |context| {
                 let provider = string_arg(&context.args, "provider");

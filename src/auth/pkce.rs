@@ -510,13 +510,24 @@ impl PkceAuthProvider {
     }
 
     async fn resolve_token(&self, env: &str) -> Result<StoredToken> {
-        if let Some(token) = self.cached_token(env).await {
+        if let Some(token) = self.existing_token(env).await? {
             return Ok(token);
+        }
+        self.reauthenticate(env, &self.scopes).await
+    }
+
+    /// Returns a usable token from the in-memory cache, keychain, or a refresh —
+    /// **without** launching an interactive PKCE flow. `None` means the caller
+    /// must authenticate. Keeping this flow-free lets `get_credential_for` decide
+    /// the scope set for a single login instead of authenticating twice.
+    async fn existing_token(&self, env: &str) -> Result<Option<StoredToken>> {
+        if let Some(token) = self.cached_token(env).await {
+            return Ok(Some(token));
         }
         if let Some(token) = self.load_token_from_keychain(env).await {
             if token.is_valid() {
                 self.store_cached_token(env, token.clone()).await;
-                return Ok(token);
+                return Ok(Some(token));
             }
             if let Some(refresh_token) = token.refresh_token.as_deref()
                 && let Ok(mut refreshed) = self.refresh_access_token(refresh_token).await
@@ -526,17 +537,21 @@ impl PkceAuthProvider {
                 }
                 self.save_token_to_keychain(env, &refreshed).await?;
                 self.store_cached_token(env, refreshed.clone()).await;
-                return Ok(refreshed);
+                return Ok(Some(refreshed));
             }
         }
-        let token = self.run_pkce_flow(env).await?;
+        Ok(None)
+    }
+
+    /// Runs a fresh interactive PKCE flow requesting exactly `scopes`, replacing
+    /// any stored token for `env`.
+    async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
+        let token = self.run_pkce_flow_with(env, scopes).await?;
+        self.delete_token_from_keychain(env).await;
+        self.cache.write().await.remove(env);
         self.save_token_to_keychain(env, &token).await?;
         self.store_cached_token(env, token.clone()).await;
         Ok(token)
-    }
-
-    async fn run_pkce_flow(&self, env: &str) -> Result<StoredToken> {
-        self.run_pkce_flow_with(env, &self.scopes).await
     }
 
     /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
@@ -657,50 +672,52 @@ impl AuthProvider for PkceAuthProvider {
 
     async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
         let env = req.env;
-        let token = self.resolve_token(env).await?;
         let required = &req.meta.scopes;
-        if required.is_empty() {
-            return Ok(self.build_credential(env, &token));
-        }
 
-        // The access token is a JWT carrying its granted scopes; if it already
-        // covers everything the command needs, no re-auth is required.
-        let granted = scopes_from_jwt(&token.access_token);
-        let missing: Vec<&str> = required
-            .iter()
-            .filter(|scope| !granted.iter().any(|have| have == *scope))
-            .map(String::as_str)
-            .collect();
-        if missing.is_empty() {
-            return Ok(self.build_credential(env, &token));
-        }
-
-        // Step-up means re-consent: the authorization server has no silent
-        // scope-expansion grant, so widening scopes requires a fresh browser
-        // flow. Fail fast in non-interactive contexts rather than hang on the
-        // local callback timeout.
-        if !std::io::stderr().is_terminal() {
-            let missing_list = missing.join(", ");
-            return Err(CliCoreError::message(format!(
-                "access token for {env:?} is missing required scope(s): {missing_list}; \
-                 run `auth login --scope {missing_list}` in an interactive terminal"
-            )));
-        }
-
-        // Request the union (defaults ∪ already-granted ∪ required) so step-up
-        // never drops scopes acquired by an earlier login or step-up.
-        let mut union = self.scopes.clone();
-        for scope in granted.iter().chain(required.iter()) {
-            if !union.iter().any(|have| have == scope) {
-                union.push(scope.clone());
+        // Look for a usable token WITHOUT launching a flow, so we can pick the
+        // scope set for a single login rather than authenticating twice (e.g.
+        // `auth login --scope X` logs out first; resolving defaults and then
+        // stepping up would open the browser twice).
+        if let Some(token) = self.existing_token(env).await? {
+            // The access token is a JWT carrying its granted scopes; if it
+            // already covers everything the command needs, no re-auth is needed.
+            let granted = scopes_from_jwt(&token.access_token);
+            let missing: Vec<&str> = required
+                .iter()
+                .filter(|scope| !granted.iter().any(|have| have == *scope))
+                .map(String::as_str)
+                .collect();
+            if missing.is_empty() {
+                return Ok(self.build_credential(env, &token));
             }
+
+            // Step-up means re-consent: the authorization server has no silent
+            // scope-expansion grant. Fail fast in non-interactive contexts
+            // rather than hang on the local callback timeout.
+            if !std::io::stderr().is_terminal() {
+                let display = missing.join(", ");
+                let hint = missing
+                    .iter()
+                    .map(|scope| format!("--scope {scope}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return Err(CliCoreError::message(format!(
+                    "access token for {env:?} is missing required scope(s): {display}; \
+                     run `auth login {hint}` in an interactive terminal"
+                )));
+            }
+
+            // Union (defaults ∪ already-granted ∪ required) so step-up never
+            // drops scopes acquired by an earlier login or step-up.
+            let union = union_scopes(&self.scopes, &granted, required);
+            let token = self.reauthenticate(env, &union).await?;
+            return Ok(self.build_credential(env, &token));
         }
-        let new_token = self.run_pkce_flow_with(env, &union).await?;
-        self.delete_token_from_keychain(env).await;
-        self.cache.write().await.remove(env);
-        self.save_token_to_keychain(env, &new_token).await?;
-        self.store_cached_token(env, new_token.clone()).await;
-        Ok(self.build_credential(env, &new_token))
+
+        // No usable token: authenticate once, requesting defaults ∪ required.
+        let union = union_scopes(&self.scopes, &[], required);
+        let token = self.reauthenticate(env, &union).await?;
+        Ok(self.build_credential(env, &token))
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
@@ -1085,6 +1102,17 @@ fn decode_jwt_claims(token: &str) -> Option<Map<String, Value>> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Returns `defaults ∪ granted ∪ required`, order-preserving and de-duplicated.
+fn union_scopes(defaults: &[String], granted: &[String], required: &[String]) -> Vec<String> {
+    let mut union = defaults.to_vec();
+    for scope in granted.iter().chain(required.iter()) {
+        if !union.contains(scope) {
+            union.push(scope.clone());
+        }
+    }
+    union
+}
+
 /// Reads the space-delimited `scope` claim from a JWT access token.
 ///
 /// Returns an empty list for opaque (non-JWT) tokens or tokens without a
@@ -1229,6 +1257,17 @@ mod tests {
     fn scopes_from_jwt_parses_scope_claim() {
         let token = make_jwt(&json!({ "scope": "a b c" }));
         assert_eq!(scopes_from_jwt(&token), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn union_scopes_dedupes_and_preserves_order() {
+        let defaults = vec!["a".to_owned(), "b".to_owned()];
+        let granted = vec!["b".to_owned(), "c".to_owned()];
+        let required = vec!["c".to_owned(), "d".to_owned()];
+        assert_eq!(
+            super::union_scopes(&defaults, &granted, &required),
+            vec!["a", "b", "c", "d"]
+        );
     }
 
     #[test]
