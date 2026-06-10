@@ -118,17 +118,23 @@ impl AuthRequirement {
 
 /// Resolves the credential for a single command invocation, memoizing the result.
 ///
-/// Resolution — including any interactive browser/OAuth flow — runs at most once:
-/// a handler and an authorizer that both ask share a single resolution, and the
-/// engine resolves it up front for [`AuthRequirement::Required`] commands. For
-/// [`Optional`](AuthRequirement::Optional) commands resolution is deferred until a
-/// handler or authorizer calls [`resolve`](Self::resolve) or
-/// [`try_resolve`](Self::try_resolve), and `--schema`/`--dry-run` short-circuit
-/// before any resolution happens.
+/// Resolution — including any interactive browser/OAuth flow — runs once for a
+/// given scope set: a handler and an authorizer that both ask share a single
+/// resolution, and the engine resolves it up front for
+/// [`AuthRequirement::Required`] commands. For [`Optional`](AuthRequirement::Optional)
+/// commands resolution is deferred until a handler or authorizer calls
+/// [`resolve`](Self::resolve) or [`try_resolve`](Self::try_resolve), and
+/// `--schema`/`--dry-run` short-circuit before any resolution happens.
 ///
-/// The resolved credential is memoized: a handler and an authorizer that both
-/// ask share a single resolution. Clones share the same underlying state, so the
-/// engine can observe (via [`peek`](Self::peek)) whatever a handler resolved.
+/// [`resolve_with_scopes`](Self::resolve_with_scopes) may trigger an *additional*
+/// resolution when it needs scopes the memoized credential does not yet cover
+/// (OAuth scope step-up); a scope-aware provider then re-authenticates for the
+/// wider set. Resolutions are serialized, so concurrent callers never launch
+/// overlapping interactive flows.
+///
+/// The resolved credential is memoized: callers that need no new scopes share a
+/// single resolution. Clones share the same underlying state, so the engine can
+/// observe (via [`peek`](Self::peek)) whatever a handler resolved.
 #[derive(Clone)]
 pub struct CredentialResolver {
     inner: Arc<ResolverInner>,
