@@ -174,9 +174,10 @@ struct ResolverInner {
     /// Write-once mirror of the first resolved credential so [`CredentialResolver::peek`]
     /// can lend a reference without holding a lock. `peek` (used for audit/activity
     /// identity) therefore reflects the *first* resolved credential and is not
-    /// replaced by a later step-up. This assumes step-up re-authenticates the same
-    /// user — the expected case, though a browser flow could in principle return a
-    /// different account.
+    /// replaced by a later step-up. That is sound because step-up is required to
+    /// re-authenticate the *same* identity: [`resolve_scopes`](CredentialResolver::resolve_scopes)
+    /// aborts if a step-up returns a different account, so the mirrored identity
+    /// always matches the identity that performed every action in the command.
     cell: OnceCell<Credential>,
 }
 
@@ -296,6 +297,20 @@ impl CredentialResolver {
             // Mark resolution failures so the engine can classify them as
             // `auth-error` based on the error a handler actually returns.
             .map_err(|source| auth_resolution_error(&inner.provider, source))?;
+        // Guard against a step-up that re-authenticates as a *different* identity.
+        // `peek` (audit/activity identity) reflects the first resolution, so a
+        // silent account switch would misattribute the elevated action. Abort
+        // rather than proceed under a mismatched identity.
+        if let Some(previous) = &state.credential {
+            let previous_key = identity_key(previous);
+            let new_key = identity_key(&credential);
+            if !previous_key.is_empty() && !new_key.is_empty() && previous_key != new_key {
+                return Err(CliCoreError::message(format!(
+                    "scope step-up authenticated as a different identity \
+                     (was {previous_key:?}, now {new_key:?}); aborting"
+                )));
+            }
+        }
         state.credential = Some(credential.clone());
         state.requested = requested;
         // Mirror the first resolution for `peek`; ignored once already set.
@@ -341,6 +356,17 @@ fn auth_resolution_error(provider: &str, source: CliCoreError) -> CliCoreError {
             provider: provider.to_owned(),
             source: Box::new(other),
         },
+    }
+}
+
+/// Stable identity discriminator for a credential: the subject (`sub`) when set,
+/// otherwise the human identity. Empty when the provider exposes neither, in
+/// which case the step-up identity guard cannot (and does not) compare.
+fn identity_key(credential: &Credential) -> &str {
+    if credential.sub.is_empty() {
+        credential.identity.as_str()
+    } else {
+        credential.sub.as_str()
     }
 }
 

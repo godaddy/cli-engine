@@ -6151,6 +6151,41 @@ async fn middleware_passes_command_scopes_to_provider_and_supports_step_up() {
 }
 
 #[tokio::test]
+async fn middleware_aborts_step_up_that_switches_identity() {
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(SwitchingIdentityProvider {
+            calls: Arc::new(Mutex::new(0)),
+        }));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.app_id = "test-app".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.env = "prod".to_owned();
+
+    let mut meta = CommandMeta::default();
+    meta.set_scopes(vec!["base:read".to_owned()]);
+    middleware
+        .run(
+            middleware_request(meta, "things:list", value_map([]), value_map([]), "", false),
+            async |credential: CredentialResolver| {
+                // First resolution authenticates as user-a (also the `peek` identity).
+                credential.resolve().await.expect("first resolve");
+                // Step-up forces a fresh resolution; the provider returns user-b,
+                // so the engine must refuse rather than misattribute the action.
+                let err = credential
+                    .resolve_with_scopes(&["extra:write".to_owned()])
+                    .await
+                    .expect_err("identity switch during step-up must abort");
+                assert!(err.to_string().contains("different identity"), "{err}");
+                Ok(CommandResult::new(json!({})))
+            },
+        )
+        .await
+        .expect("middleware renders");
+}
+
+#[tokio::test]
 async fn middleware_fixed_env_overrides_only_auth_env_preserves_legacy() {
     let captured_env = Arc::new(Mutex::new(Vec::new()));
     let authz = Arc::new(CaptureArgsAuthorizer::default());
@@ -9632,6 +9667,57 @@ impl AuthProvider for RecordingScopeProvider {
             env: req.env.to_owned(),
             ..Credential::default()
         })
+    }
+
+    async fn status(&self, env: &str) -> Result<Credential> {
+        self.get_credential(env, "", "").await
+    }
+
+    async fn logout(&self, _env: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_environments(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Returns identity `user-a` on its first credential call and `user-b` after,
+/// so a step-up re-resolution observes a different account.
+#[derive(Debug)]
+struct SwitchingIdentityProvider {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl SwitchingIdentityProvider {
+    async fn next_credential(&self, env: &str) -> Credential {
+        let mut calls = self.calls.lock().await;
+        *calls += 1;
+        let sub = if *calls == 1 { "user-a" } else { "user-b" };
+        Credential {
+            token: "token".to_owned(),
+            env: env.to_owned(),
+            sub: sub.to_owned(),
+            ..Credential::default()
+        }
+    }
+}
+
+#[async_trait]
+impl AuthProvider for SwitchingIdentityProvider {
+    fn name(&self) -> &str {
+        "primary"
+    }
+
+    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
+        Ok(self.next_credential(env).await)
+    }
+
+    async fn get_credential_for(
+        &self,
+        req: &cli_engine::CredentialRequest<'_>,
+    ) -> Result<Credential> {
+        Ok(self.next_credential(req.env).await)
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
