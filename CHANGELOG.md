@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.2.0...cli-engine-v0.2.1) (2026-06-10)
+
+
+### Features
+
+* argv0 multi-call dispatch with link/shim installer ([#19](https://github.com/godaddy/cli-engine/issues/19)) ([9e39f2f](https://github.com/godaddy/cli-engine/commit/9e39f2fa7aca9b60fa898e33eb9a2a92d93bf350))
+* OAuth scope step-up via command metadata ([#18](https://github.com/godaddy/cli-engine/issues/18)) ([f996e50](https://github.com/godaddy/cli-engine/commit/f996e5074c417c798a289d4d87fc283f78672c45))
+
 ## [0.2.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.1.3...cli-engine-v0.2.0) (2026-06-09)
 
 
