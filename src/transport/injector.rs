@@ -172,6 +172,13 @@ impl AuthInjector for ProviderBearerInjector {
     async fn inject(&self, request: &mut reqwest::Request) -> Result<()> {
         let mut cached = self.token.lock().await;
         if cached.as_deref().is_none_or(str::is_empty) {
+            // Scope-unaware on purpose: this fetches whatever token the provider
+            // has for `env` (no command scopes) and caches it for the injector's
+            // lifetime. A handler needing OAuth scope step-up over HTTP must
+            // resolve the wider scopes first (CredentialResolver::resolve_with_scopes),
+            // which populates the provider cache so the token fetched here already
+            // covers them; resolving after the first inject would send the
+            // narrower token.
             let credential = self
                 .provider
                 .get_credential(&self.env, "", "")

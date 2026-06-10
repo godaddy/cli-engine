@@ -156,6 +156,12 @@ impl CommandContext {
     /// Convenience wrapper over
     /// [`self.credential.resolve_with_scopes()`](CredentialResolver::resolve_with_scopes).
     ///
+    /// If the handler also issues HTTP requests through the transport bearer
+    /// injector, call this **before** the first request: the injector resolves
+    /// and caches a scope-unaware token, so stepping up afterwards would not
+    /// affect requests it already authorized. See
+    /// [`CredentialResolver::resolve_with_scopes`] for the full ordering note.
+    ///
     /// # Errors
     ///
     /// Returns an error when the command is marked `no_auth`, or when the auth

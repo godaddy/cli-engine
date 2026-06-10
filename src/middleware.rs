@@ -248,6 +248,17 @@ impl CredentialResolver {
     /// endpoint). A scope-aware auth provider re-authenticates when the cached
     /// token does not already cover the requested set.
     ///
+    /// # Ordering with the transport injector
+    ///
+    /// The HTTP transport's bearer injector resolves its token through the
+    /// provider's scope-*unaware* path and caches the first token it sees for the
+    /// injector's lifetime. So when a handler both steps up scopes and makes HTTP
+    /// calls through that injector, call `resolve_with_scopes` (or
+    /// [`CommandContext::credential_with_scopes`](crate::CommandContext::credential_with_scopes))
+    /// **before** the first request: that populates the provider cache with the
+    /// wider-scoped token, which the injector then picks up. Resolving after the
+    /// injector's first `inject` would send the narrower token.
+    ///
     /// # Errors
     ///
     /// Returns an error when the command is marked
