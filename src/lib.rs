@@ -3,7 +3,8 @@
 //! `cli_engine` provides the shared pieces that most CLI tools need:
 //! command registration, authentication provider routing, authorization hooks,
 //! audit and activity hooks, structured output, output schemas, guides, search,
-//! command tree rendering, and authenticated HTTP transport helpers.
+//! command tree rendering, busybox-style multi-call (`argv[0]`) dispatch, and
+//! authenticated HTTP transport helpers.
 //!
 //! The intended shape is:
 //!
@@ -93,9 +94,9 @@ pub use auth::{
     login_and_build_with_scopes, logout_result, status_result, to_status_entry,
 };
 pub use cli::{
-    ApplyFlags, BuildInfo, Cli, CliConfig, CliRunOutput, ExtraSearchDocs, InitDeps,
-    ModuleHelpEntry, OnShutdown, PreRun, RegisterFlags, ResolveMeta, RootNextActions,
-    build_root_long,
+    ApplyFlags, Argv0LinkMethod, Argv0Route, BuildInfo, Cli, CliConfig, CliRunOutput,
+    ExtraSearchDocs, InitDeps, ModuleHelpEntry, OnShutdown, PreRun, RegisterFlags, ResolveMeta,
+    RootNextActions, build_root_long,
 };
 pub use command::{
     CommandContext, CommandFuture, CommandHandler, CommandResult, CommandResultMetadata,

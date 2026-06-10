@@ -242,6 +242,13 @@ discovery and help-style built-ins should remain cheap and side-effect-light.
 `help` walks as far as it can through the command tree, then shows that command's help. Unknown
 root-level targets still report an unknown command.
 
+## Multi-Call Dispatch (argv0)
+
+A binary can behave differently based on the name it was invoked as (busybox/git style), via
+[`CliConfig::with_argv0_alias`](../src/cli.rs) and
+[`CliConfig::with_argv0_personality`](../src/cli.rs). This is opt-in and falls through to the default
+CLI for any unregistered name. See [argv0 Dispatch](argv0-dispatch.md).
+
 ## Flags
 
 Commands define their own flags with `clap::Arg`. The framework also registers global flags that
