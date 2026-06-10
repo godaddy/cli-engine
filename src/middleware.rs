@@ -8,10 +8,10 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
-    CommandResult, Credential, Dispatcher, Result, SchemaRegistry, Tier,
+    CommandResult, Credential, CredentialRequest, Dispatcher, Result, SchemaRegistry, Tier,
     error::{CliCoreError, exit_code_for_error},
     output::{
         Envelope, HumanViewRegistry, OutputFormat, PipelineOpts, apply_pipeline,
@@ -142,7 +142,23 @@ struct ResolverInner {
     command_path: String,
     tier: String,
     no_auth: bool,
+    /// Static command metadata; `meta.scopes` are always requested.
+    meta: CommandMeta,
+    /// Authoritative resolved credential plus the scopes it was requested with.
+    /// Serializes concurrent resolution and lets scope step-up replace a
+    /// previously-resolved (narrower) credential.
+    state: Mutex<ResolveState>,
+    /// Write-once mirror of the first resolved credential so [`CredentialResolver::peek`]
+    /// can lend a reference without holding a lock. Identity is stable across
+    /// step-up, so a later wider credential need not replace it for
+    /// audit/activity purposes.
     cell: OnceCell<Credential>,
+}
+
+#[derive(Debug, Default)]
+struct ResolveState {
+    credential: Option<Credential>,
+    requested: Vec<String>,
 }
 
 impl std::fmt::Debug for CredentialResolver {
@@ -165,6 +181,7 @@ impl CredentialResolver {
         command_path: String,
         tier: String,
         no_auth: bool,
+        meta: CommandMeta,
     ) -> Self {
         Self {
             inner: Arc::new(ResolverInner {
@@ -174,6 +191,8 @@ impl CredentialResolver {
                 command_path,
                 tier,
                 no_auth,
+                meta,
+                state: Mutex::new(ResolveState::default()),
                 cell: OnceCell::new(),
             }),
         }
@@ -192,27 +211,79 @@ impl CredentialResolver {
                 "command is marked no_auth and has no credential",
             ));
         }
+        self.resolve_scopes(&[]).await
+    }
+
+    /// Resolves a credential that additionally covers `extra` scopes (on top of
+    /// the command's declared [`CommandMeta::scopes`]).
+    ///
+    /// Used by handlers whose required scopes are only known at runtime (for
+    /// example a generic `api call` that derives scopes from the target
+    /// endpoint). A scope-aware auth provider re-authenticates when the cached
+    /// token does not already cover the requested set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is marked
+    /// [`no_auth`](crate::CommandSpec::no_auth), or when the auth provider fails
+    /// to produce a credential.
+    pub async fn resolve_with_scopes(&self, extra: &[String]) -> Result<Credential> {
+        if self.inner.no_auth {
+            return Err(CliCoreError::message(
+                "command is marked no_auth and has no credential",
+            ));
+        }
+        self.resolve_scopes(extra).await
+    }
+
+    /// Shared resolution: returns the memoized credential when it already covers
+    /// the wanted scopes, otherwise (re)authenticates requesting the union and
+    /// updates the memoized credential.
+    async fn resolve_scopes(&self, extra: &[String]) -> Result<Credential> {
         let inner = &self.inner;
+        let mut want = inner.meta.scopes.clone();
+        for scope in extra {
+            if !want.contains(scope) {
+                want.push(scope.clone());
+            }
+        }
+
+        let mut state = inner.state.lock().await;
+        if let Some(credential) = &state.credential
+            && want.iter().all(|scope| state.requested.contains(scope))
+        {
+            return Ok(credential.clone());
+        }
+
+        let mut requested = state.requested.clone();
+        for scope in &want {
+            if !requested.contains(scope) {
+                requested.push(scope.clone());
+            }
+        }
+        let meta = CommandMeta {
+            dry_run_prompt: inner.meta.dry_run_prompt,
+            auth_metadata: inner.meta.auth_metadata.clone(),
+            scopes: requested.clone(),
+        };
+        let req = CredentialRequest {
+            env: &inner.env,
+            command: &inner.command_path,
+            tier: &inner.tier,
+            meta: &meta,
+        };
         let credential = inner
-            .cell
-            .get_or_try_init(async || {
-                inner
-                    .auth
-                    .get_credential(
-                        &inner.provider,
-                        &inner.env,
-                        &inner.command_path,
-                        &inner.tier,
-                    )
-                    .await
-                    // Mark resolution failures so the engine can classify them as
-                    // `auth-error` based on the error a handler actually returns,
-                    // rather than tracking a separate side-channel flag that could
-                    // go stale if the handler swallows the failure.
-                    .map_err(|source| auth_resolution_error(&inner.provider, source))
-            })
-            .await?;
-        Ok(credential.clone())
+            .auth
+            .get_credential_for(&inner.provider, &req)
+            .await
+            // Mark resolution failures so the engine can classify them as
+            // `auth-error` based on the error a handler actually returns.
+            .map_err(|source| auth_resolution_error(&inner.provider, source))?;
+        state.credential = Some(credential.clone());
+        state.requested = requested;
+        // Mirror the first resolution for `peek`; ignored once already set.
+        drop(inner.cell.set(credential.clone()));
+        Ok(credential)
     }
 
     /// Resolves the credential when one is available.
@@ -468,6 +539,7 @@ impl Middleware {
             command_path.to_owned(),
             tier_text,
             no_auth,
+            meta.clone(),
         );
 
         if no_auth

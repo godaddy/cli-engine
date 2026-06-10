@@ -48,12 +48,22 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
                 .mutates(true)
                 .no_auth(true)
                 .with_arg(provider_arg(&effective_default, registered_names))
-                .with_arg(Arg::new("env").long("env").value_name("ENV").required(true)),
+                .with_arg(Arg::new("env").long("env").value_name("ENV").required(true))
+                .with_arg(
+                    Arg::new("scope")
+                        .long("scope")
+                        .short('s')
+                        .value_name("SCOPE")
+                        .num_args(0..)
+                        .help("Additional OAuth scope to request (repeatable)"),
+                ),
             async |context| {
                 let provider = string_arg(&context.args, "provider");
                 let env = string_arg(&context.args, "env");
+                let scopes = string_vec_arg(&context.args, "scope");
                 serde_json::to_value(
-                    login_and_build(&context.middleware.auth, &provider, &env).await?,
+                    login_and_build_with_scopes(&context.middleware.auth, &provider, &env, &scopes)
+                        .await?,
                 )
                 .map(CommandResult::new)
                 .map_err(Into::into)
@@ -106,6 +116,19 @@ fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> String {
         .to_owned()
 }
 
+/// Reads a repeatable string argument as a `Vec<String>`, accepting either a
+/// JSON array (multiple values) or a single string.
+fn string_vec_arg(args: &serde_json::Map<String, Value>, name: &str) -> Vec<String> {
+    match args.get(name) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(str::to_owned))
+            .collect(),
+        Some(Value::String(value)) if !value.is_empty() => vec![value.clone()],
+        _ => Vec::new(),
+    }
+}
+
 fn provider_arg(default_provider: &str, registered_names: &[String]) -> Arg {
     let names = registered_names.join(", ");
     let help = format!("Auth provider name (one of: [{names}])");
@@ -125,7 +148,20 @@ pub async fn login_and_build(
     provider: &str,
     env: &str,
 ) -> Result<AuthLoginResult> {
-    let credential = dispatcher.login(provider, env).await?;
+    login_and_build_with_scopes(dispatcher, provider, env, &[]).await
+}
+
+/// Like [`login_and_build`], but requests `additional_scopes` on top of the
+/// provider's defaults (used by `auth login --scope`).
+pub async fn login_and_build_with_scopes(
+    dispatcher: &Dispatcher,
+    provider: &str,
+    env: &str,
+    additional_scopes: &[String],
+) -> Result<AuthLoginResult> {
+    let credential = dispatcher
+        .login_with_scopes(provider, env, additional_scopes)
+        .await?;
     Ok(AuthLoginResult {
         provider: provider.to_owned(),
         env: env.to_owned(),

@@ -39,6 +39,7 @@
 
 use std::{
     collections::HashMap,
+    io::IsTerminal,
     net::{SocketAddr, TcpListener},
     sync::Arc,
     time::Duration,
@@ -54,7 +55,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{Credential, Result, auth::AuthProvider, error::CliCoreError};
+use crate::{Credential, Result, auth::AuthProvider, auth::CredentialRequest, error::CliCoreError};
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
@@ -535,12 +536,18 @@ impl PkceAuthProvider {
     }
 
     async fn run_pkce_flow(&self, env: &str) -> Result<StoredToken> {
+        self.run_pkce_flow_with(env, &self.scopes).await
+    }
+
+    /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
+    /// default login and for scope step-up, which requests a wider union).
+    async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
         let client_id = self.effective_client_id();
         let auth_url = self.effective_auth_url();
         let redirect_uri = self.effective_redirect_uri();
-        let scope = self.scopes.join(" ");
+        let scope = scopes.join(" ");
 
         let auth_params = [
             ("response_type", "code"),
@@ -646,6 +653,54 @@ impl AuthProvider for PkceAuthProvider {
     async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
         let token = self.resolve_token(env).await?;
         Ok(self.build_credential(env, &token))
+    }
+
+    async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
+        let env = req.env;
+        let token = self.resolve_token(env).await?;
+        let required = &req.meta.scopes;
+        if required.is_empty() {
+            return Ok(self.build_credential(env, &token));
+        }
+
+        // The access token is a JWT carrying its granted scopes; if it already
+        // covers everything the command needs, no re-auth is required.
+        let granted = scopes_from_jwt(&token.access_token);
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|scope| !granted.iter().any(|have| have == *scope))
+            .map(String::as_str)
+            .collect();
+        if missing.is_empty() {
+            return Ok(self.build_credential(env, &token));
+        }
+
+        // Step-up means re-consent: the authorization server has no silent
+        // scope-expansion grant, so widening scopes requires a fresh browser
+        // flow. Fail fast in non-interactive contexts rather than hang on the
+        // local callback timeout.
+        if !std::io::stderr().is_terminal() {
+            let missing_list = missing.join(", ");
+            return Err(CliCoreError::message(format!(
+                "access token for {env:?} is missing required scope(s): {missing_list}; \
+                 run `auth login --scope {missing_list}` in an interactive terminal"
+            )));
+        }
+
+        // Request the union (defaults ∪ already-granted ∪ required) so step-up
+        // never drops scopes acquired by an earlier login or step-up.
+        let mut union = self.scopes.clone();
+        for scope in granted.iter().chain(required.iter()) {
+            if !union.iter().any(|have| have == scope) {
+                union.push(scope.clone());
+            }
+        }
+        let new_token = self.run_pkce_flow_with(env, &union).await?;
+        self.delete_token_from_keychain(env).await;
+        self.cache.write().await.remove(env);
+        self.save_token_to_keychain(env, &new_token).await?;
+        self.store_cached_token(env, new_token.clone()).await;
+        Ok(self.build_credential(env, &new_token))
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
@@ -1030,6 +1085,21 @@ fn decode_jwt_claims(token: &str) -> Option<Map<String, Value>> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Reads the space-delimited `scope` claim from a JWT access token.
+///
+/// Returns an empty list for opaque (non-JWT) tokens or tokens without a
+/// `scope` claim, which forces scope step-up to treat them as missing scopes.
+fn scopes_from_jwt(token: &str) -> Vec<String> {
+    decode_jwt_claims(token)
+        .and_then(|claims| {
+            claims
+                .get("scope")
+                .and_then(Value::as_str)
+                .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
+        })
+        .unwrap_or_default()
+}
+
 /// Returns the first claim value that is a non-empty string, in priority order.
 fn extract_identity(claims: &Map<String, Value>, priority: &[String]) -> String {
     priority
@@ -1153,6 +1223,69 @@ mod tests {
             provider.cached_token("dev").await.is_none(),
             "expired token should not be returned from cache"
         );
+    }
+
+    #[test]
+    fn scopes_from_jwt_parses_scope_claim() {
+        let token = make_jwt(&json!({ "scope": "a b c" }));
+        assert_eq!(scopes_from_jwt(&token), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn scopes_from_jwt_empty_for_opaque_or_missing() {
+        assert!(scopes_from_jwt("opaque-token").is_empty());
+        let no_scope = make_jwt(&json!({ "sub": "user" }));
+        assert!(scopes_from_jwt(&no_scope).is_empty());
+    }
+
+    /// When the cached token's JWT already covers the required scopes,
+    /// `get_credential_for` must return it without starting a PKCE flow.
+    #[tokio::test]
+    async fn get_credential_for_uses_cached_token_when_scopes_covered() {
+        let provider = test_provider();
+        let token = valid_token(&make_jwt(&json!({
+            "scope": "apps.app-registry:read apps.app-registry:write",
+            "sub": "user-1",
+        })));
+        provider.store_cached_token("dev", token).await;
+
+        let meta = crate::middleware::CommandMeta {
+            scopes: vec!["apps.app-registry:read".to_owned()],
+            ..crate::middleware::CommandMeta::default()
+        };
+        let req = CredentialRequest {
+            env: "dev",
+            command: "app:list",
+            tier: "read",
+            meta: &meta,
+        };
+        let credential = provider
+            .get_credential_for(&req)
+            .await
+            .expect("cached token covers required scopes");
+        assert_eq!(credential.sub, "user-1");
+    }
+
+    /// With no required scopes, `get_credential_for` behaves like
+    /// `get_credential` and returns the cached token unchanged.
+    #[tokio::test]
+    async fn get_credential_for_no_scopes_returns_cached() {
+        let provider = test_provider();
+        provider
+            .store_cached_token("dev", valid_token("opaque"))
+            .await;
+        let meta = crate::middleware::CommandMeta::default();
+        let req = CredentialRequest {
+            env: "dev",
+            command: "app:list",
+            tier: "read",
+            meta: &meta,
+        };
+        let credential = provider
+            .get_credential_for(&req)
+            .await
+            .expect("no scopes required");
+        assert_eq!(credential.token, "opaque");
     }
 
     #[test]
