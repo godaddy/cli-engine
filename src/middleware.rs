@@ -57,6 +57,23 @@ impl CommandMeta {
     pub fn fixed_env(&self) -> Option<&str> {
         self.auth_metadata.get("fixed_env").map(String::as_str)
     }
+
+    /// Sets the OAuth scopes, keeping [`scopes`](CommandMeta::scopes) and
+    /// `auth_metadata["scopes"]` consistent.
+    ///
+    /// `scopes` is documented as derived from `auth_metadata["scopes"]`, so any
+    /// code that synthesizes or widens scopes (e.g. runtime step-up) should use
+    /// this rather than assigning the field directly, so metadata-aware providers
+    /// reading `auth_metadata` see the same set. An empty list removes the key.
+    pub fn set_scopes(&mut self, scopes: Vec<String>) {
+        if scopes.is_empty() {
+            self.auth_metadata.remove("scopes");
+        } else {
+            self.auth_metadata
+                .insert("scopes".to_owned(), scopes.join(" "));
+        }
+        self.scopes = scopes;
+    }
 }
 
 /// Declares whether a command requires an authenticated credential.
@@ -269,11 +286,8 @@ impl CredentialResolver {
                 requested.push(scope.clone());
             }
         }
-        let meta = CommandMeta {
-            dry_run_prompt: inner.meta.dry_run_prompt,
-            auth_metadata: inner.meta.auth_metadata.clone(),
-            scopes: requested.clone(),
-        };
+        let mut meta = inner.meta.clone();
+        meta.set_scopes(requested.clone());
         let req = CredentialRequest {
             env: &inner.env,
             command: &inner.command_path,

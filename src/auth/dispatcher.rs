@@ -109,10 +109,8 @@ impl Dispatcher {
         if let Err(err) = provider.logout(env).await {
             tracing::debug!(provider = name, error = %err, "ignoring logout error before login");
         }
-        let meta = CommandMeta {
-            scopes: additional_scopes.to_vec(),
-            ..CommandMeta::default()
-        };
+        let mut meta = CommandMeta::default();
+        meta.set_scopes(additional_scopes.to_vec());
         let req = CredentialRequest {
             env,
             command: "",

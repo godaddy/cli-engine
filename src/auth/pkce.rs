@@ -693,8 +693,14 @@ impl AuthProvider for PkceAuthProvider {
 
             // Step-up means re-consent: the authorization server has no silent
             // scope-expansion grant. Fail fast in non-interactive contexts
-            // rather than hang on the local callback timeout.
-            if !std::io::stderr().is_terminal() {
+            // rather than hang on the local callback timeout. Treat the session
+            // as interactive if any stdio stream is a TTY, so redirecting one
+            // (e.g. capturing stderr to a log) doesn't block a user who can
+            // still complete the browser flow.
+            let interactive = std::io::stdin().is_terminal()
+                || std::io::stdout().is_terminal()
+                || std::io::stderr().is_terminal();
+            if !interactive {
                 let display = missing.join(", ");
                 let hint = missing
                     .iter()
