@@ -6119,20 +6119,11 @@ async fn middleware_passes_command_scopes_to_provider_and_supports_step_up() {
     middleware.output_format = "json".to_owned();
     middleware.env = "prod".to_owned();
 
+    let mut meta = CommandMeta::default();
+    meta.set_scopes(vec!["base:read".to_owned()]);
     middleware
         .run(
-            middleware_request(
-                CommandMeta {
-                    dry_run_prompt: false,
-                    auth_metadata: BTreeMap::new(),
-                    scopes: vec!["base:read".to_owned()],
-                },
-                "things:list",
-                value_map([]),
-                value_map([]),
-                "",
-                false,
-            ),
+            middleware_request(meta, "things:list", value_map([]), value_map([]), "", false),
             async |credential: CredentialResolver| {
                 // Static command scopes reach the provider.
                 credential.resolve().await.expect("resolve");

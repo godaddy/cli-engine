@@ -337,13 +337,20 @@ impl CommandSpec {
     /// [`CredentialRequest`](crate::CredentialRequest); a provider that supports
     /// scope step-up re-authenticates when the cached token lacks them.
     #[must_use]
-    pub fn with_scopes(self, scopes: &[impl AsRef<str>]) -> Self {
+    pub fn with_scopes(mut self, scopes: &[impl AsRef<str>]) -> Self {
         let joined = scopes
             .iter()
             .map(AsRef::as_ref)
             .collect::<Vec<_>>()
             .join(" ");
-        self.with_auth_metadata("scopes", joined)
+        // Mirror `CommandMeta::set_scopes`: an empty list clears the key rather
+        // than leaving an empty-but-present `auth_metadata["scopes"]`.
+        if joined.is_empty() {
+            self.auth_metadata.remove("scopes");
+        } else {
+            self.auth_metadata.insert("scopes".to_owned(), joined);
+        }
+        self
     }
 
     /// Adds a `clap` argument or option to this command.

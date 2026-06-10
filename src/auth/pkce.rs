@@ -1096,10 +1096,14 @@ struct TokenResponse {
 /// Decodes the claims (payload) segment of a JWT **without verifying the
 /// signature**.
 ///
-/// The returned claims are used only to display a human-readable identity in
-/// `auth status` and audit logs — never for trust or authorization decisions, so
-/// signature verification is intentionally skipped. Opaque (non-JWT) tokens and
-/// any decode/parse failure yield `None`, leaving the identity blank.
+/// The returned claims are used to display a human-readable identity in
+/// `auth status` and audit logs, and (via [`scopes_from_jwt`]) to decide whether
+/// scope step-up needs a fresh login. These are convenience/optimization reads,
+/// **not** trust or authorization decisions — the authorization server remains
+/// the source of truth for granted scopes — so signature verification is
+/// intentionally skipped. Opaque (non-JWT) tokens and any decode/parse failure
+/// yield `None`, leaving the identity blank (and treating scopes as absent, which
+/// just forces a re-auth).
 fn decode_jwt_claims(token: &str) -> Option<Map<String, Value>> {
     // A JWT is `header.payload.signature`; the payload is the middle segment,
     // base64url-encoded without padding.
