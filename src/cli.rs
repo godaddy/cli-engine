@@ -117,6 +117,12 @@ pub type RootNextActions = Arc<dyn Fn() -> Vec<NextAction> + Send + Sync>;
 /// [`CliConfig::with_admin_category`].
 const DEFAULT_ADMIN_CATEGORY: &str = "Admin";
 
+/// Maximum number of chained `argv0` dispatch hand-offs before the engine
+/// refuses to recurse further. Real multi-call nesting is zero or one level;
+/// this bounds a pathologically long explicit `argv0 … argv0 …` chain so it
+/// errors cleanly instead of overflowing the stack.
+const MAX_ARGV0_DEPTH: usize = 16;
+
 /// How the engine behaves when invoked under a registered alternative `argv[0]`
 /// name (busybox/git-style multi-call dispatch).
 ///
@@ -125,7 +131,11 @@ const DEFAULT_ADMIN_CATEGORY: &str = "Admin";
 /// [`CliConfig::with_argv0_alias`] or [`CliConfig::with_argv0_personality`]. An
 /// `argv[0]` that matches no route falls through to the default CLI, so existing
 /// applications that register no routes are unaffected.
+///
+/// Non-exhaustive: more route kinds may be added in future releases. Register
+/// routes through the [`CliConfig`] builders rather than matching on variants.
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum Argv0Route {
     /// Rewrite the invocation into these canonical subcommand tokens and run it
     /// through the normal command tree, with the real argument tail appended.
@@ -154,7 +164,10 @@ impl std::fmt::Debug for Argv0Route {
 ///
 /// Installers pick the mechanism that suits the platform and environment;
 /// self-healing code can re-run [`Cli::create_link`] to restore a deleted link.
+///
+/// Non-exhaustive: more link mechanisms may be added in future releases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Argv0LinkMethod {
     /// A symbolic link to the target executable (`<name>` on Unix, `<name>.exe`
     /// on Windows). On Windows this may require Developer Mode or elevation.
@@ -421,15 +434,31 @@ impl CliConfig {
     /// let config = CliConfig::new("my-cli", "Team CLI", "my-cli")
     ///     .with_argv0_alias("pl", ["project", "list"]);
     /// ```
+    ///
+    /// `name` must be a simple token: non-empty and composed only of ASCII
+    /// letters, digits, `-`, or `_` (no dots, spaces, path separators, or shell
+    /// metacharacters), and it must differ from the CLI's own name. These are
+    /// debug-asserted. The restriction keeps the name usable as a link/shim
+    /// filename and an `argv[0]` basename (which is matched with its extension
+    /// stripped, so a dot would break matching).
     #[must_use]
     pub fn with_argv0_alias(
         mut self,
         name: impl Into<String>,
         command_path: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let name = name.into();
+        debug_assert!(
+            is_valid_argv0_name(&name),
+            "argv0 route name {name:?} must be non-empty and contain only ASCII letters, digits, '-', or '_'"
+        );
+        debug_assert!(
+            name != self.name,
+            "argv0 route name {name:?} must differ from the CLI's own name {:?}",
+            self.name
+        );
         let tokens = command_path.into_iter().map(Into::into).collect();
-        self.argv0_routes
-            .insert(name.into(), Argv0Route::Alias(tokens));
+        self.argv0_routes.insert(name, Argv0Route::Alias(tokens));
         self
     }
 
@@ -450,14 +479,28 @@ impl CliConfig {
     ///         CliConfig::new("legacy-tool", "Legacy compatibility shim", "legacy-tool")
     ///     });
     /// ```
+    ///
+    /// `name` follows the same contract as [`CliConfig::with_argv0_alias`]: a
+    /// simple `[A-Za-z0-9_-]` token, differing from the CLI's own name
+    /// (debug-asserted).
     #[must_use]
     pub fn with_argv0_personality(
         mut self,
         name: impl Into<String>,
         build: impl Fn() -> CliConfig + Send + Sync + 'static,
     ) -> Self {
+        let name = name.into();
+        debug_assert!(
+            is_valid_argv0_name(&name),
+            "argv0 route name {name:?} must be non-empty and contain only ASCII letters, digits, '-', or '_'"
+        );
+        debug_assert!(
+            name != self.name,
+            "argv0 route name {name:?} must differ from the CLI's own name {:?}",
+            self.name
+        );
         self.argv0_routes
-            .insert(name.into(), Argv0Route::Personality(Arc::new(build)));
+            .insert(name, Argv0Route::Personality(Arc::new(build)));
         self
     }
 }
@@ -905,10 +948,17 @@ impl Cli {
     /// vector to feed the normal command pipeline, or [`Argv0Outcome::Handled`]
     /// with a fully rendered result when a personality ran or an explicit `argv0`
     /// invocation was rejected. When no routes are registered this is inert and
-    /// returns the arguments unchanged.
-    async fn resolve_argv0(&self, text_args: Vec<String>) -> Argv0Outcome {
+    /// returns the arguments unchanged. `depth` counts chained hand-offs and
+    /// bounds recursion via [`MAX_ARGV0_DEPTH`].
+    async fn resolve_argv0(&self, text_args: Vec<String>, depth: usize) -> Argv0Outcome {
         if self.config.argv0_routes.is_empty() {
             return Argv0Outcome::Proceed(text_args);
+        }
+
+        if depth > MAX_ARGV0_DEPTH {
+            return Argv0Outcome::Handled(
+                self.render_argv0_error(&text_args, "argv0 dispatch recursion limit exceeded"),
+            );
         }
 
         // The hidden `argv0` meta-command (`<bin> argv0 <name> [args...]`) forces
@@ -919,9 +969,10 @@ impl Cli {
         let (name, rest) = if explicit {
             match text_args.get(2) {
                 None => {
-                    return Argv0Outcome::Handled(self.finish_run(argv0_error(
+                    return Argv0Outcome::Handled(self.render_argv0_error(
+                        &text_args,
                         "the argv0 command requires a name to dispatch as",
-                    )));
+                    ));
                 }
                 // Normalize the explicit name the same way as a symlink basename
                 // so a route registered as `whatever` matches whether the caller
@@ -959,19 +1010,23 @@ impl Cli {
             Some(Argv0Route::Personality(build)) => {
                 // Hand off to an independent CLI built lazily from the route. Its
                 // own config name leads so its help/usage and program-name skip
-                // render correctly. `Box::pin` breaks the recursive `async fn`.
+                // render correctly. `Box::pin` breaks the recursive `async fn`;
+                // `depth + 1` bounds a pathological chain of hand-offs.
                 let config = build();
                 let bin = config.name.clone();
                 let alt = Self::new(config);
                 let mut alt_args = Vec::with_capacity(1 + rest.len());
                 alt_args.push(bin);
                 alt_args.extend(rest);
-                Argv0Outcome::Handled(Box::pin(alt.run(alt_args)).await)
+                Argv0Outcome::Handled(Box::pin(alt.run_with_depth(alt_args, depth + 1)).await)
             }
-            None if explicit => Argv0Outcome::Handled(self.finish_run(argv0_error(&format!(
-                "{name:?} is not a registered argv0 name; known names: {}",
-                self.known_argv0_names()
-            )))),
+            None if explicit => Argv0Outcome::Handled(self.render_argv0_error(
+                &text_args,
+                format!(
+                    "{name:?} is not a registered argv0 name; known names: {}",
+                    self.known_argv0_names()
+                ),
+            )),
             None => {
                 // Unregistered name (e.g. the binary renamed to something we do not
                 // recognize): fall through to the default CLI. Normalizing element 0
@@ -994,6 +1049,18 @@ impl Cli {
             .cloned()
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Renders an `argv0`-dispatch error through the engine's structured error
+    /// envelope so it honors `--output` (parsed from the raw args, since dispatch
+    /// runs before clap) and the shared exit-code mapping, matching every other
+    /// CLI error rather than emitting bare text.
+    fn render_argv0_error(&self, text_args: &[String], message: impl Into<String>) -> CliRunOutput {
+        let mut middleware = self.middleware.clone();
+        middleware.output_format =
+            extract_output_format(text_args, &default_output_format(&self.config.app_id));
+        let err = CliCoreError::message(message);
+        self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id))
     }
 
     /// Returns the registered alternative `argv[0]` names, sorted.
@@ -1019,16 +1086,20 @@ impl Cli {
     /// Windows; a [`Argv0LinkMethod::Script`] shim is `<name>.cmd` on Windows and
     /// an executable `<name>` shell script on Unix.
     ///
-    /// The call is create-if-missing: if the destination already exists it is left
-    /// untouched and its path is returned, so re-running to restore a deleted link
-    /// is safe. The directory is created if necessary.
+    /// The call ensures the desired state idempotently: if the destination already
+    /// matches what would be created (a symlink to `target`, a hard link with the
+    /// same contents, or a shim with identical contents) it is left untouched and
+    /// its path returned; if it exists but differs (wrong kind, stale target, or
+    /// edited shim) it is replaced. This makes the call safe to re-run as install
+    /// or self-healing code, restoring both deleted and corrupted links. The
+    /// directory is created if necessary.
     ///
     /// # Errors
     ///
     /// Returns an error if `name` is not a registered route, if the current
     /// executable cannot be resolved (when `target` is `None`), or if the
-    /// directory or link cannot be created (e.g. insufficient privilege for a
-    /// Windows symlink, or a hard link across volumes).
+    /// directory or link cannot be created or replaced (e.g. insufficient
+    /// privilege for a Windows symlink, or a hard link across volumes).
     pub fn create_link(
         &self,
         name: &str,
@@ -1046,12 +1117,8 @@ impl Cli {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;
         let link = dir.join(argv0_link_file_name(name, method));
-        // Create-if-missing keeps install/self-healing idempotent. `symlink_metadata`
-        // does not follow links, so a present-but-dangling link still counts.
-        if std::fs::symlink_metadata(&link).is_ok() {
-            return Ok(link);
-        }
 
+        // Resolve the target up front so an existing entry can be compared against it.
         let resolved_target;
         let target = match target {
             Some(target) => target,
@@ -1060,6 +1127,16 @@ impl Cli {
                 resolved_target.as_path()
             }
         };
+
+        // Ensure-desired-state. `symlink_metadata` does not follow links, so a
+        // present-but-dangling link still counts as existing. A matching entry is
+        // left untouched (idempotent); a differing one is removed and recreated.
+        if std::fs::symlink_metadata(&link).is_ok() {
+            if argv0_link_matches(&link, target, name, method)? {
+                return Ok(link);
+            }
+            std::fs::remove_file(&link)?;
+        }
 
         match method {
             Argv0LinkMethod::SoftLink => create_symlink(target, &link)?,
@@ -1078,6 +1155,16 @@ impl Cli {
         I: IntoIterator<Item = S>,
         S: Into<std::ffi::OsString> + Clone,
     {
+        self.run_with_depth(args, 0).await
+    }
+
+    /// Runs the CLI like [`Cli::run`], threading the `argv0` dispatch recursion
+    /// `depth` so a chain of personality hand-offs is bounded by [`MAX_ARGV0_DEPTH`].
+    async fn run_with_depth<I, S>(&self, args: I, depth: usize) -> CliRunOutput
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString> + Clone,
+    {
         let raw_args = args
             .into_iter()
             .map(Into::into)
@@ -1086,7 +1173,7 @@ impl Cli {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let text_args = match self.resolve_argv0(text_args).await {
+        let text_args = match self.resolve_argv0(text_args, depth).await {
             Argv0Outcome::Handled(output) => return output,
             Argv0Outcome::Proceed(args) => args,
         };
@@ -2317,11 +2404,46 @@ fn program_basename(arg: &str) -> String {
         .map_or_else(|| arg.to_owned(), ToOwned::to_owned)
 }
 
-/// Renders a clap-style usage error for a rejected explicit `argv0` invocation.
-fn argv0_error(message: &str) -> CliRunOutput {
-    CliRunOutput {
-        exit_code: 2,
-        rendered: format!("error: {message}\n"),
+/// Returns `true` when `name` is a valid alternative `argv[0]` route name: a
+/// non-empty token of ASCII letters, digits, `-`, or `_`. This keeps the name
+/// safe as a link/shim filename and as an `argv[0]` basename (which is matched
+/// with its extension stripped, so an embedded dot would break matching).
+fn is_valid_argv0_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+}
+
+/// Returns `true` when the entry at `link` already matches what [`Cli::create_link`]
+/// would produce for `method`/`target`/`name`, so it can be left untouched. A
+/// mismatch (wrong kind, stale symlink target, or differing contents) returns
+/// `false` so the caller replaces it.
+fn argv0_link_matches(
+    link: &Path,
+    target: &Path,
+    name: &str,
+    method: Argv0LinkMethod,
+) -> std::io::Result<bool> {
+    let metadata = std::fs::symlink_metadata(link)?;
+    match method {
+        Argv0LinkMethod::SoftLink => {
+            Ok(metadata.file_type().is_symlink() && std::fs::read_link(link)? == target)
+        }
+        Argv0LinkMethod::HardLink => {
+            if metadata.file_type().is_symlink() {
+                return Ok(false);
+            }
+            // A correct hard link is indistinguishable from the target by content;
+            // comparing bytes also accepts an identical copy, which is harmless.
+            Ok(std::fs::read(link)? == std::fs::read(target)?)
+        }
+        Argv0LinkMethod::Script => {
+            if metadata.file_type().is_symlink() {
+                return Ok(false);
+            }
+            Ok(std::fs::read_to_string(link).ok() == Some(argv0_script_contents(target, name)))
+        }
     }
 }
 

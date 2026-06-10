@@ -148,5 +148,7 @@ for name in cli.argv0_names() {
 }
 ```
 
-`create_link` is create-if-missing: an existing destination is left untouched and its path is
-returned, so re-running to restore deleted links is safe and idempotent.
+`create_link` ensures the desired state idempotently: a destination that already matches is left
+untouched, while a missing, wrong-target, or corrupted one is created or replaced — so re-running it
+restores both deleted and broken links. Registered names must be simple `[A-Za-z0-9_-]` tokens that
+differ from the CLI's own name.

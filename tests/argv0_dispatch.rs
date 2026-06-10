@@ -177,7 +177,9 @@ async fn explicit_argv0_with_unknown_name_errors() {
     let cli = routed_cli();
 
     let out = cli.run(["my-cli", "argv0", "bogus"]).await;
-    assert_eq!(out.exit_code, 2, "{}", out.rendered);
+    // Routed through the engine error envelope: exit 1 (matching the unknown-command
+    // convention), not clap's bare exit 2.
+    assert_eq!(out.exit_code, 1, "{}", out.rendered);
     assert!(
         out.rendered.contains("not a registered argv0 name"),
         "{}",
@@ -193,8 +195,28 @@ async fn bare_argv0_command_errors() {
     let cli = routed_cli();
 
     let out = cli.run(["my-cli", "argv0"]).await;
-    assert_eq!(out.exit_code, 2, "{}", out.rendered);
+    assert_eq!(out.exit_code, 1, "{}", out.rendered);
     assert!(out.rendered.contains("requires a name"), "{}", out.rendered);
+}
+
+#[tokio::test]
+async fn explicit_argv0_error_renders_structured_envelope() {
+    let cli = routed_cli();
+
+    // With --output json the error is a structured envelope (valid JSON), not the
+    // old bare `error: ...` text line.
+    let out = cli
+        .run(["my-cli", "argv0", "bogus", "--output", "json"])
+        .await;
+    assert_eq!(out.exit_code, 1, "{}", out.rendered);
+    let parsed: Value =
+        serde_json::from_str(&out.rendered).expect("error should render as JSON envelope");
+    assert!(parsed.is_object(), "{}", out.rendered);
+    assert!(
+        out.rendered.contains("not a registered argv0 name"),
+        "{}",
+        out.rendered
+    );
 }
 
 #[tokio::test]
@@ -500,4 +522,84 @@ fn generated_windows_cmd_forwards_argv0_invocation() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("argv0 pl"), "{stdout}");
     assert!(stdout.contains("--team x"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn create_link_repairs_a_mismatched_link() {
+    let cli = routed_cli();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let old_target = dir.path().join("old-bin");
+    let new_target = dir.path().join("new-bin");
+    std::fs::write(&old_target, b"old").expect("write old");
+    std::fs::write(&new_target, b"new").expect("write new");
+
+    // First create a link to the old target, then re-run pointing at the new one.
+    let link = cli
+        .create_link(
+            "pl",
+            dir.path(),
+            Some(&old_target),
+            Argv0LinkMethod::SoftLink,
+        )
+        .expect("create");
+    assert_eq!(std::fs::read_link(&link).expect("read_link"), old_target);
+
+    let repaired = cli
+        .create_link(
+            "pl",
+            dir.path(),
+            Some(&new_target),
+            Argv0LinkMethod::SoftLink,
+        )
+        .expect("repair");
+    assert_eq!(repaired, link);
+    assert_eq!(
+        std::fs::read_link(&repaired).expect("read_link"),
+        new_target,
+        "stale symlink target should be repaired"
+    );
+}
+
+#[test]
+#[should_panic(expected = "must be non-empty and contain only")]
+fn registering_invalid_argv0_name_panics() {
+    // Names with spaces/dots/metacharacters are rejected (debug-asserted).
+    let _config = CliConfig::new("my-cli", "Team CLI", "my-cli")
+        .with_argv0_alias("bad name", ["project", "list"]);
+}
+
+#[test]
+#[should_panic(expected = "must differ from the CLI's own name")]
+fn registering_own_name_as_route_panics() {
+    let _config = CliConfig::new("my-cli", "Team CLI", "my-cli")
+        .with_argv0_alias("my-cli", ["project", "list"]);
+}
+
+/// A personality whose own config routes back into itself, used to exercise the
+/// recursion guard. Its config name (`looper`) differs from the route name (`a`),
+/// so it does not trip the self-name assertion.
+fn looping_personality() -> CliConfig {
+    CliConfig::new("looper", "Looping personality", "looper")
+        .with_argv0_personality("a", looping_personality)
+}
+
+#[tokio::test]
+async fn argv0_dispatch_recursion_is_bounded() {
+    let cli = Cli::new(
+        CliConfig::new("host", "Host CLI", "host")
+            .with_module(platform_module())
+            .with_argv0_personality("a", looping_personality),
+    );
+
+    // A pathologically long explicit chain (`argv0 a argv0 a …`) must error
+    // gracefully rather than overflow the stack.
+    let mut args = vec!["host".to_owned()];
+    for _ in 0..40 {
+        args.push("argv0".to_owned());
+        args.push("a".to_owned());
+    }
+    let out = cli.run(args).await;
+    assert_ne!(out.exit_code, 0, "{}", out.rendered);
+    assert!(out.rendered.contains("recursion"), "{}", out.rendered);
 }
