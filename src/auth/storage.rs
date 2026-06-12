@@ -212,8 +212,8 @@ mod keychain {
     /// fallback or [`super::FileStorage`] to skip the keychain entirely.
     ///
     /// If you need the three-state distinction (entry present / reachable but
-    /// empty / backend unavailable), use [`KeyringStorage::read_three_state`]
-    /// directly (as [`AutoStorage`] does).
+    /// empty / backend unavailable), use the crate-internal `read_three_state`
+    /// helper (as [`AutoStorage`] does internally).
     #[derive(Clone, Copy, Debug, Default)]
     pub struct KeyringStorage;
 
