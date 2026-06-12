@@ -318,10 +318,7 @@ Auth providers implement the `AuthProvider` trait. Providers expose credential r
 status, logout, and environment-listing behavior. The framework includes:
 
 - `ExecProvider`, which invokes an external provider command using JSON stdin/stdout.
-- `PkceAuthProvider` (requires the `pkce-auth` feature), a built-in browser-based OAuth 2.0 PKCE
-  flow that manages the local callback server, opens the system browser, and persists tokens in the
-  system keychain via the `keyring` crate. Auth URL, token URL, and client ID can be overridden via
-  environment variables at runtime.
+- `PkceAuthProvider` (requires the `pkce-auth` feature), a built-in browser-based OAuth 2.0 PKCE flow that manages the local callback server, opens the system browser, and persists tokens through a pluggable credential-storage backend (system keychain by default). Auth URL, token URL, and client ID can be overridden via environment variables at runtime.
 - A `Dispatcher` that routes auth calls by provider name. Single-provider facades created from the
   dispatcher remain live views of the dispatcher, so transport injectors observe later provider
   registration or replacement.
@@ -330,6 +327,69 @@ Command handlers receive `Option<Credential>`. No-auth commands receive `None`.
 
 Provider process contracts and request injectors are described in
 [Authentication and Transport](auth.md).
+
+## Credential Storage
+
+Auth providers persist credentials through the injectable `CredentialStorage` trait (`auth::storage`), keyed by `CredentialKey { app_id, provider, env }`. Three built-in backends map to the `CredentialStore` modes:
+
+| Mode | Backend | Behavior |
+| --- | --- | --- |
+| `keyring` (default) | `KeyringStorage` | System keychain only; failure is a hard error. |
+| `auto` | `AutoStorage` | Keychain, with a transparent unencrypted-file fallback when the keychain backend is unavailable. |
+| `file` | `FileStorage` | Never contacts the keychain; stores unencrypted JSON under the config base directory. |
+
+`File` is the escape hatch for environments where the system keychain is unavailable or impractical (headless Linux, WSL). The selected mode is resolved with the precedence:
+
+```text
+PkceAuthProvider::with_storage / with_credential_store   (explicit, highest)
+  > --credential-store flag
+  > ${PREFIX}_CREDENTIAL_STORE env var
+  > [credentials].store in config.toml
+  > keyring (default)
+```
+
+where `${PREFIX}` is the app id uppercased with non-alphanumerics replaced by `_` (e.g. `godaddy` → `GODADDY_CREDENTIAL_STORE`). Providers resolve their backend lazily, so `--schema` and `--dry-run` build no storage and never touch the keychain. A custom backend (for example an in-memory store in tests, or a remote secret manager) can be injected with `PkceAuthProvider::with_storage`.
+
+## Configuration File
+
+cli-engine provides a single per-application TOML config file that **consumer CLIs share with the engine**. It lives at `<config-base>/<app_id>/config.toml`, where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`. Loading is best-effort: a missing/unreadable/malformed file yields an empty config (a warning is logged for malformed) rather than failing the
+command.
+
+Engine-reserved settings live in documented top-level tables (today just `[credentials]`); the consumer CLI owns **every other top-level table**:
+
+```toml
+[credentials]        # engine-reserved
+store = "file"       # "auto" | "keyring" | "file"
+
+[deploy]             # consumer-owned
+region = "us-west"
+```
+
+### Reading config
+
+The loaded file is exposed as a `ConfigFile` and surfaced everywhere it's useful — `toml` stays an internal detail, so access is typed:
+
+- In command handlers: `ctx.config().section::<DeployConfig>("deploy")?`
+- In module registration: `module_ctx.config().section::<T>(...)`
+- Engine-reserved view: `ConfigFile::engine() -> EngineConfig`
+- Whole-file into a consumer root type: `ConfigFile::deserialize::<T>()`
+
+The file is loaded once at startup and cloned into each run's middleware, so reads are cheap.
+
+### Writing config (`config` command group)
+
+`CliConfig::with_config_commands()` mounts a built-in `config` group (filed under the admin help category), opt-in so it never collides with a consumer's own `config` noun:
+
+```text
+mycli config path                          # print the file path
+mycli config get deploy.region             # read a dotted key
+mycli config set deploy.region us-east     # set + save (mutating; --dry-run aware)
+mycli config list                          # print the whole file
+```
+
+`config set` is dry-run aware, parses the value as a bool/int/float when it looks like one (else a string), preserves existing comments and formatting (backed by `toml_edit`), and validates the engine-reserved `credentials.store` key. Programmatically, `ConfigFile::set` + `ConfigFile::save` do the same.
+
+The `config` module also exposes `load`, `resolve_credential_store`, and the pure `resolve_credential_store_with` for testing credential-store precedence without touching process state.
 
 ## Authorization
 

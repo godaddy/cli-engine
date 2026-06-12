@@ -67,10 +67,16 @@ pub mod auth;
 pub mod cli;
 /// Command and command-group specifications.
 pub mod command;
+/// Engine config file and credential-storage selection.
+pub mod config;
+/// Built-in `config` command group.
+pub mod config_commands;
 /// Shared error type and error traits.
 pub mod error;
 /// Global framework flags and flag-extraction helpers.
 pub mod flags;
+/// Filesystem and path utilities (base dir, path-component safety, atomic write).
+pub mod fs;
 /// Embedded or file-backed guide parsing.
 pub mod guide;
 /// Cross-cutting command execution middleware.
@@ -88,6 +94,11 @@ pub mod transport;
 /// Command tree data model and human rendering.
 pub mod tree;
 
+#[cfg(feature = "pkce-auth")]
+pub use auth::storage::{AutoStorage, KeyringStorage};
+pub use auth::storage::{
+    CredentialKey, CredentialStorage, FileStorage, default_storage, storage_for,
+};
 pub use auth::{
     AuthLoginResult, AuthProvider, AuthStatusEntry, CACHE_TTL, Credential, CredentialRequest,
     Dispatcher, SingleProvider, StatusEntry, auth_command_group, login_and_build,
@@ -104,11 +115,16 @@ pub use command::{
     StreamingCommandFuture, StreamingCommandHandler, command_args_from_matches,
     command_path_from_matches, command_path_from_parts, leaf_matches,
 };
+pub use config::{
+    ConfigFile, CredentialStore, CredentialsConfig, EngineConfig, ParseCredentialStoreError,
+    credential_store_env_var, resolve_credential_store, resolve_credential_store_with,
+};
+pub use config_commands::config_command_group;
 pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };
 pub use flags::{
-    GlobalFlags, default_output_format, derive_bool_flags, derive_value_flags,
+    GlobalFlags, app_id_env_prefix, default_output_format, derive_bool_flags, derive_value_flags,
     extract_command_path, extract_output_format, extract_search_query, global_flags_from_matches,
     has_true_schema_flag, output_env_var, register_global_flags, resolve_default_output_format,
 };

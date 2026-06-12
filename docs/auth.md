@@ -189,8 +189,7 @@ The provider manages the full browser-based login flow:
 2. Starts a local TCP server on `127.0.0.1` to receive the OAuth callback.
 3. Opens the system browser to the authorization endpoint.
 4. Exchanges the returned code for tokens at the token endpoint.
-5. Stores tokens in the system keychain via the `keyring` crate (macOS Keychain, Linux Secret
-   Service, or the platform's encrypted file fallback).
+5. Persists tokens through a `CredentialStorage` backend (the system keychain by default; see [Credential Storage](#credential-storage)).
 6. Refreshes expired tokens automatically using the stored refresh token.
 
 ```rust
@@ -231,6 +230,32 @@ values. The prefix is the provider name uppercased with hyphens replaced by unde
 
 For a provider named `"primary"`, the variables are `PRIMARY_OAUTH_CLIENT_ID`,
 `PRIMARY_OAUTH_AUTH_URL`, and `PRIMARY_OAUTH_TOKEN_URL`.
+
+## Credential Storage
+
+Tokens are persisted through the injectable `CredentialStorage` trait rather than a hard-wired keychain. Each credential is keyed by `CredentialKey { app_id, provider, env }`. Three built-in backends correspond to the `CredentialStore` modes:
+
+- **`keyring`** (`KeyringStorage`, default) — system keychain only (macOS Keychain, Linux Secret Service, Windows Credential Manager). A keychain failure is a hard error; no file is written.
+- **`auto`** (`AutoStorage`) — try the keychain, and transparently fall back to an unencrypted file when the keychain backend is unavailable.
+- **`file`** (`FileStorage`) — never contact the keychain. Tokens are written as **unencrypted JSON** to `<config-base>/<app_id>/credentials/<provider>-<env>.json` (`0600` on Unix), where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
+
+### Selecting a mode
+
+`file` is the recommended escape hatch on **WSL and headless Linux**, where a Secret Service daemon is often missing or awkward to run. Operators can disable the keychain without code changes, with this precedence (highest first):
+
+1. `PkceAuthProvider::with_storage(...)` — inject a custom backend, or `PkceAuthProvider::with_credential_store(CredentialStore::File)` — force a built-in mode.
+2. `--credential-store auto|keyring|file` global flag.
+3. `${PREFIX}_CREDENTIAL_STORE` env var (e.g. `MY_CLI_CREDENTIAL_STORE=file`), where `${PREFIX}` is the **app id** uppercased with non-alphanumerics replaced by `_`.
+4. `[credentials].store` in `<config-base>/<app_id>/config.toml`:
+   ```toml
+   [credentials]
+   store = "file"
+   ```
+5. Default: `keyring`.
+
+> The escape-hatch trade-off: `file`/`auto` write credentials to disk **unencrypted** (owner-only permissions on Unix). Prefer the keychain where one is available.
+
+`with_file_fallback(bool)` is deprecated: `true` maps to `CredentialStore::Auto` and `false` to `CredentialStore::Keyring`. Use `with_credential_store` instead.
 
 ## Dispatcher
 

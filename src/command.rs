@@ -107,6 +107,18 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
+    /// Returns the loaded per-application config file.
+    ///
+    /// Read a consumer-owned section with
+    /// [`ConfigFile::section`](crate::config::ConfigFile::section), for example
+    /// `ctx.config().section::<DeployConfig>("deploy")?`. Engine-reserved
+    /// settings are available via
+    /// [`ConfigFile::engine`](crate::config::ConfigFile::engine).
+    #[must_use]
+    pub fn config(&self) -> &crate::config::ConfigFile {
+        &self.middleware.config
+    }
+
     /// Deserializes the raw argument matches into a typed args struct.
     ///
     /// Use this with `#[derive(clap::Args)]` structs to get type-safe access

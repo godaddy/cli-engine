@@ -19,6 +19,8 @@ pub mod exec;
 /// OAuth 2.0 PKCE auth provider (requires the `pkce-auth` feature).
 #[cfg(feature = "pkce-auth")]
 pub mod pkce;
+/// Pluggable credential storage backends (keychain, file, auto).
+pub mod storage;
 
 use async_trait::async_trait;
 
@@ -32,6 +34,9 @@ pub use exec::{
     ACTION_AUTHENTICATE, ACTION_LIST_ENVIRONMENTS, ACTION_LIST_REALMS, ACTION_LOGOUT,
     ACTION_STATUS, AuthnRequest, EnvironmentsResponse, ExecProvider,
 };
+#[cfg(feature = "pkce-auth")]
+pub use storage::{AutoStorage, KeyringStorage};
+pub use storage::{CredentialKey, CredentialStorage, FileStorage, default_storage, storage_for};
 
 use crate::Result;
 use crate::middleware::CommandMeta;

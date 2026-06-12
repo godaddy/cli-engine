@@ -506,6 +506,14 @@ pub struct Middleware {
     pub schema_registry: SchemaRegistry,
     /// Human output view registry.
     pub human_views: HumanViewRegistry,
+    /// Loaded per-application config file, shared across the run.
+    ///
+    /// Populated once at startup from `<config-base>/<app_id>/config.toml`.
+    /// Command handlers read it via
+    /// [`CommandContext::config`](crate::command::CommandContext::config) and
+    /// module registration via
+    /// [`ModuleContext::config`](crate::module::ModuleContext::config).
+    pub config: Arc<crate::config::ConfigFile>,
 }
 
 /// Rendered result produced by middleware.

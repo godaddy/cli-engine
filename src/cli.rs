@@ -237,6 +237,11 @@ pub struct CliConfig {
     /// admin modules (e.g. godaddy's `env`). When unset, defaults to `"Admin"`;
     /// set it to match a consumer's own taxonomy (e.g. gdx's "Administration").
     pub admin_category: Option<String>,
+    /// Whether to mount the built-in `config` command group (`config
+    /// get`/`set`/`path`/`list`). Off by default to avoid colliding with a
+    /// consumer's own `config` noun. Enable via
+    /// [`CliConfig::with_config_commands`].
+    pub config_commands: bool,
     /// Alternative `argv[0]` names this binary may be invoked as, mapped to the
     /// behavior the engine should take (busybox/git-style multi-call dispatch).
     ///
@@ -416,6 +421,17 @@ impl CliConfig {
     #[must_use]
     pub fn with_admin_category(mut self, category: impl Into<String>) -> Self {
         self.admin_category = Some(category.into());
+        self
+    }
+
+    /// Mounts the built-in `config` command group (`config get`/`set`/`path`/
+    /// `list`) for reading and writing the per-application config file.
+    ///
+    /// Off by default so it never collides with a consumer's own `config` noun;
+    /// the group is filed under the admin help category when enabled.
+    #[must_use]
+    pub fn with_config_commands(mut self) -> Self {
+        self.config_commands = true;
         self
     }
 
@@ -683,6 +699,9 @@ impl Cli {
 
         let mut middleware = Middleware::new();
         middleware.app_id = config.app_id.clone();
+        // Load the per-application config file once at startup; cloned into each
+        // per-run middleware so handlers and module registration share it.
+        middleware.config = Arc::new(crate::config::ConfigFile::load(&config.app_id));
         middleware.default_auth_provider = config.default_auth_provider.clone().unwrap_or_default();
         middleware.authz = config.authz.clone();
         middleware.auditor = config.auditor.clone();
@@ -730,6 +749,9 @@ impl Cli {
         }
         for command in commands {
             cli.add_command(command);
+        }
+        if cli.config.config_commands {
+            cli.ensure_config_command();
         }
         cli
     }
@@ -1249,6 +1271,9 @@ impl Cli {
 
         let default_format = default_output_format(&self.config.app_id);
         let flags = global_flags_from_matches(&matches, &default_format);
+        // Publish the --credential-store override so auth providers resolving
+        // their storage backend see it at the top of the precedence chain.
+        crate::config::set_credential_store_flag(flags.credential_store);
         let command_timeout = match parse_command_timeout(&flags.timeout) {
             Ok(timeout) => timeout,
             Err(err) => {
@@ -1729,6 +1754,42 @@ impl Cli {
         // `register_auth_provider`), so it never falls into the generic
         // "Commands" bucket. Idempotent via the `already_listed` guard.
         self.register_auth_help_entry();
+    }
+
+    /// Mounts the built-in `config` command group and files it under the admin
+    /// help category. Idempotent and yields to a consumer-defined `config`
+    /// subcommand if one already exists.
+    fn ensure_config_command(&mut self) {
+        if has_subcommand(&self.root, "config") {
+            return;
+        }
+        let group = crate::config_commands::config_command_group();
+        let mut prefix = Vec::new();
+        group.register_commands(&mut prefix, &mut self.commands);
+        let mut prefix = Vec::new();
+        let clap_group = runtime_group_clap_command_with_schema_help(
+            &group,
+            &mut prefix,
+            &self.middleware.schema_registry,
+        );
+        self.root = self.root.clone().subcommand(clap_group);
+        let category = self
+            .config
+            .admin_category
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ADMIN_CATEGORY.to_owned());
+        if !self
+            .module_entries
+            .iter()
+            .any(|entry| entry.name == "config")
+        {
+            self.module_entries.push(ModuleHelpEntry {
+                category,
+                name: "config".to_owned(),
+                short: "Read and write the CLI config file".to_owned(),
+            });
+        }
+        self.refresh_root_long();
     }
 
     fn default_auth_provider(&self) -> String {

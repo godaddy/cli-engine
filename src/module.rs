@@ -155,6 +155,14 @@ impl<'middleware> ModuleContext<'middleware> {
         self.middleware
     }
 
+    /// Returns the loaded per-application config file for registration-time use.
+    ///
+    /// Read a consumer-owned section with
+    /// [`ConfigFile::section`](crate::config::ConfigFile::section).
+    pub fn config(&self) -> &crate::config::ConfigFile {
+        &self.middleware.config
+    }
+
     /// Returns the schema registry for direct registration.
     pub fn schema_registry(&mut self) -> &mut SchemaRegistry {
         &mut self.middleware.schema_registry
