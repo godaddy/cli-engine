@@ -61,17 +61,19 @@ pub fn config_command_group() -> RuntimeGroupSpec {
                     .required(true)
                     .help("Dotted key, e.g. credentials.store or deploy.region"),
             )
-            .with_arg(
-                Arg::new("value")
-                    .value_name("VALUE")
-                    .required(true)
-                    .help("Value (parsed as bool/int/float when possible, else string)"),
-            ),
+            .with_arg(Arg::new("value").value_name("VALUE").required(true).help(
+                "Value to set. Type is inferred: \"true\"/\"false\" → bool, \
+                         digits → int, float syntax (\"1.5\", \"1e5\") → float, \
+                         everything else → string.",
+            )),
         async |context| {
             let key = string_arg(&context.args, "key");
             let value = string_arg(&context.args, "value");
-            // Load fresh from disk (not the startup snapshot) so a concurrent
-            // external edit is not clobbered, then set + save.
+            // Load fresh from disk (not the startup snapshot) to avoid
+            // clobbering a concurrent external edit. The startup snapshot in
+            // `context.config()` is NOT updated by this write; a subsequent
+            // `config get` in the same process will still read the old value
+            // until the CLI is restarted.
             let mut config = ConfigFile::load(&context.middleware.app_id);
             config.set(&key, &value)?;
             config.save()?;

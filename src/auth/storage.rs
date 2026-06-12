@@ -205,10 +205,15 @@ mod keychain {
 
     /// System-keychain credential storage.
     ///
-    /// Reads and writes the OS keychain only. A `load` returns `None` both when
-    /// no entry exists and when the keychain backend is unavailable; a `save`
-    /// failure is a hard error. No file is ever written — use [`AutoStorage`]
-    /// for a file fallback or [`super::FileStorage`] to skip the keychain.
+    /// Reads and writes the OS keychain only. `load` returns `None` for both
+    /// "no entry" and "keychain backend unavailable" — callers cannot
+    /// distinguish the two states. `save` is a hard error when the write
+    /// fails. No file is ever written — use [`AutoStorage`] for a file
+    /// fallback or [`super::FileStorage`] to skip the keychain entirely.
+    ///
+    /// If you need the three-state distinction (entry present / reachable but
+    /// empty / backend unavailable), use [`KeyringStorage::read_three_state`]
+    /// directly (as [`AutoStorage`] does).
     #[derive(Clone, Copy, Debug, Default)]
     pub struct KeyringStorage;
 
@@ -451,9 +456,16 @@ pub fn storage_for(mode: CredentialStore) -> Arc<dyn CredentialStorage> {
 /// Resolves the configured [`CredentialStore`] for `app_id` and builds the
 /// matching backend.
 ///
-/// Resolution consults the CLI flag, the `${PREFIX}_CREDENTIAL_STORE` env var,
-/// and the config file, defaulting to [`CredentialStore::Keyring`]; see
-/// [`crate::config::resolve_credential_store`].
+/// Resolution consults (in priority order): the `--credential-store` CLI flag
+/// stored in a per-thread latch by [`crate::cli::Cli::run`]; the
+/// `${PREFIX}_CREDENTIAL_STORE` env var; the config file; and finally the
+/// default [`CredentialStore::Keyring`].
+///
+/// **Note**: this function reads thread-local state set by `Cli::run`. Calling
+/// it outside of a `Cli::run` execution (e.g. in a standalone binary without a
+/// `Cli`) always sees `None` for the flag and relies solely on the env var and
+/// config file. Prefer [`storage_for`] with an explicit [`CredentialStore`]
+/// when you don't need the full resolution chain.
 #[must_use]
 pub fn default_storage(app_id: &str) -> Arc<dyn CredentialStorage> {
     let mode = crate::config::resolve_credential_store(app_id, |k| std::env::var(k).ok());

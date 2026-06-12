@@ -18,9 +18,9 @@
 //! [`app_id_env_prefix`](crate::flags::app_id_env_prefix). See
 //! [`resolve_credential_store`] and the pure [`resolve_credential_store_with`].
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
@@ -127,13 +127,20 @@ pub struct CredentialsConfig {
     pub store: Option<CredentialStore>,
 }
 
-/// Process-wide override set from the `--credential-store` global flag.
-///
-/// Sits at the top of the resolution precedence. Encoded as a byte so it can be
-/// updated lock-free: `0` = unset, `1` = `Auto`, `2` = `Keyring`, `3` = `File`.
-/// Overwritable (not set-once) so each [`crate::cli::Cli::run`] re-establishes
-/// the flag for that run rather than the first run pinning it for the process.
-static CREDENTIAL_STORE_FLAG: AtomicU8 = AtomicU8::new(0);
+// Per-thread override from the `--credential-store` global flag.
+//
+// Stored in a `thread_local!` `Cell` so concurrent `Cli::run` calls on
+// different OS threads cannot interfere with each other. Each thread writes
+// its own flag at the start of `Cli::run` (via `set_credential_store_flag`)
+// and clears it at the end (via `clear_credential_store_flag`).
+//
+// Limitation: concurrent `Cli::run` calls sharing the same OS thread (e.g.
+// concurrent tokio tasks on a single-threaded runtime) are not supported —
+// the second call will observe the first run's flag. This scenario is atypical
+// for a CLI library.
+thread_local! {
+    static CREDENTIAL_STORE_FLAG: Cell<u8> = const { Cell::new(0) };
+}
 
 fn encode_store(store: Option<CredentialStore>) -> u8 {
     match store {
@@ -153,21 +160,28 @@ fn decode_store(byte: u8) -> Option<CredentialStore> {
     }
 }
 
-/// Records the value of the `--credential-store` flag for later resolution.
+/// Records the value of the `--credential-store` flag for the current thread.
 ///
 /// Called at the start of each CLI run with the parsed flag value (`None` when
-/// the flag was not supplied), overwriting any previous value. Crate-internal:
-/// only the engine publishes per-run flag state, so library consumers cannot
-/// mutate this process-global latch.
+/// the flag was not supplied). Crate-internal: only the engine publishes
+/// per-run flag state, so library consumers cannot mutate this latch.
 pub(crate) fn set_credential_store_flag(store: Option<CredentialStore>) {
-    CREDENTIAL_STORE_FLAG.store(encode_store(store), Ordering::Relaxed);
+    CREDENTIAL_STORE_FLAG.with(|f| f.set(encode_store(store)));
+}
+
+/// Clears the thread-local flag set by [`set_credential_store_flag`].
+///
+/// Called at the end of each `Cli::run` so the flag does not leak into
+/// subsequent sequential runs on the same thread.
+pub(crate) fn clear_credential_store_flag() {
+    CREDENTIAL_STORE_FLAG.with(|f| f.set(0));
 }
 
 /// Returns the flag override recorded by [`set_credential_store_flag`], if any.
-/// Crate-internal accessor for the process-global flag latch.
+/// Crate-internal accessor for the per-thread flag latch.
 #[must_use]
 pub(crate) fn credential_store_flag() -> Option<CredentialStore> {
-    decode_store(CREDENTIAL_STORE_FLAG.load(Ordering::Relaxed))
+    CREDENTIAL_STORE_FLAG.with(|f| decode_store(f.get()))
 }
 
 /// Derives the credential-store override env var from an app id, e.g.
@@ -223,10 +237,6 @@ pub fn load(app_id: &str) -> EngineConfig {
 pub struct ConfigFile {
     path: Option<PathBuf>,
     doc: DocumentMut,
-    /// Parsed read-model for typed access, kept in sync with `doc`. Avoids
-    /// reparsing the whole document on every `section`/`deserialize`/`engine`
-    /// call; rebuilt only when the document is mutated via `set`.
-    read_model: toml::Table,
 }
 
 impl Default for ConfigFile {
@@ -236,16 +246,8 @@ impl Default for ConfigFile {
 }
 
 impl ConfigFile {
-    /// Builds a `ConfigFile` from a path + document, parsing the typed
-    /// read-model once. The document is the source of truth; the read-model is
-    /// a serde-friendly view derived from it.
     fn from_doc(path: Option<PathBuf>, doc: DocumentMut) -> Self {
-        let read_model = parse_read_model(&doc);
-        Self {
-            path,
-            doc,
-            read_model,
-        }
+        Self { path, doc }
     }
 
     /// Loads the config file for `app_id`.
@@ -254,6 +256,11 @@ impl ConfigFile {
     /// TOML yields an empty document (a warning is logged for the malformed
     /// case). The resolved path is retained for [`save`](ConfigFile::save) even
     /// when the file does not yet exist.
+    ///
+    /// **Blocking**: this function performs synchronous filesystem I/O. The
+    /// engine calls it once at `Cli::new` time (outside of command execution),
+    /// which is acceptable for a one-shot CLI. Avoid calling it from hot paths
+    /// or from within an async executor without `spawn_blocking`.
     #[must_use]
     pub fn load(app_id: &str) -> Self {
         let path = config_file_path(app_id);
@@ -301,14 +308,21 @@ impl ConfigFile {
     /// Returns an error when the table is present but does not deserialize into
     /// `T`.
     pub fn section<T: DeserializeOwned>(&self, name: &str) -> crate::Result<Option<T>> {
-        match self.read_model.get(name) {
-            None => Ok(None),
-            Some(value) => value
-                .clone()
-                .try_into()
-                .map(Some)
-                .map_err(|e| CliCoreError::message(format!("config section {name:?}: {e}"))),
+        let item = match self.doc.get(name) {
+            None => return Ok(None),
+            Some(item) => item,
+        };
+        // Extract the section's key-value pairs into a temporary root-level
+        // document so `from_document` sees a plain `T`-shaped struct.
+        let mut tmp = DocumentMut::new();
+        if let Some(tbl) = item.as_table_like() {
+            for (k, v) in tbl.iter() {
+                tmp[k] = v.clone();
+            }
         }
+        toml_edit::de::from_document::<T>(tmp)
+            .map(Some)
+            .map_err(|e| CliCoreError::message(format!("config section {name:?}: {e}")))
     }
 
     /// Deserializes the entire config file into a consumer root type `T`.
@@ -319,8 +333,7 @@ impl ConfigFile {
     /// # Errors
     /// Returns an error when the document does not deserialize into `T`.
     pub fn deserialize<T: DeserializeOwned>(&self) -> crate::Result<T> {
-        toml::Value::Table(self.read_model.clone())
-            .try_into()
+        toml_edit::de::from_document::<T>(self.doc.clone())
             .map_err(|e| CliCoreError::message(format!("config deserialize error: {e}")))
     }
 
@@ -343,20 +356,47 @@ impl ConfigFile {
 
     /// Sets the value at a dotted key, creating intermediate tables as needed.
     ///
-    /// `value` is parsed as a TOML scalar when it looks like a bool/integer/float
-    /// and stored as a string otherwise. The engine-reserved `credentials.store`
-    /// key is validated against [`CredentialStore`] and rejected when invalid.
-    /// Existing comments and formatting elsewhere in the file are preserved.
-    /// Call [`save`](ConfigFile::save) to persist.
+    /// `value` is coerced to a TOML scalar type using these rules (in order):
+    /// 1. `"true"` / `"false"` (case-sensitive) → TOML boolean.
+    /// 2. Any string parseable as an `i64` → TOML integer.
+    /// 3. Any string parseable as an `f64` (including `"1e5"`, `"inf"`,
+    ///    `"nan"`) → TOML float.
+    /// 4. Everything else → TOML string.
+    ///
+    /// To force a value to be stored as a string when it looks numeric (e.g.
+    /// a version like `"1.0"`), this API does not currently support quoting —
+    /// wrap the value in the config file by hand.
+    ///
+    /// The engine-reserved `[credentials]` table is validated: only the known
+    /// key `credentials.store` is accepted; unknown keys in that table are
+    /// rejected. Existing comments and formatting elsewhere in the file are
+    /// preserved. Call [`save`](ConfigFile::save) to persist.
     ///
     /// # Errors
-    /// Returns an error for an empty/invalid key, an invalid engine value, or a
-    /// key whose parent path is not a table.
+    /// Returns an error for an empty/invalid key, an unknown engine-reserved
+    /// key, an invalid engine value, or a key whose parent path is not a
+    /// table.
     pub fn set(&mut self, dotted_key: &str, value: &str) -> crate::Result<()> {
-        if dotted_key == "credentials.store" {
-            value
-                .parse::<CredentialStore>()
-                .map_err(|e| CliCoreError::message(e.to_string()))?;
+        // Validate engine-reserved keys under [credentials].
+        // Only the documented key `credentials.store` is accepted; any other
+        // key in that table is rejected to prevent silently writing unknown
+        // engine config that would be ignored (and confuse the user).
+        const ENGINE_RESERVED_TABLES: &[&str] = &["credentials"];
+        let first_segment = dotted_key.split('.').next().unwrap_or("");
+        if ENGINE_RESERVED_TABLES.contains(&first_segment) {
+            match dotted_key {
+                "credentials.store" => {
+                    value
+                        .parse::<CredentialStore>()
+                        .map_err(|e| CliCoreError::message(e.to_string()))?;
+                }
+                other => {
+                    return Err(CliCoreError::message(format!(
+                        "unknown engine-reserved key {other:?}; \
+                         the only supported key in [credentials] is \"credentials.store\""
+                    )));
+                }
+            }
         }
         let segments: Vec<&str> = dotted_key.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
@@ -377,8 +417,6 @@ impl ConfigFile {
             })?;
         }
         table[last] = toml_edit::Item::Value(infer_toml_value(value));
-        // Keep the typed read-model in sync with the mutated document.
-        self.read_model = parse_read_model(&self.doc);
         Ok(())
     }
 
@@ -403,13 +441,6 @@ impl ConfigFile {
         })?;
         crate::fs::write_string_atomic(path, &self.doc.to_string())
     }
-}
-
-/// Builds the serde read-model from a document. A document that fails to
-/// re-parse (which should not happen for one we constructed) yields an empty
-/// table rather than panicking.
-fn parse_read_model(doc: &DocumentMut) -> toml::Table {
-    toml::from_str(&doc.to_string()).unwrap_or_default()
 }
 
 /// Parses `value` as a TOML bool/integer/float when possible, else a string.
@@ -582,20 +613,20 @@ mod tests {
     #[test]
     fn deserializes_store_from_toml() {
         let config: EngineConfig =
-            toml::from_str("[credentials]\nstore = \"file\"\n").expect("valid toml");
+            toml_edit::de::from_str("[credentials]\nstore = \"file\"\n").expect("valid toml");
         assert_eq!(config.credentials.store, Some(CredentialStore::File));
     }
 
     #[test]
     fn deserialize_rejects_bad_store_value() {
-        let result = toml::from_str::<EngineConfig>("[credentials]\nstore = \"nope\"\n");
+        let result = toml_edit::de::from_str::<EngineConfig>("[credentials]\nstore = \"nope\"\n");
         assert!(result.is_err(), "bad store value should fail to parse");
     }
 
     #[test]
     fn unknown_keys_are_ignored() {
         let config: EngineConfig =
-            toml::from_str("future_section = true\n[credentials]\nstore = \"auto\"\n")
+            toml_edit::de::from_str("future_section = true\n[credentials]\nstore = \"auto\"\n")
                 .expect("unknown keys tolerated");
         assert_eq!(config.credentials.store, Some(CredentialStore::Auto));
     }
@@ -748,6 +779,25 @@ mod tests {
         assert!(cfg.set("credentials.store", "bogus").is_err());
         assert!(cfg.set("credentials.store", "file").is_ok());
         assert_eq!(cfg.engine().credentials.store, Some(CredentialStore::File));
+    }
+
+    #[test]
+    fn set_rejects_unknown_engine_reserved_keys() {
+        let mut cfg = ConfigFile::default();
+        // Unknown keys in [credentials] are rejected to prevent silent no-ops.
+        assert!(
+            cfg.set("credentials.unknown_future_key", "foo").is_err(),
+            "unknown credentials key should be rejected"
+        );
+        assert!(
+            cfg.set("credentials.timeout", "30").is_err(),
+            "unknown credentials.timeout should be rejected"
+        );
+        // Consumer-owned tables are unrestricted.
+        assert!(
+            cfg.set("deploy.region", "us-west").is_ok(),
+            "consumer-owned keys should be accepted"
+        );
     }
 
     #[test]

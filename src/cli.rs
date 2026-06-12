@@ -1851,6 +1851,9 @@ impl Cli {
     }
 
     fn finish_run(&self, output: CliRunOutput) -> CliRunOutput {
+        // Clear the per-thread credential-store flag so it does not leak into
+        // subsequent sequential runs on the same thread.
+        crate::config::clear_credential_store_flag();
         if let Some(on_shutdown) = &self.on_shutdown {
             on_shutdown();
         }

@@ -101,6 +101,10 @@ pub fn is_safe_path_component(s: &str) -> bool {
 /// parent directory is best-effort restricted to `0700`. On Windows the rename
 /// replaces an existing destination but is not crash-atomic.
 ///
+/// **Blocking**: this function uses synchronous filesystem I/O. Call it from
+/// within [`tokio::task::spawn_blocking`] when used in an async context to
+/// avoid stalling the executor.
+///
 /// # Errors
 /// Returns an error when the directory cannot be created or the write/rename
 /// fails.
