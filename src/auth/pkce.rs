@@ -1,15 +1,26 @@
 //! OAuth 2.0 PKCE authentication provider.
 //!
 //! Implements the browser-based Authorization Code + PKCE flow (RFC 7636).
-//! Tokens are stored in the system keychain via the `keyring` crate.
-//! On headless or WSL environments where a keychain daemon is unavailable, an
-//! opt-in file fallback can be enabled with `PkceAuthProvider::with_file_fallback`;
-//! tokens are then written as **unencrypted JSON** to
-//! `<config-base>/<app>/credentials/<provider>-<env>.json` (at most `0600` on Unix; the
-//! process umask may make the mode more restrictive),
-//! where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
-//! Only enable the fallback when the deployment environment lacks a reliable
-//! keychain and the security tradeoff is acceptable.
+//! Tokens are persisted through a pluggable [`CredentialStorage`] backend
+//! (see [`crate::auth::storage`]) rather than a hard-wired keychain. By default
+//! the backend is resolved from configuration — the `--credential-store` flag,
+//! the `${PREFIX}_CREDENTIAL_STORE` env var, the engine config file, or the
+//! `keyring` default — so an operator can disable the system keychain on
+//! environments where it is unavailable (headless Linux, WSL) without code
+//! changes. The three modes are:
+//!
+//! - `Keyring` (default): system keychain only.
+//! - `Auto`: keychain with a transparent unencrypted-file fallback when the
+//!   keychain backend is unavailable.
+//! - `File`: never contact the keychain; store unencrypted JSON under
+//!   `<config-base>/<app>/credentials/<provider>-<env>.json`, where
+//!   `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
+//!
+//! See [`CredentialStore`](crate::config::CredentialStore). A backend can also be
+//! injected directly with
+//! [`PkceAuthProvider::with_storage`](crate::auth::pkce::PkceAuthProvider::with_storage)
+//! or forced with
+//! [`PkceAuthProvider::with_credential_store`](crate::auth::pkce::PkceAuthProvider::with_credential_store).
 //!
 //! # Setup
 //!
@@ -55,7 +66,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{Credential, Result, auth::AuthProvider, auth::CredentialRequest, error::CliCoreError};
+use crate::{
+    Credential, Result,
+    auth::AuthProvider,
+    auth::CredentialRequest,
+    auth::storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
+    config::CredentialStore,
+    error::CliCoreError,
+};
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
@@ -121,7 +139,15 @@ pub struct PkceAuthProvider {
     redirect_uri: Option<String>,
     app_id: String,
     env_prefix: String,
-    allow_file_fallback: bool,
+    /// Explicit storage backend injected via [`PkceAuthProvider::with_storage`].
+    /// Wins over `store_mode` and the config-driven default.
+    storage_override: Option<Arc<dyn CredentialStorage>>,
+    /// Explicit storage mode from [`PkceAuthProvider::with_credential_store`].
+    /// Forces a built-in backend, bypassing flag/env/config resolution.
+    store_mode: Option<CredentialStore>,
+    /// Lazily-resolved storage backend. Built on first use so `--schema` /
+    /// `--dry-run` (which never resolve a credential) touch no keychain/config.
+    storage: tokio::sync::OnceCell<Arc<dyn CredentialStorage>>,
     /// Prioritized JWT claim names used to derive `Credential.identity` from the
     /// decoded access-token payload. First non-empty string claim wins.
     identity_claims: Vec<String>,
@@ -161,7 +187,9 @@ impl PkceAuthProvider {
             redirect_uri: None,
             app_id: String::new(),
             env_prefix,
-            allow_file_fallback: false,
+            storage_override: None,
+            store_mode: None,
+            storage: tokio::sync::OnceCell::new(),
             identity_claims: DEFAULT_IDENTITY_CLAIMS
                 .iter()
                 .map(|claim| (*claim).to_owned())
@@ -204,16 +232,48 @@ impl PkceAuthProvider {
         self
     }
 
+    /// Injects a custom credential storage backend.
+    ///
+    /// Takes precedence over [`with_credential_store`](Self::with_credential_store)
+    /// and the config-driven default. Use this to plug in a bespoke
+    /// [`CredentialStorage`] (for example an in-memory store in tests, or a
+    /// remote secret manager).
+    #[must_use]
+    pub fn with_storage(mut self, storage: Arc<dyn CredentialStorage>) -> Self {
+        self.storage_override = Some(storage);
+        self
+    }
+
+    /// Forces a built-in credential storage mode, bypassing the
+    /// flag/env/config resolution.
+    ///
+    /// Use [`CredentialStore::File`] to skip the system keychain entirely (the
+    /// escape hatch for headless Linux / WSL), [`CredentialStore::Auto`] for a
+    /// keychain-with-file-fallback, or [`CredentialStore::Keyring`] for
+    /// keychain-only. When unset, the mode is resolved per
+    /// [`crate::config::resolve_credential_store`].
+    #[must_use]
+    pub fn with_credential_store(mut self, mode: CredentialStore) -> Self {
+        self.store_mode = Some(mode);
+        self
+    }
+
     /// Enables a file-based fallback when the system keychain is unavailable
     /// (e.g. headless Linux / WSL without a running secret-service daemon).
     ///
-    /// Disabled by default. The original TypeScript CLI had no file fallback;
-    /// enable only when you have confirmed the deployment environment lacks a
-    /// reliable keychain and you accept unencrypted credentials on disk.
+    /// `true` maps to [`CredentialStore::Auto`] and `false` to
+    /// [`CredentialStore::Keyring`].
     #[must_use]
-    pub fn with_file_fallback(mut self, enabled: bool) -> Self {
-        self.allow_file_fallback = enabled;
-        self
+    #[deprecated(
+        since = "0.3.0",
+        note = "use with_credential_store(CredentialStore::Auto) or (CredentialStore::Keyring)"
+    )]
+    pub fn with_file_fallback(self, enabled: bool) -> Self {
+        self.with_credential_store(if enabled {
+            CredentialStore::Auto
+        } else {
+            CredentialStore::Keyring
+        })
     }
 
     /// Overrides the prioritized JWT claim names used to derive
@@ -293,222 +353,61 @@ impl PkceAuthProvider {
         Ok((port, path))
     }
 
-    fn keychain_service(&self, env: &str) -> String {
-        if self.app_id.is_empty() {
-            format!("{}/{}", self.name, env)
-        } else {
-            format!("{}/{}/{}", self.app_id, self.name, env)
-        }
+    /// Builds the storage key for this provider and `env`.
+    fn credential_key<'key>(&'key self, env: &'key str) -> CredentialKey<'key> {
+        CredentialKey::new(&self.app_id, &self.name, env)
     }
 
-    fn keychain_user() -> &'static str {
-        "token"
-    }
-
-    /// Returns the path to the fallback credential file for this provider/env.
+    /// Returns the credential storage backend, resolving and caching it on first
+    /// use. Precedence: an injected [`with_storage`](Self::with_storage) backend,
+    /// then a forced [`with_credential_store`](Self::with_credential_store) mode,
+    /// then the config-driven [`default_storage`].
     ///
-    /// Used when the system keychain is unavailable (e.g. WSL, headless Linux).
-    fn credential_file_path(&self, env: &str) -> Option<std::path::PathBuf> {
-        let app = if self.app_id.is_empty() {
-            &self.name
-        } else {
-            &self.app_id
-        };
-        if !is_safe_path_component(app)
-            || !is_safe_path_component(&self.name)
-            || !is_safe_path_component(env)
-        {
-            tracing::warn!(
-                app,
-                name = self.name,
-                env,
-                "refusing credential path with unsafe component"
-            );
-            return None;
-        }
-        let base = config_base_dir()?;
-        Some(
-            base.join(app)
-                .join("credentials")
-                .join(format!("{}-{}.json", self.name, env)),
-        )
-    }
-
-    async fn load_token_from_keychain(&self, env: &str) -> Option<StoredToken> {
-        let service = self.keychain_service(env);
-        let user = Self::keychain_user();
-
-        // None = backend error/unavailable; Some(None) = working but no entry.
-        let keychain_result = match tokio::task::spawn_blocking({
-            let service = service.clone();
-            move || keychain_read_blocking(&service, user)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                let reason = if e.is_cancelled() {
-                    "cancelled"
+    /// Resolution is lazy so paths that never resolve a credential (`--schema`,
+    /// `--dry-run`) build no storage and touch neither the keychain nor config.
+    async fn storage(&self) -> &Arc<dyn CredentialStorage> {
+        self.storage
+            .get_or_init(async || {
+                if let Some(storage) = &self.storage_override {
+                    storage.clone()
+                } else if let Some(mode) = self.store_mode {
+                    storage_for(mode)
                 } else {
-                    "panicked"
-                };
-                tracing::warn!(service, error = %e, reason, "keychain read task failed");
-                None
-            }
-        };
-
-        match keychain_result {
-            Some(Some(ref json)) => {
-                match serde_json::from_str::<StoredToken>(json) {
-                    Ok(token) => return Some(token),
-                    Err(e) => {
-                        tracing::warn!(service, error = %e, "keychain token JSON invalid");
-                        // Best-effort delete the corrupt entry so subsequent runs
-                        // don't repeat the warning. The keychain was reachable, so
-                        // skip the file fallback and force re-auth.
-                        let svc = service.clone();
-                        let usr = Self::keychain_user();
-                        if let Err(e) = tokio::task::spawn_blocking(move || {
-                            if let Ok(entry) = keyring::Entry::new(&svc, usr)
-                                && let Err(e) = entry.delete_credential()
-                                && !matches!(e, keyring::Error::NoEntry)
-                            {
-                                tracing::warn!(service = %svc, error = %e, "failed to self-heal corrupt keychain entry");
-                            }
-                        })
-                        .await
-                        {
-                            let reason = if e.is_cancelled() { "cancelled" } else { "panicked" };
-                            tracing::warn!(service, error = %e, reason, "keychain self-heal task failed");
-                        }
-                        return None;
-                    }
+                    default_storage(&self.app_id)
                 }
-            }
-            Some(None) => {
-                // Keychain is reachable but has no entry. The file is stale or absent;
-                // skip the file fallback and let the caller trigger a new login.
-                return None;
-            }
-            None => {
-                // Keychain backend unavailable — fall through to the file fallback.
-            }
-        }
-
-        if !self.allow_file_fallback {
-            return None;
-        }
-        let path = self.credential_file_path(env)?;
-        load_token_from_file(&path).await
-    }
-
-    async fn save_token_to_keychain(&self, env: &str, token: &StoredToken) -> Result<()> {
-        let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
-        let service = self.keychain_service(env);
-        let user = Self::keychain_user();
-
-        let (keychain_saved, json) = match tokio::task::spawn_blocking({
-            let service = service.clone();
-            move || {
-                let saved = keychain_write_blocking(&service, user, &json);
-                (saved, json)
-            }
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(e) => {
-                let reason = if e.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "panicked"
-                };
-                tracing::warn!(service, error = %e, reason, "keychain write task failed");
-                // Re-serialize on task panic/cancel so the file-fallback path still has json.
-                let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
-                (false, json)
-            }
-        };
-
-        if keychain_saved {
-            // Best-effort: remove any stale file-fallback token now that the
-            // keychain is working. Ignore NotFound; the file may never have existed.
-            if let Some(path) = self.credential_file_path(env) {
-                match tokio::fs::remove_file(&path).await {
-                    Ok(()) => {
-                        tracing::debug!(path = %path.display(), "removed stale file fallback after keychain write");
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        tracing::debug!(path = %path.display(), error = %e, "could not remove stale file fallback");
-                    }
-                }
-            }
-            return Ok(());
-        }
-        if !self.allow_file_fallback {
-            return Err(CliCoreError::message(
-                "failed to save token to keychain and file fallback is disabled — \
-                 check logs for the underlying error, or ensure your system keychain \
-                 (e.g. gnome-keyring, macOS Keychain) is running and unlocked",
-            ));
-        }
-        let path = self
-            .credential_file_path(env)
-            .ok_or_else(|| CliCoreError::message("could not determine credential file path"))?;
-        tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || write_token_file_blocking(path, json)
-        })
-        .await
-        .map_err(|e| {
-            CliCoreError::message(format!(
-                "credential file write task {}: {e}",
-                if e.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "panicked"
-                }
-            ))
-        })??;
-        tracing::debug!(path = %path.display(), "token saved to file fallback");
-        Ok(())
-    }
-
-    async fn delete_token_from_keychain(&self, env: &str) {
-        let service = self.keychain_service(env);
-        let user = Self::keychain_user();
-        let service_for_warn = service.clone();
-        if let Err(e) =
-            tokio::task::spawn_blocking(move || match keyring::Entry::new(&service, user) {
-                Err(e) => {
-                    tracing::warn!(service, error = %e, "keychain entry creation failed on delete");
-                }
-                Ok(entry) => match entry.delete_credential() {
-                    Ok(()) | Err(keyring::Error::NoEntry) => {}
-                    Err(e) => {
-                        tracing::warn!(service, error = %e, "keychain delete failed");
-                    }
-                },
             })
             .await
-        {
-            let reason = if e.is_cancelled() {
-                "cancelled"
-            } else {
-                "panicked"
-            };
-            tracing::warn!(service = service_for_warn, error = %e, reason, "keychain delete task failed");
-        }
-        if let Some(path) = self.credential_file_path(env) {
-            match tokio::fs::remove_file(&path).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to delete credential file");
-                }
+    }
+
+    /// Loads and deserializes the stored token for `env`, if present.
+    ///
+    /// On a corrupt/undecodable blob, best-effort deletes it (self-heal) and
+    /// returns `None` so the caller re-authenticates rather than looping on the
+    /// bad entry.
+    async fn load_stored(&self, env: &str) -> Option<StoredToken> {
+        let key = self.credential_key(env);
+        let raw = self.storage().await.load(&key).await?;
+        match serde_json::from_str::<StoredToken>(&raw) {
+            Ok(token) => Some(token),
+            Err(e) => {
+                tracing::warn!(env, error = %e, "stored token JSON invalid; clearing");
+                self.storage().await.delete(&key).await;
+                None
             }
         }
+    }
+
+    /// Serializes and persists `token` for `env` via the storage backend.
+    async fn save_stored(&self, env: &str, token: &StoredToken) -> Result<()> {
+        let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
+        let key = self.credential_key(env);
+        self.storage().await.save(&key, &json).await
+    }
+
+    /// Removes any stored token for `env` via the storage backend.
+    async fn delete_stored(&self, env: &str) {
+        let key = self.credential_key(env);
+        self.storage().await.delete(&key).await;
     }
 
     async fn cached_token(&self, env: &str) -> Option<StoredToken> {
@@ -536,7 +435,7 @@ impl PkceAuthProvider {
         if let Some(token) = self.cached_token(env).await {
             return Ok(Some(token));
         }
-        if let Some(token) = self.load_token_from_keychain(env).await {
+        if let Some(token) = self.load_stored(env).await {
             if token.is_valid() {
                 self.store_cached_token(env, token.clone()).await;
                 return Ok(Some(token));
@@ -549,7 +448,7 @@ impl PkceAuthProvider {
                 if refreshed.refresh_token.is_none() {
                     refreshed.refresh_token = Some(refresh_token.to_owned());
                 }
-                self.save_token_to_keychain(env, &refreshed).await?;
+                self.save_stored(env, &refreshed).await?;
                 self.store_cached_token(env, refreshed.clone()).await;
                 return Ok(Some(refreshed));
             }
@@ -565,7 +464,7 @@ impl PkceAuthProvider {
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails
         // (e.g. keychain unavailable and file fallback disabled).
-        self.save_token_to_keychain(env, &token).await?;
+        self.save_stored(env, &token).await?;
         self.store_cached_token(env, token.clone()).await;
         Ok(token)
     }
@@ -727,7 +626,7 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
-        let Some(token) = self.load_token_from_keychain(env).await else {
+        let Some(token) = self.load_stored(env).await else {
             return Err(CliCoreError::message(format!(
                 "not logged in for environment {env:?}"
             )));
@@ -736,7 +635,7 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn logout(&self, env: &str) -> Result<()> {
-        self.delete_token_from_keychain(env).await;
+        self.delete_stored(env).await;
         let mut cache = self.cache.write().await;
         cache.remove(env);
         Ok(())
@@ -764,226 +663,6 @@ fn pkce_challenge() -> (String, String) {
 fn random_state() -> String {
     let bytes: [u8; 16] = rand::rng().random();
     URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Resolves the base config directory from environment variables.
-fn config_base_dir() -> Option<std::path::PathBuf> {
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            // On Windows prefer APPDATA over HOME/.config: HOME is often set by
-            // Git Bash/MSYS shells and would place credentials in a non-standard
-            // location. On all other platforms prefer XDG-conventional HOME/.config,
-            // falling back to APPDATA as a last resort if HOME is unset.
-            #[cfg(windows)]
-            {
-                std::env::var("APPDATA")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(std::path::PathBuf::from)
-                    .or_else(|| {
-                        std::env::var("HOME")
-                            .ok()
-                            .filter(|v| !v.is_empty())
-                            .map(|h| std::path::PathBuf::from(h).join(".config"))
-                    })
-            }
-            #[cfg(not(windows))]
-            {
-                std::env::var("HOME")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(|h| std::path::PathBuf::from(h).join(".config"))
-                    .or_else(|| {
-                        std::env::var("APPDATA")
-                            .ok()
-                            .filter(|v| !v.is_empty())
-                            .map(std::path::PathBuf::from)
-                    })
-            }
-        })
-        // Reject relative paths: a relative XDG_CONFIG_HOME/APPDATA/HOME would
-        // silently place credentials relative to the current working directory.
-        .filter(|p| p.is_absolute())
-}
-
-/// Reads a token JSON string from the system keychain. Sync; call inside `spawn_blocking`.
-///
-/// Returns `Some(Some(json))` when a credential is found, `Some(None)` when the keychain
-/// is reachable but has no entry, and `None` when the keychain backend is unavailable or
-/// returns an unexpected error. Callers use `None` to decide whether to try the file fallback.
-fn keychain_read_blocking(service: &str, user: &str) -> Option<Option<String>> {
-    match keyring::Entry::new(service, user) {
-        Err(e) => {
-            tracing::warn!(service, error = %e, "keychain entry creation failed");
-            None
-        }
-        Ok(entry) => match entry.get_password() {
-            Err(keyring::Error::NoEntry) => {
-                tracing::debug!(service, "no stored token in keychain");
-                Some(None)
-            }
-            Err(e) => {
-                tracing::warn!(service, error = %e, "keychain read failed");
-                None
-            }
-            Ok(json) => Some(Some(json)),
-        },
-    }
-}
-
-/// Writes a token JSON string to the system keychain. Sync; call inside `spawn_blocking`.
-fn keychain_write_blocking(service: &str, user: &str, json: &str) -> bool {
-    match keyring::Entry::new(service, user) {
-        Err(e) => {
-            tracing::warn!(service, error = %e, "keychain entry creation failed");
-            false
-        }
-        Ok(entry) => match entry.set_password(json) {
-            Err(e) => {
-                tracing::warn!(service, error = %e, "keychain write failed");
-                false
-            }
-            Ok(()) => {
-                tracing::debug!(service, "token saved to keychain");
-                true
-            }
-        },
-    }
-}
-
-/// Reads and parses a [`StoredToken`] from the file fallback path.
-async fn load_token_from_file(path: &std::path::Path) -> Option<StoredToken> {
-    let json = match tokio::fs::read_to_string(path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "file fallback read failed");
-            return None;
-        }
-    };
-    match serde_json::from_str(&json) {
-        Ok(token) => {
-            tracing::debug!(path = %path.display(), "loaded token from file fallback");
-            Some(token)
-        }
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "file fallback token JSON invalid");
-            // Best-effort delete: a permanently corrupt file causes repeated
-            // warnings and PKCE flows on every run until manually removed.
-            tokio::fs::remove_file(path).await.ok();
-            None
-        }
-    }
-}
-
-/// Writes `json` to `path` via a uniquely-named temp file then renames it into place.
-/// On Unix the rename is atomic. On Windows it is best-effort (`MoveFileExW` with
-/// `MOVEFILE_REPLACE_EXISTING`): it replaces an existing destination but is not
-/// crash-atomic. Sync; call inside `spawn_blocking`.
-fn write_token_file_blocking(path: std::path::PathBuf, json: String) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CliCoreError::message(format!("failed to create credential directory: {e}"))
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            {
-                // The credential file itself is always 0o600; failing to
-                // restrict the parent directory is a defence-in-depth miss,
-                // not a confidentiality breach.
-                tracing::debug!(
-                    path = %parent.display(),
-                    error = %e,
-                    "could not restrict credential directory permissions"
-                );
-            }
-        }
-    }
-    let rand_id = rand::random::<u32>();
-    let tmp_path = path.with_file_name(format!(
-        "{}.{rand_id:08x}.tmp",
-        path.file_stem().and_then(|s| s.to_str()).unwrap_or("cred"),
-    ));
-    write_token_tmp(&tmp_path, &json)?;
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-        std::fs::remove_file(&tmp_path).ok();
-        return Err(CliCoreError::message(format!(
-            "failed to finalize credential file {}: {e}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-/// Opens `tmp_path` with `O_CREAT|O_EXCL` and writes `json`.
-/// Sets mode `0o600` on Unix so credentials are never world-readable.
-fn write_token_tmp(tmp_path: &std::path::Path, json: &str) -> Result<()> {
-    use std::io::Write as _;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(tmp_path).map_err(|e| {
-        CliCoreError::message(format!(
-            "failed to write credentials to {}: {e}",
-            tmp_path.display()
-        ))
-    })?;
-    file.write_all(json.as_bytes()).map_err(|e| {
-        CliCoreError::message(format!(
-            "failed to write credentials to {}: {e}",
-            tmp_path.display()
-        ))
-    })
-}
-
-/// Returns true only when `s` is a single, non-traversal path component that is
-/// valid on all supported platforms.
-///
-/// Rejects:
-/// - empty strings, `.`, and `..`
-/// - strings containing `/` or `\` (path separators on any platform)
-/// - Windows-forbidden filename characters: `:  * ? " < > |`
-/// - ASCII control characters (bytes 0x00–0x1F) and the DEL character (0x7F)
-/// - leading or trailing space (leading space is invisible in directory listings)
-/// - trailing `.` (valid on Unix but rejected by Windows)
-/// - Windows reserved device names (`CON`, `NUL`, `COM1`, etc.) with or without extension
-fn is_safe_path_component(s: &str) -> bool {
-    // '/' is listed explicitly because Path::components() silently strips trailing
-    // slashes — "prod/" parses as a single Normal("prod") component and would
-    // otherwise pass the components check below.
-    const FORBIDDEN: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
-    if s.contains(FORBIDDEN) || s.bytes().any(|b| b < 0x20 || b == 0x7F) {
-        return false;
-    }
-    if s.starts_with(' ') || s.ends_with('.') || s.ends_with(' ') {
-        return false;
-    }
-    // Windows treats these device names as special regardless of extension,
-    // e.g. opening "NUL.json" writes to the null device, not a file.
-    const RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
-        "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
-        "LPT9",
-    ];
-    let stem = std::path::Path::new(s)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(s);
-    if RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
-        return false;
-    }
-    let mut components = std::path::Path::new(s).components();
-    matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none()
 }
 
 /// Waits for the OAuth callback on the given listener, validates state and path.
@@ -1303,48 +982,10 @@ async fn parse_token_response(
 }
 
 #[cfg(test)]
-// set_var/remove_var are unsafe in Rust 2024 edition. The XDG_MUTEX in this
-// module serialises all access so usage here is data-race-free.
-#[allow(unsafe_code)]
 mod tests {
     use serde_json::json;
 
     use super::*;
-
-    /// Serialises access to XDG_CONFIG_HOME (and restores it) so env-var tests
-    /// cannot race each other when the test runner spawns multiple threads.
-    static XDG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard that restores an env var when dropped, including on panic.
-    struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: XDG_MUTEX is held for the duration of this guard's lifetime,
-            // ensuring no other thread modifies these variables concurrently.
-            unsafe {
-                match self.prev.take() {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
-    fn with_xdg_config_home<F: FnOnce()>(value: &std::path::Path, f: F) {
-        let _lock = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("XDG_CONFIG_HOME").ok();
-        // SAFETY: same as EnvVarGuard::drop — mutex held for the duration.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", value) };
-        let _restore = EnvVarGuard {
-            key: "XDG_CONFIG_HOME",
-            prev,
-        };
-        f();
-    }
 
     fn test_provider() -> PkceAuthProvider {
         PkceAuthProvider::new(
@@ -1662,130 +1303,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn credential_file_path_uses_xdg_config_home() {
-        let dir = std::env::temp_dir().join("cli-engine-test-xdg-pkce");
-        with_xdg_config_home(&dir, || {
-            let path = test_provider().credential_file_path("prod");
-            assert_eq!(
-                path,
-                Some(dir.join("test").join("credentials").join("test-prod.json"))
-            );
-        });
-    }
-
-    #[test]
-    fn credential_file_path_with_app_id_uses_app_id_as_dir() {
-        let dir = std::env::temp_dir().join("cli-engine-test-xdg-pkce-appid");
-        with_xdg_config_home(&dir, || {
-            let path = test_provider()
-                .with_app_id("myapp")
-                .credential_file_path("prod");
-            assert_eq!(
-                path,
-                Some(dir.join("myapp").join("credentials").join("test-prod.json"))
-            );
-        });
-    }
-
-    #[test]
-    fn credential_file_path_rejects_traversal_in_env() {
-        let dir = std::env::temp_dir().join("cli-engine-test-xdg-traversal");
-        with_xdg_config_home(&dir, || {
-            assert_eq!(
-                test_provider().credential_file_path("../../etc/passwd"),
-                None
-            );
-            assert_eq!(test_provider().credential_file_path("dev/subdir"), None);
-            assert_eq!(test_provider().credential_file_path("dev\\subdir"), None);
-            assert_eq!(test_provider().credential_file_path(".."), None);
-        });
-    }
-
-    #[test]
-    fn is_safe_path_component_rejects_windows_reserved_names() {
-        for name in &[
-            "CON", "con", "NUL", "nul", "COM1", "LPT9", "CON.txt", "NUL.json",
-        ] {
-            assert!(
-                !is_safe_path_component(name),
-                "{name:?} should be rejected as a Windows reserved name"
-            );
-        }
-    }
-
-    #[test]
-    fn is_safe_path_component_rejects_empty_string() {
-        assert!(!is_safe_path_component(""));
-    }
-
-    #[test]
-    fn is_safe_path_component_rejects_leading_space_and_del() {
-        assert!(
-            !is_safe_path_component(" prod"),
-            "leading space should be rejected"
-        );
-        assert!(
-            !is_safe_path_component("prod\x7f"),
-            "DEL byte should be rejected"
-        );
-    }
-
-    #[test]
-    fn is_safe_path_component_rejects_trailing_dot_and_space() {
-        assert!(!is_safe_path_component("prod."));
-        assert!(!is_safe_path_component("prod "));
-    }
-
-    #[test]
-    fn is_safe_path_component_accepts_normal_values() {
-        for name in &["dev", "prod", "staging", "my-app", "my_app", "app.v2"] {
-            assert!(is_safe_path_component(name), "{name:?} should be accepted");
-        }
-    }
-
-    #[test]
-    fn credential_file_path_rejects_relative_base_dir() {
-        let _lock = XDG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("XDG_CONFIG_HOME").ok();
-        // SAFETY: mutex held for the duration.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", ".") };
-        let _restore = EnvVarGuard {
-            key: "XDG_CONFIG_HOME",
-            prev,
-        };
-        assert_eq!(
-            test_provider().credential_file_path("prod"),
-            None,
-            "relative XDG_CONFIG_HOME should be rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn file_fallback_round_trip_write_then_read() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test-prod.json");
-        let token = valid_token("file-token");
-        let json = serde_json::to_string(&token).expect("serialize");
-
-        write_token_file_blocking(path.clone(), json).expect("write");
-
-        let loaded = load_token_from_file(&path).await;
-        assert_eq!(loaded.expect("token present").access_token, "file-token");
-    }
-
-    #[tokio::test]
-    async fn file_fallback_invalid_json_returns_none() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("bad.json");
-        std::fs::write(&path, b"not-valid-json").expect("write");
-
-        assert!(
-            load_token_from_file(&path).await.is_none(),
-            "invalid JSON should return None"
-        );
-    }
-
     /// resolve_token must return a pre-seeded in-memory token without
     /// triggering the PKCE browser flow (which would require a port and browser).
     /// This also exercises the cache-hit path that follows token persistence.
@@ -1904,5 +1421,129 @@ mod tests {
         })));
         let credential = provider.build_credential("prod", &token);
         assert_eq!(credential.identity, "picked");
+    }
+
+    /// In-memory [`CredentialStorage`] double: lets us assert the provider
+    /// delegates load/save/delete without any real keychain or filesystem.
+    #[derive(Debug, Default)]
+    struct MemoryStorage {
+        entries: std::sync::Mutex<HashMap<String, String>>,
+    }
+
+    impl MemoryStorage {
+        fn entry_key(key: &CredentialKey<'_>) -> String {
+            format!("{}/{}/{}", key.app_id, key.provider, key.env)
+        }
+    }
+
+    #[async_trait]
+    impl CredentialStorage for MemoryStorage {
+        async fn load(&self, key: &CredentialKey<'_>) -> Option<String> {
+            self.entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&Self::entry_key(key))
+                .cloned()
+        }
+
+        async fn save(&self, key: &CredentialKey<'_>, value: &str) -> Result<()> {
+            self.entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(Self::entry_key(key), value.to_owned());
+            Ok(())
+        }
+
+        async fn delete(&self, key: &CredentialKey<'_>) {
+            self.entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&Self::entry_key(key));
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn with_file_fallback_maps_to_store_modes() {
+        assert_eq!(
+            test_provider().with_file_fallback(true).store_mode,
+            Some(CredentialStore::Auto)
+        );
+        assert_eq!(
+            test_provider().with_file_fallback(false).store_mode,
+            Some(CredentialStore::Keyring)
+        );
+    }
+
+    #[test]
+    fn builders_record_storage_selection() {
+        assert_eq!(
+            test_provider()
+                .with_credential_store(CredentialStore::File)
+                .store_mode,
+            Some(CredentialStore::File)
+        );
+        let provider = test_provider().with_storage(Arc::new(MemoryStorage::default()));
+        assert!(provider.storage_override.is_some());
+    }
+
+    #[tokio::test]
+    async fn provider_delegates_to_injected_storage() {
+        let mem = Arc::new(MemoryStorage::default());
+        let provider = test_provider().with_app_id("app").with_storage(mem.clone());
+
+        // No entry yet: status reports not-logged-in.
+        assert!(provider.status("dev").await.is_err());
+
+        // Saving routes through the injected store.
+        provider
+            .save_stored("dev", &valid_token("tok"))
+            .await
+            .expect("save");
+        let key = CredentialKey::new("app", "test", "dev");
+        assert!(mem.load(&key).await.is_some(), "token reached the store");
+
+        // And status reads it back.
+        let cred = provider.status("dev").await.expect("status");
+        assert_eq!(cred.token, "tok");
+
+        // Logout clears it from the store.
+        provider.logout("dev").await.expect("logout");
+        assert!(mem.load(&key).await.is_none(), "token removed on logout");
+    }
+
+    #[tokio::test]
+    async fn corrupt_stored_blob_self_heals() {
+        let mem = Arc::new(MemoryStorage::default());
+        let key = CredentialKey::new("app", "test", "dev");
+        mem.save(&key, "not-valid-json").await.expect("seed");
+
+        let provider = test_provider().with_app_id("app").with_storage(mem.clone());
+        assert!(provider.load_stored("dev").await.is_none());
+        assert!(
+            mem.load(&key).await.is_none(),
+            "corrupt blob should be deleted (self-heal)"
+        );
+    }
+
+    #[tokio::test]
+    // The guard is intentionally held across awaits to serialize env mutation.
+    #[allow(clippy::await_holding_lock)]
+    async fn file_store_round_trips_without_keyring() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Hold the shared lock + env guard across the awaits.
+        let _lock = crate::config::test_env::lock();
+        let _env = crate::config::test_env::EnvVarGuard::set("XDG_CONFIG_HOME", Some(dir.path()));
+
+        let provider = test_provider()
+            .with_app_id("app")
+            .with_credential_store(CredentialStore::File);
+        assert!(provider.status("dev").await.is_err());
+        provider
+            .save_stored("dev", &valid_token("filetok"))
+            .await
+            .expect("save");
+        let cred = provider.status("dev").await.expect("status");
+        assert_eq!(cred.token, "filetok");
     }
 }

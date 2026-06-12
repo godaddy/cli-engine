@@ -155,6 +155,17 @@ impl<'middleware> ModuleContext<'middleware> {
         self.middleware
     }
 
+    /// Returns the per-application config file as loaded at startup.
+    ///
+    /// Read a consumer-owned section with
+    /// [`ConfigFile::section`](crate::config::ConfigFile::section). This is
+    /// the same startup snapshot surfaced via
+    /// [`CommandContext::config`](crate::command::CommandContext::config); see
+    /// its documentation for snapshot-semantics caveats.
+    pub fn config(&self) -> &crate::config::ConfigFile {
+        &self.middleware.config
+    }
+
     /// Returns the schema registry for direct registration.
     pub fn schema_registry(&mut self) -> &mut SchemaRegistry {
         &mut self.middleware.schema_registry

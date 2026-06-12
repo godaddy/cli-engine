@@ -35,6 +35,8 @@ pub struct GlobalFlags {
     pub debug: String,
     /// Search query.
     pub search: String,
+    /// Credential storage override from `--credential-store`, if supplied.
+    pub credential_store: Option<crate::config::CredentialStore>,
 }
 
 impl Default for GlobalFlags {
@@ -53,6 +55,7 @@ impl Default for GlobalFlags {
             timeout: "0s".to_owned(),
             debug: String::new(),
             search: String::new(),
+            credential_store: None,
         }
     }
 }
@@ -172,6 +175,14 @@ pub fn register_global_flags(command: Command) -> Command {
                 .help("Search commands and guides by keyword"),
         )
         .arg(
+            Arg::new("credential-store")
+                .long("credential-store")
+                .global(true)
+                .value_name("MODE")
+                .value_parser(|s: &str| s.parse::<crate::config::CredentialStore>())
+                .help("Credential storage: auto|keyring|file (overrides env and config)"),
+        )
+        .arg(
             Arg::new("json")
                 .long("json")
                 .global(true)
@@ -214,11 +225,16 @@ pub fn resolve_default_output_format(env_override: Option<&str>, is_tty: bool) -
     if is_tty { "human" } else { "json" }.to_owned()
 }
 
-/// Derives the per-application output-format override env var from an app id,
-/// e.g. `godaddy` -> `GODADDY_OUTPUT`, `gdx` -> `GDX_OUTPUT`.
+/// Sanitizes an app id into an environment-variable prefix: ASCII alphanumerics
+/// are uppercased and every other character becomes `_`, e.g. `godaddy` ->
+/// `GODADDY`, `my-cli` -> `MY_CLI`.
+///
+/// Shared by the framework's app-scoped env vars (for example
+/// [`output_env_var`] and `${PREFIX}_CREDENTIAL_STORE`) so they derive the same
+/// prefix from a given app id.
 #[must_use]
-pub fn output_env_var(app_id: &str) -> String {
-    let sanitized: String = app_id
+pub fn app_id_env_prefix(app_id: &str) -> String {
+    app_id
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -227,8 +243,14 @@ pub fn output_env_var(app_id: &str) -> String {
                 '_'
             }
         })
-        .collect();
-    format!("{sanitized}_OUTPUT")
+        .collect()
+}
+
+/// Derives the per-application output-format override env var from an app id,
+/// e.g. `godaddy` -> `GODADDY_OUTPUT`, `gdx` -> `GDX_OUTPUT`.
+#[must_use]
+pub fn output_env_var(app_id: &str) -> String {
+    format!("{}_OUTPUT", app_id_env_prefix(app_id))
 }
 
 /// Computes the default output format for `app_id`, consulting the
@@ -298,6 +320,9 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
             .get_one::<String>("search")
             .cloned()
             .unwrap_or_default(),
+        credential_store: matches
+            .get_one::<crate::config::CredentialStore>("credential-store")
+            .copied(),
     }
 }
 

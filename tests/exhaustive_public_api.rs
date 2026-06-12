@@ -131,6 +131,8 @@ fn parsed_global_flags_cover_defaults_short_aliases_and_optional_values() {
             "5m",
             "--search",
             "projects",
+            "--credential-store",
+            "file",
             "project",
             "list",
             "--team",
@@ -159,6 +161,7 @@ fn parsed_global_flags_cover_defaults_short_aliases_and_optional_values() {
             timeout: "5m".to_owned(),
             debug: "transport".to_owned(),
             search: "projects".to_owned(),
+            credential_store: Some(cli_engine::CredentialStore::File),
         }
     );
 }

@@ -107,6 +107,24 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
+    /// Returns the per-application config file as loaded at startup.
+    ///
+    /// Read a consumer-owned section with
+    /// [`ConfigFile::section`](crate::config::ConfigFile::section), for example
+    /// `ctx.config().section::<DeployConfig>("deploy")?`. Engine-reserved
+    /// settings are available via
+    /// [`ConfigFile::engine`](crate::config::ConfigFile::engine).
+    ///
+    /// **Snapshot semantics**: this is the config loaded once when
+    /// [`crate::cli::Cli::new`] was called. Changes made by `config set` during the same process
+    /// invocation (e.g. from a previous `Cli::run`) are not reflected here;
+    /// restart the CLI (a new `Cli::new`) to pick them up. For a one-shot CLI
+    /// process this is always the current on-disk state.
+    #[must_use]
+    pub fn config(&self) -> &crate::config::ConfigFile {
+        &self.middleware.config
+    }
+
     /// Deserializes the raw argument matches into a typed args struct.
     ///
     /// Use this with `#[derive(clap::Args)]` structs to get type-safe access
