@@ -156,14 +156,17 @@ fn decode_store(byte: u8) -> Option<CredentialStore> {
 /// Records the value of the `--credential-store` flag for later resolution.
 ///
 /// Called at the start of each CLI run with the parsed flag value (`None` when
-/// the flag was not supplied), overwriting any previous value.
-pub fn set_credential_store_flag(store: Option<CredentialStore>) {
+/// the flag was not supplied), overwriting any previous value. Crate-internal:
+/// only the engine publishes per-run flag state, so library consumers cannot
+/// mutate this process-global latch.
+pub(crate) fn set_credential_store_flag(store: Option<CredentialStore>) {
     CREDENTIAL_STORE_FLAG.store(encode_store(store), Ordering::Relaxed);
 }
 
 /// Returns the flag override recorded by [`set_credential_store_flag`], if any.
+/// Crate-internal accessor for the process-global flag latch.
 #[must_use]
-pub fn credential_store_flag() -> Option<CredentialStore> {
+pub(crate) fn credential_store_flag() -> Option<CredentialStore> {
     decode_store(CREDENTIAL_STORE_FLAG.load(Ordering::Relaxed))
 }
 
@@ -220,18 +223,31 @@ pub fn load(app_id: &str) -> EngineConfig {
 pub struct ConfigFile {
     path: Option<PathBuf>,
     doc: DocumentMut,
+    /// Parsed read-model for typed access, kept in sync with `doc`. Avoids
+    /// reparsing the whole document on every `section`/`deserialize`/`engine`
+    /// call; rebuilt only when the document is mutated via `set`.
+    read_model: toml::Table,
 }
 
 impl Default for ConfigFile {
     fn default() -> Self {
-        Self {
-            path: None,
-            doc: DocumentMut::new(),
-        }
+        Self::from_doc(None, DocumentMut::new())
     }
 }
 
 impl ConfigFile {
+    /// Builds a `ConfigFile` from a path + document, parsing the typed
+    /// read-model once. The document is the source of truth; the read-model is
+    /// a serde-friendly view derived from it.
+    fn from_doc(path: Option<PathBuf>, doc: DocumentMut) -> Self {
+        let read_model = parse_read_model(&doc);
+        Self {
+            path,
+            doc,
+            read_model,
+        }
+    }
+
     /// Loads the config file for `app_id`.
     ///
     /// Best-effort: a missing file, unresolvable config directory, or malformed
@@ -255,7 +271,7 @@ impl ConfigFile {
                 }
             },
         };
-        Self { path, doc }
+        Self::from_doc(path, doc)
     }
 
     /// Returns the resolved config file path, if a config directory was
@@ -285,9 +301,7 @@ impl ConfigFile {
     /// Returns an error when the table is present but does not deserialize into
     /// `T`.
     pub fn section<T: DeserializeOwned>(&self, name: &str) -> crate::Result<Option<T>> {
-        let table: toml::Table = toml::from_str(&self.doc.to_string())
-            .map_err(|e| CliCoreError::message(format!("config parse error: {e}")))?;
-        match table.get(name) {
+        match self.read_model.get(name) {
             None => Ok(None),
             Some(value) => value
                 .clone()
@@ -305,7 +319,8 @@ impl ConfigFile {
     /// # Errors
     /// Returns an error when the document does not deserialize into `T`.
     pub fn deserialize<T: DeserializeOwned>(&self) -> crate::Result<T> {
-        toml::from_str(&self.doc.to_string())
+        toml::Value::Table(self.read_model.clone())
+            .try_into()
             .map_err(|e| CliCoreError::message(format!("config deserialize error: {e}")))
     }
 
@@ -362,6 +377,8 @@ impl ConfigFile {
             })?;
         }
         table[last] = toml_edit::Item::Value(infer_toml_value(value));
+        // Keep the typed read-model in sync with the mutated document.
+        self.read_model = parse_read_model(&self.doc);
         Ok(())
     }
 
@@ -380,11 +397,19 @@ impl ConfigFile {
     pub fn save(&self) -> crate::Result<()> {
         let path = self.path.as_ref().ok_or_else(|| {
             CliCoreError::message(
-                "no config path available (set XDG_CONFIG_HOME or HOME to a directory)",
+                "no config path available (set XDG_CONFIG_HOME, HOME, or %APPDATA% \
+                 to a directory)",
             )
         })?;
         crate::fs::write_string_atomic(path, &self.doc.to_string())
     }
+}
+
+/// Builds the serde read-model from a document. A document that fails to
+/// re-parse (which should not happen for one we constructed) yields an empty
+/// table rather than panicking.
+fn parse_read_model(doc: &DocumentMut) -> toml::Table {
+    toml::from_str(&doc.to_string()).unwrap_or_default()
 }
 
 /// Parses `value` as a TOML bool/integer/float when possible, else a string.
@@ -430,7 +455,7 @@ pub fn resolve_credential_store_with(
 
 /// Resolves the effective [`CredentialStore`] for `app_id` against process state.
 ///
-/// Reads the CLI-flag override ([`credential_store_flag`]), the
+/// Reads the CLI-flag override (`credential_store_flag`), the
 /// `${PREFIX}_CREDENTIAL_STORE` env var via the injected `var` getter, and the
 /// config file ([`load`]), then applies [`resolve_credential_store_with`]. The
 /// `var` getter is injected so callers/tests can supply environment lookups
@@ -662,10 +687,7 @@ mod tests {
     }
 
     fn doc_config(toml: &str) -> ConfigFile {
-        ConfigFile {
-            path: None,
-            doc: toml.parse().expect("valid toml"),
-        }
+        ConfigFile::from_doc(None, toml.parse().expect("valid toml"))
     }
 
     #[test]
