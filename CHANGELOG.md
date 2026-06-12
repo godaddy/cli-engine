@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.2.1...cli-engine-v0.2.2) (2026-06-12)
+
+
+### Features
+
+* injectable credential storage + per-CLI config file ([#21](https://github.com/godaddy/cli-engine/issues/21)) ([3c20bf7](https://github.com/godaddy/cli-engine/commit/3c20bf72f99e4b2919addaa6bb7c229f31c4c011))
+
 ## [0.2.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.2.0...cli-engine-v0.2.1) (2026-06-10)
 
 
