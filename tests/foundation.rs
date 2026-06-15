@@ -6689,8 +6689,7 @@ async fn middleware_schema_short_circuit_precedes_no_auth_authorizer_and_dry_run
 #[tokio::test]
 async fn middleware_schema_without_registration_reports_no_schema_and_skips_command() {
     // `--schema` on a command with no registered output schema must NOT silently
-    // run the command. It should report that no schema exists and point at how to
-    // list the available fields.
+    // run the command; it should report that no schema is registered.
     let mut middleware = Middleware::new();
     middleware.output_format = "json".to_owned();
     middleware.schema = true;
