@@ -6687,6 +6687,47 @@ async fn middleware_schema_short_circuit_precedes_no_auth_authorizer_and_dry_run
 }
 
 #[tokio::test]
+async fn middleware_schema_without_registration_reports_no_schema_and_skips_command() {
+    // `--schema` on a command with no registered output schema must NOT silently
+    // run the command. It should report that no schema exists and point at how to
+    // list the available fields.
+    let mut middleware = Middleware::new();
+    middleware.output_format = "json".to_owned();
+    middleware.schema = true;
+    let called = Arc::new(AtomicUsize::new(0));
+    let called_for_handler = Arc::clone(&called);
+
+    let output = middleware
+        .run_no_auth(
+            CommandMeta::default(),
+            "things:list",
+            value_map([]),
+            value_map([]),
+            "",
+            async || {
+                called_for_handler.fetch_add(1, Ordering::SeqCst);
+                Ok(CommandResult::new(json!([{"name": "alpha"}])))
+            },
+        )
+        .await
+        .expect("schema request should render");
+
+    assert_eq!(
+        called.load(Ordering::SeqCst),
+        0,
+        "the command must not run under --schema"
+    );
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"]["command"], "things:list");
+    let message = rendered["data"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("--fields all"),
+        "expected a no-schema hint pointing to --fields all, got: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
 async fn middleware_human_output_skips_default_fields_for_registered_views() {
     let mut middleware = Middleware::new();
     middleware
@@ -6694,8 +6735,12 @@ async fn middleware_human_output_skips_default_fields_for_registered_views() {
         .register(Arc::new(FakeProvider::new("primary", "tester")));
     middleware.default_auth_provider = "primary".to_owned();
     middleware.output_format = "human".to_owned();
+    // Register the view under the command's *system* (`things:list` -> `things`)
+    // so the renderer actually resolves it. A registered view selects its own
+    // columns, so even though `default_fields` is just "name", the human output
+    // must keep `status` — the view is the curation, not `default_fields`.
     middleware.human_views.register(HumanViewDef {
-        schema_id: "things-api".to_owned(),
+        schema_id: "things".to_owned(),
         columns: vec![
             TableColumn {
                 field: "name".to_owned(),

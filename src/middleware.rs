@@ -876,12 +876,26 @@ impl Middleware {
         effective_args: &ValueMap,
         identity: &str,
     ) -> Result<Option<MiddlewareOutput>> {
-        if self.schema
-            && let Some(schema) = self.schema_registry.get_by_path(command_path)
-        {
+        if self.schema {
+            // Registered schema: dump it. Otherwise don't silently run the
+            // command — report that no schema exists and how to list the
+            // available fields (every column is shown by `--fields all`).
+            let envelope = match self.schema_registry.get_by_path(command_path) {
+                Some(schema) => Envelope::success(schema, self.app_id.clone()),
+                None => Envelope::success(
+                    json!({
+                        "command": command_path,
+                        "schema": Value::Null,
+                        "message": "No output schema is registered for this command. \
+                                    Run it with `--fields all` (or `--output json`) to see \
+                                    the available fields.",
+                    }),
+                    self.app_id.clone(),
+                ),
+            };
             return self
                 .render_envelope(
-                    Envelope::success(schema, self.app_id.clone()),
+                    envelope,
                     "",
                     command_path,
                     start,
@@ -917,14 +931,31 @@ impl Middleware {
             );
         }
         let output_format = self.output_format.parse::<OutputFormat>()?;
-        let mut fields = if self.fields.is_empty() {
-            default_fields
+        // The command's system/schema id (set when the envelope was built;
+        // `with_context` below doesn't touch it), used both for field selection
+        // and to pick a registered human view.
+        let system = envelope
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.system.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        // Field selection precedence: an explicit `--fields` always wins.
+        // Otherwise the command's `default_fields` curate the output — in every
+        // format, including Human, so an interactive table shows the curated
+        // columns instead of dumping every field. The one exception: Human
+        // output for a command with a registered HumanView, which selects its
+        // own columns from the full payload — pre-projecting there would strip
+        // fields the view needs, so leave projection off and let the view
+        // curate. Commands with no `default_fields` project to "" (all fields),
+        // as do `--fields all`/`*`, so the full payload is always one flag away.
+        let fields = if !self.fields.is_empty() {
+            self.fields.as_str()
+        } else if output_format == OutputFormat::Human && self.human_views.has_view(&system) {
+            ""
         } else {
-            &self.fields
+            default_fields
         };
-        if output_format == OutputFormat::Human && self.fields.is_empty() {
-            fields = "";
-        }
         if let Some(data) = &mut envelope.data {
             let pagination = apply_pipeline(
                 data,
@@ -950,12 +981,6 @@ impl Middleware {
             Some(Value::Object(user_args.clone())),
             Some(Value::Object(effective_args.clone())),
         );
-        let system = envelope
-            .metadata
-            .as_ref()
-            .map(|metadata| metadata.system.as_str())
-            .unwrap_or_default()
-            .to_owned();
         let prepared = envelope.prepare_for_render(&self.verbose);
         let rendered = if output_format == OutputFormat::Human {
             render_human_with_registry_for_schema(&prepared, &self.human_views, &system)

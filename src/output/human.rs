@@ -128,6 +128,15 @@ impl HumanViewRegistry {
     pub fn custom(&self, schema_id: &str) -> Option<&HumanViewRenderer> {
         self.custom_by_schema_id.get(schema_id)
     }
+
+    /// Whether any human view (column-based or custom) is registered for a
+    /// schema id. Such a view selects its own columns from the full payload, so
+    /// callers must not pre-project the data before handing it to the renderer.
+    #[must_use]
+    pub fn has_view(&self, schema_id: &str) -> bool {
+        self.by_schema_id.contains_key(schema_id)
+            || self.custom_by_schema_id.contains_key(schema_id)
+    }
 }
 
 static GLOBAL_HUMAN_VIEW_REGISTRY: OnceLock<RwLock<HumanViewRegistry>> = OnceLock::new();

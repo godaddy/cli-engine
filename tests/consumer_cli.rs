@@ -288,3 +288,58 @@ async fn bare_invocation_without_hook_falls_back_to_long_help() {
         bare_json.rendered
     );
 }
+
+// A command whose `default_fields` is a strict *subset* of its data keys, with
+// no registered HumanViewDef (so the table auto-derives columns from the data).
+// This makes the field projection directly observable in human output.
+fn fields_demo_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(Module::new("Demo", |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("widget", "Manage widgets")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List widgets")
+                            .with_system("widgets-api")
+                            .with_default_fields("id,name")
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!([
+                                {"id": "w1", "name": "alpha", "secret": "hidden"}
+                            ])))
+                        },
+                    ),
+                )
+            })),
+    )
+}
+
+#[tokio::test]
+async fn human_output_projects_to_default_fields_when_no_fields_flag() {
+    let cli = fields_demo_cli();
+    let human = cli
+        .run(["my-cli", "widget", "list", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("NAME"), "{}", human.rendered);
+    // `default_fields` is "id,name", so the `secret` column must be projected
+    // out of the human table even though no `--fields` flag was passed.
+    assert!(
+        !human.rendered.contains("SECRET") && !human.rendered.contains("hidden"),
+        "human output should honor default_fields and omit `secret`: {}",
+        human.rendered
+    );
+}
+
+#[tokio::test]
+async fn human_output_with_fields_all_overrides_default_fields() {
+    // The escape hatch: `--fields all` shows every column in human mode.
+    let cli = fields_demo_cli();
+    let human = cli
+        .run([
+            "my-cli", "widget", "list", "--output", "human", "--fields", "all",
+        ])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("hidden"), "{}", human.rendered);
+}
