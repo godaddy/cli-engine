@@ -2375,6 +2375,58 @@ async fn cli_runtime_auth_login_uses_registered_provider_default() {
 }
 
 #[tokio::test]
+async fn cli_runtime_auth_login_uses_middleware_env_when_env_flag_omitted() {
+    let cli = auth_cli_with_default_env("dev");
+
+    let output = cli
+        .run(["my-cli", "auth", "login", "--output", "json"])
+        .await;
+
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["data"],
+        json!({
+            "provider": "primary",
+            "env": "dev",
+            "identity": "tester",
+            "expires_at": "2099-01-01T00:00:00Z"
+        })
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_auth_login_env_flag_overrides_middleware_env() {
+    let cli = auth_cli_with_default_env("dev");
+
+    let output = cli
+        .run([
+            "my-cli", "auth", "login", "--env", "prod", "--output", "json",
+        ])
+        .await;
+
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"]["env"], "prod");
+}
+
+#[tokio::test]
+async fn cli_runtime_auth_logout_uses_middleware_env_when_env_flag_omitted() {
+    let cli = auth_cli_with_default_env("dev");
+
+    let output = cli
+        .run(["my-cli", "auth", "logout", "--output", "json"])
+        .await;
+
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["data"],
+        json!({"provider": "primary", "env": "dev", "status": "logged out"})
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_auth_commands_use_init_deps_registered_providers() {
     let init_count = Arc::new(AtomicUsize::new(0));
     let init_count_for_closure = Arc::clone(&init_count);
@@ -4085,18 +4137,51 @@ fn auth_command_group_sets_provider_defaults() {
             .contains("one of: [primary, oauth, device]")
     );
 
-    let logout = group
-        .commands
-        .iter()
-        .find(|command| command.spec.name == "logout")
-        .expect("logout subcommand should exist");
-    assert!(
-        logout
-            .spec
-            .args
+    for command_name in ["login", "logout"] {
+        let command = group
+            .commands
             .iter()
-            .any(|arg| arg.get_id() == "env" && arg.is_required_set())
-    );
+            .find(|command| command.spec.name == command_name)
+            .expect("auth subcommand should exist");
+        assert!(
+            command
+                .spec
+                .args
+                .iter()
+                .any(|arg| arg.get_id() == "env" && !arg.is_required_set())
+        );
+    }
+}
+
+fn auth_cli_with_default_env(env: &'static str) -> Cli {
+    Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        register_flags: Some(Arc::new(move |command: Command| {
+            command.arg(
+                Arg::new("env")
+                    .long("env")
+                    .global(true)
+                    .default_value(env)
+                    .value_name("ENV")
+                    .help("Target environment"),
+            )
+        })),
+        apply_flags: Some(Arc::new(|matches, middleware| {
+            if let Some(env) = matches.get_one::<String>("env") {
+                middleware.env = env.clone();
+            }
+            Ok(())
+        })),
+        auth_providers: vec![Arc::new(FakeProvider {
+            name: "primary".to_owned(),
+            identity: "tester".to_owned(),
+            logout_fails: false,
+            environments: vec!["dev".to_owned(), "prod".to_owned()],
+        })],
+        ..CliConfig::default()
+    })
 }
 
 #[test]

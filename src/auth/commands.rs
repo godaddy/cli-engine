@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 
 use super::Dispatcher;
 use crate::{
-    CommandResult, CommandSpec, Credential, GroupSpec, Result, RuntimeCommandSpec,
-    RuntimeGroupSpec, Tier,
+    CliCoreError, CommandContext, CommandResult, CommandSpec, Credential, GroupSpec, Result,
+    RuntimeCommandSpec, RuntimeGroupSpec, Tier,
 };
 
 /// Data rendered after a successful `auth login`.
@@ -48,7 +48,7 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
                 .mutates(true)
                 .no_auth(true)
                 .with_arg(provider_arg(&effective_default, registered_names))
-                .with_arg(Arg::new("env").long("env").value_name("ENV").required(true))
+                .with_arg(Arg::new("env").long("env").value_name("ENV"))
                 .with_arg(
                     Arg::new("scope")
                         .long("scope")
@@ -62,7 +62,7 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
                 ),
             async |context| {
                 let provider = string_arg(&context.args, "provider");
-                let env = string_arg(&context.args, "env");
+                let env = env_arg(&context)?;
                 let scopes = string_vec_arg(&context.args, "scope");
                 serde_json::to_value(
                     login_and_build_with_scopes(&context.middleware.auth, &provider, &env, &scopes)
@@ -93,10 +93,10 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
                 .mutates(true)
                 .no_auth(true)
                 .with_arg(provider_arg(&effective_default, registered_names))
-                .with_arg(Arg::new("env").long("env").value_name("ENV").required(true)),
+                .with_arg(Arg::new("env").long("env").value_name("ENV")),
             async |context| {
                 let provider = string_arg(&context.args, "provider");
-                let env = string_arg(&context.args, "env");
+                let env = env_arg(&context)?;
                 logout_result(&context.middleware.auth, &provider, &env)
                     .await
                     .map(CommandResult::new)
@@ -117,6 +117,21 @@ fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+fn env_arg(context: &CommandContext) -> Result<String> {
+    let env = string_arg(&context.args, "env");
+    if !env.is_empty() {
+        return Ok(env);
+    }
+
+    if !context.middleware.env.is_empty() {
+        return Ok(context.middleware.env.clone());
+    }
+
+    Err(CliCoreError::message(
+        "auth: missing environment; pass --env or configure a default environment",
+    ))
 }
 
 /// Reads a repeatable string argument as a `Vec<String>`, accepting either a

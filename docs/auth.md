@@ -308,10 +308,10 @@ When a CLI registers auth providers or configures a default provider, `cli_engin
 
 | Command | Behavior |
 | --- | --- |
-| `auth login --provider NAME --env ENV` | Clears cached credentials for the environment and authenticates. |
+| `auth login --provider NAME [--env ENV]` | Clears cached credentials for the explicit environment, or the active middleware environment when omitted, and authenticates. |
 | `auth status --provider NAME --env ENV` | Shows cached status for one provider and environment. |
 | `auth status` | Shows status for all providers and cached environments. |
-| `auth logout --provider NAME --env ENV` | Clears cached credentials for the environment. |
+| `auth logout --provider NAME [--env ENV]` | Clears cached credentials for the explicit environment, or the active middleware environment when omitted. |
 
 These commands are implemented with the same `CommandSpec`, middleware, output envelope, and renderers
 as application commands.
