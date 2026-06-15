@@ -6721,8 +6721,8 @@ async fn middleware_schema_without_registration_reports_no_schema_and_skips_comm
     assert_eq!(rendered["data"]["command"], "things:list");
     let message = rendered["data"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("--fields all"),
-        "expected a no-schema hint pointing to --fields all, got: {}",
+        message.contains("No output schema is registered"),
+        "expected a no-schema message, got: {}",
         output.rendered
     );
 }

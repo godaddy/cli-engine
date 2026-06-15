@@ -878,17 +878,16 @@ impl Middleware {
     ) -> Result<Option<MiddlewareOutput>> {
         if self.schema {
             // Registered schema: dump it. Otherwise don't silently run the
-            // command — report that no schema exists and how to list the
-            // available fields (every column is shown by `--fields all`).
+            // command — report that no schema exists. (We deliberately don't
+            // suggest "run it with --fields all" here: that would execute the
+            // command, which is exactly wrong for a mutation.)
             let envelope = match self.schema_registry.get_by_path(command_path) {
                 Some(schema) => Envelope::success(schema, self.app_id.clone()),
                 None => Envelope::success(
                     json!({
                         "command": command_path,
                         "schema": Value::Null,
-                        "message": "No output schema is registered for this command. \
-                                    Run it with `--fields all` (or `--output json`) to see \
-                                    the available fields.",
+                        "message": "No output schema is registered for this command.",
                     }),
                     self.app_id.clone(),
                 ),
