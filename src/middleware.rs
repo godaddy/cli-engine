@@ -930,9 +930,11 @@ impl Middleware {
             );
         }
         let output_format = self.output_format.parse::<OutputFormat>()?;
-        // The command's system/schema id (set when the envelope was built;
-        // `with_context` below doesn't touch it), used both for field selection
-        // and to pick a registered human view.
+        // The schema id this output is tagged with, read from
+        // `envelope.metadata.system` (set when the envelope was built;
+        // `with_context` below doesn't modify it). Used both for field selection
+        // and to look up a registered human view. Empty when there is no
+        // metadata, which simply matches no view.
         let system = envelope
             .metadata
             .as_ref()
