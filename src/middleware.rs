@@ -883,10 +883,13 @@ impl Middleware {
             // command, which is exactly wrong for a mutation.)
             let envelope = match self.schema_registry.get_by_path(command_path) {
                 Some(schema) => Envelope::success(schema, self.app_id.clone()),
+                // Keep the same `{command, fields}` shape as a real SchemaInfo
+                // response (empty `fields`) so consumers can parse both uniformly;
+                // the `message` is an additive hint.
                 None => Envelope::success(
                     json!({
                         "command": command_path,
-                        "schema": Value::Null,
+                        "fields": [],
                         "message": "No output schema is registered for this command.",
                     }),
                     self.app_id.clone(),

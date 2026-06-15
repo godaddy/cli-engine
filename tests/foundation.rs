@@ -6718,6 +6718,8 @@ async fn middleware_schema_without_registration_reports_no_schema_and_skips_comm
     );
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(rendered["data"]["command"], "things:list");
+    // Same `{command, fields}` shape as a real SchemaInfo response (empty fields).
+    assert_eq!(rendered["data"]["fields"], serde_json::json!([]));
     let message = rendered["data"]["message"].as_str().unwrap_or_default();
     assert!(
         message.contains("No output schema is registered"),
