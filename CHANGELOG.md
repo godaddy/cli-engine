@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.2.2...cli-engine-v0.3.0) (2026-06-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* human views are no longer inferred from the command path or system — assign them with CommandSpec::with_view or with_view_id or they will not apply. Human output now honors default_fields and --fields narrows a registered view's columns, so human tables that previously showed every column now show only the selected set. New public fields were added to CommandSpec (view_columns, view_id) and MiddlewareRequest (view_id).
+
+### Features
+
+* explicit human views, composable field/column selection, --schema short-circuit ([f5e2b72](https://github.com/godaddy/cli-engine/commit/f5e2b72bd417267025e2d6c1d2e4f57e7cf428c1))
+
+
+### Bug Fixes
+
+* Show pkce browser login prompt ([#24](https://github.com/godaddy/cli-engine/issues/24)) ([de65d35](https://github.com/godaddy/cli-engine/commit/de65d35d028ab3d284c12572040878c6e333f916))
+* use active env for auth login ([#26](https://github.com/godaddy/cli-engine/issues/26)) ([ba1711e](https://github.com/godaddy/cli-engine/commit/ba1711ef7e8433491e33cd97daa3d36d163a45e9))
+
 ## [0.2.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.2.1...cli-engine-v0.2.2) (2026-06-12)
 
 
