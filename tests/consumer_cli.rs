@@ -22,14 +22,6 @@ fn platform_module() -> Module {
             .with_command(list_projects())
             .with_command(delete_project())
     })
-    .with_view(HumanViewDef::new(
-        "project:list",
-        vec![
-            TableColumn::new("id", "ID"),
-            TableColumn::new("name", "Name"),
-            TableColumn::new("status", "Status"),
-        ],
-    ))
 }
 
 fn list_projects() -> RuntimeCommandSpec {
@@ -38,6 +30,12 @@ fn list_projects() -> RuntimeCommandSpec {
             .with_system("projects-api")
             .with_default_fields("id,name,status")
             .with_json_schema::<Project>()
+            // Inline view assigned directly to this command.
+            .with_view(vec![
+                TableColumn::new("id", "ID"),
+                TableColumn::new("name", "Name"),
+                TableColumn::new("status", "Status"),
+            ])
             .with_arg(Arg::new("team").long("team").required(true))
             .no_auth(true),
         async |_credential, args| {
@@ -342,4 +340,219 @@ async fn human_output_with_fields_all_overrides_default_fields() {
         .await;
     assert_eq!(human.exit_code, 0, "{}", human.rendered);
     assert!(human.rendered.contains("hidden"), "{}", human.rendered);
+}
+
+#[tokio::test]
+async fn schema_on_no_schema_command_reports_no_schema_when_required_arg_missing() {
+    // `project delete` has a required `--id` and no registered schema. Asking for
+    // `--schema` must short-circuit with the no-schema message through the public
+    // `Cli::run` path, not let clap reject the missing `--id` first.
+    let cli = consumer_cli();
+    let out = cli
+        .run([
+            "my-cli", "project", "delete", "--schema", "--output", "json",
+        ])
+        .await;
+    assert_eq!(out.exit_code, 0, "{}", out.rendered);
+    let envelope: Value = serde_json::from_str(&out.rendered).expect("json envelope");
+    assert_eq!(
+        envelope["data"]["message"], "No output schema is registered for this command.",
+        "{}",
+        out.rendered
+    );
+    // Same `{command, fields}` shape as a real SchemaInfo response.
+    assert_eq!(
+        envelope["data"]["command"], "project:delete",
+        "{}",
+        out.rendered
+    );
+    assert_eq!(envelope["data"]["fields"], json!([]), "{}", out.rendered);
+}
+
+#[tokio::test]
+async fn schema_on_unknown_command_still_reports_unknown_command() {
+    // The no-schema short-circuit must only fire for a real leaf command. A
+    // typo'd command with `--schema` should still surface an unknown-command
+    // error, not a misleading "no schema registered" body.
+    let cli = consumer_cli();
+    let out = cli
+        .run(["my-cli", "project", "bogus", "--schema", "--output", "json"])
+        .await;
+    assert_ne!(out.exit_code, 0, "{}", out.rendered);
+    assert!(out.rendered.contains("unknown command"), "{}", out.rendered);
+    assert!(
+        !out.rendered.contains("No output schema is registered"),
+        "{}",
+        out.rendered
+    );
+}
+
+// A command that registers a HumanViewDef under its *command path* while setting
+// a separate `system` (the common case: many commands share one backend system).
+// `default_fields` is a strict subset of the view's columns, so if the view is
+// resolved, projection is skipped and the view's extra column survives.
+fn viewed_widgets_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(
+                Module::new("Demo", |_context| {
+                    RuntimeGroupSpec::new(GroupSpec::new("widget", "Manage widgets")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("list", "List widgets")
+                                .with_system("widgets-api")
+                                // Reference a shared view registered on the module.
+                                .with_view_id("widget-table")
+                                .no_auth(true),
+                            async |_credential, _args| {
+                                Ok(CommandResult::new(json!([
+                                    {"id": "w1", "name": "alpha", "status": "active"}
+                                ])))
+                            },
+                        ),
+                    )
+                })
+                .with_view(HumanViewDef::new(
+                    "widget-table",
+                    vec![
+                        TableColumn::new("name", "Name"),
+                        TableColumn::new("status", "Status"),
+                    ],
+                )),
+            ),
+    )
+}
+
+#[tokio::test]
+async fn human_output_resolves_shared_view_by_id() {
+    // The command references the shared view `widget-table` via `with_view_id`,
+    // while its `system` is `widgets-api`. With no field selection, the view
+    // resolves by the declared id and renders all its columns.
+    let cli = viewed_widgets_cli();
+    let human = cli
+        .run(["my-cli", "widget", "list", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("STATUS"), "{}", human.rendered);
+    assert!(human.rendered.contains("active"), "{}", human.rendered);
+}
+
+// A command that assigns its view inline with `with_view`.
+fn inline_view_gadgets_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(Module::new("Demo", |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("gadget", "Manage gadgets")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List gadgets")
+                            .with_view(vec![
+                                TableColumn::new("name", "Name"),
+                                TableColumn::new("status", "Status"),
+                            ])
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!([
+                                {"id": "g1", "name": "alpha", "status": "active"}
+                            ])))
+                        },
+                    ),
+                )
+            })),
+    )
+}
+
+#[tokio::test]
+async fn human_output_resolves_inline_view() {
+    // The command assigns its view inline with `with_view`. The engine registers
+    // it under the command path at build, so it resolves and renders its columns.
+    let cli = inline_view_gadgets_cli();
+    let human = cli
+        .run(["my-cli", "gadget", "list", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("STATUS"), "{}", human.rendered);
+    assert!(human.rendered.contains("active"), "{}", human.rendered);
+}
+
+// A command with a three-column view and `default_fields` that selects a subset
+// of those columns — the default `--fields`. Used to verify that field
+// selection narrows the view's columns rather than projecting the data.
+fn curated_view_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(Module::new("Demo", |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("gizmo", "Manage gizmos")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List gizmos")
+                            .with_default_fields("id,name")
+                            .with_view(vec![
+                                TableColumn::new("id", "ID"),
+                                TableColumn::new("name", "Name"),
+                                TableColumn::new("status", "Status"),
+                            ])
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!([
+                                {"id": "z1", "name": "alpha", "status": "active"}
+                            ])))
+                        },
+                    ),
+                )
+            })),
+    )
+}
+
+#[tokio::test]
+async fn default_fields_narrows_view_columns() {
+    // `default_fields="id,name"` is the default `--fields`, so by default only the
+    // `id` and `name` view columns show — `status` is omitted even though the view
+    // defines it and the data carries it.
+    let cli = curated_view_cli();
+    let human = cli
+        .run(["my-cli", "gizmo", "list", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("ID"), "{}", human.rendered);
+    assert!(human.rendered.contains("NAME"), "{}", human.rendered);
+    assert!(!human.rendered.contains("STATUS"), "{}", human.rendered);
+    assert!(!human.rendered.contains("active"), "{}", human.rendered);
+}
+
+#[tokio::test]
+async fn fields_all_shows_every_view_column() {
+    // `--fields all` overrides `default_fields` and shows every view column.
+    let cli = curated_view_cli();
+    let human = cli
+        .run([
+            "my-cli", "gizmo", "list", "--output", "human", "--fields", "all",
+        ])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("STATUS"), "{}", human.rendered);
+    assert!(human.rendered.contains("active"), "{}", human.rendered);
+}
+
+#[tokio::test]
+async fn fields_flag_selects_view_columns() {
+    // An explicit `--fields` selects which view columns show: `id,status` keeps
+    // those two columns and drops `name`, reading values from the full payload.
+    let cli = curated_view_cli();
+    let human = cli
+        .run([
+            "my-cli",
+            "gizmo",
+            "list",
+            "--output",
+            "human",
+            "--fields",
+            "id,status",
+        ])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("ID"), "{}", human.rendered);
+    assert!(human.rendered.contains("STATUS"), "{}", human.rendered);
+    assert!(human.rendered.contains("active"), "{}", human.rendered);
+    assert!(!human.rendered.contains("NAME"), "{}", human.rendered);
 }

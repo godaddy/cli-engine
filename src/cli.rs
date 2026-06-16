@@ -32,7 +32,7 @@ use crate::{
     guide::guide_content,
     module::{Module, ModuleContext},
     output::{
-        HumanViewDef, NextAction, SchemaRegistry, format_help_section,
+        HumanViewDef, HumanViewRegistry, NextAction, SchemaRegistry, format_help_section,
         global_human_view_registry_snapshot, global_schema_registry_snapshot,
     },
     search::{SearchDocument, SearchIndex},
@@ -890,7 +890,12 @@ impl Cli {
         }
 
         let mut prefix = Vec::new();
-        register_runtime_group_schemas(&group, &mut prefix, &mut self.middleware.schema_registry);
+        register_runtime_group_metadata(
+            &group,
+            &mut prefix,
+            &mut self.middleware.schema_registry,
+            &mut self.middleware.human_views,
+        );
         let mut prefix = Vec::new();
         group.register_commands(&mut prefix, &mut self.commands);
         let mut prefix = Vec::new();
@@ -1381,6 +1386,15 @@ impl Cli {
         let meta = self.resolve_meta(&command_path, command.spec.metadata());
         let default_fields = command.spec.default_fields.clone().unwrap_or_default();
         let system = command.spec.system.clone().unwrap_or_default();
+        // The human view this command declared: an explicit shared id wins;
+        // otherwise an inline `with_view` was registered under the command path
+        // at build time, so reference it by that path. `None` renders generic
+        // human output.
+        let view_id = command
+            .spec
+            .view_id
+            .clone()
+            .or_else(|| (!command.spec.view_columns.is_empty()).then(|| command_path.clone()));
 
         if let Some(streaming_handler) = command.streaming_handler.clone() {
             let result = run_with_timeout(
@@ -1395,6 +1409,7 @@ impl Cli {
                         user_args,
                         args,
                         default_fields: &default_fields,
+                        view_id: view_id.as_deref(),
                         auth: command.spec.auth,
                     },
                     Arc::new(leaf.clone()),
@@ -1425,6 +1440,7 @@ impl Cli {
                     user_args,
                     args,
                     default_fields: &default_fields,
+                    view_id: view_id.as_deref(),
                     auth: command.spec.auth,
                 },
                 async move |credential| {
@@ -1467,17 +1483,29 @@ impl Cli {
         let value_flags = derive_value_flags(&self.root);
         let command_path =
             self.canonical_command_path(&extract_command_path(args, &bool_flags, &value_flags));
-        let schema = self.middleware.schema_registry.get_by_path(&command_path)?;
+        // `--schema` is an inspection flag and must not require the command's own
+        // arguments, so it short-circuits before clap validates them. Only fire
+        // for a real leaf command, though: unknown paths and groups fall through
+        // so clap and `unknown_group_command_message` can report them as usual.
+        let command = find_command_by_colon_path(&self.root, &command_path)?;
+        if command.get_subcommands().next().is_some() {
+            return None;
+        }
         let output_format =
             extract_output_format(args, &default_output_format(&self.config.app_id));
-        Some(self.render_schema(schema, &output_format))
+        // When no schema is registered, report that rather than running the
+        // command — matching the middleware's no-schema response so the public
+        // path and the lower layer agree even when required args are missing.
+        match self.middleware.schema_registry.get_by_path(&command_path) {
+            Some(schema) => Some(self.render_schema(schema, &output_format)),
+            None => Some(self.render_schema(
+                crate::output::no_schema_response(&command_path),
+                &output_format,
+            )),
+        }
     }
 
-    fn render_schema(
-        &self,
-        schema: crate::output::SchemaInfo,
-        output_format: &str,
-    ) -> CliRunOutput {
+    fn render_schema(&self, data: impl serde::Serialize, output_format: &str) -> CliRunOutput {
         let format: crate::output::OutputFormat = match output_format.parse() {
             Ok(format) => format,
             Err(err) => {
@@ -1488,7 +1516,7 @@ impl Cli {
             }
         };
         let envelope =
-            crate::Envelope::success(schema, self.config.app_id.clone()).prepare_for_render("");
+            crate::Envelope::success(data, self.config.app_id.clone()).prepare_for_render("");
         match crate::output::render(format, &envelope) {
             Ok(rendered) => CliRunOutput {
                 exit_code: 0,
@@ -2567,18 +2595,29 @@ fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn register_runtime_group_schemas(
+fn register_runtime_group_metadata(
     group: &RuntimeGroupSpec,
     prefix: &mut Vec<String>,
     schemas: &mut SchemaRegistry,
+    views: &mut HumanViewRegistry,
 ) {
     prefix.push(group.group.name.clone());
     for child_group in &group.groups {
-        register_runtime_group_schemas(child_group, prefix, schemas);
+        register_runtime_group_metadata(child_group, prefix, schemas, views);
     }
     for child in &group.commands {
         prefix.push(child.spec.name.clone());
-        register_command_schema(&child.spec, &prefix.join(":"), schemas);
+        let command_path = prefix.join(":");
+        register_command_schema(&child.spec, &command_path, schemas);
+        // An inline `with_view` is registered under the command's own path; the
+        // dispatch references it by that path. Shared views (`with_view_id`) are
+        // registered separately by the module/CLI, so nothing to do here.
+        if !child.spec.view_columns.is_empty() {
+            views.register(HumanViewDef::new(
+                command_path,
+                child.spec.view_columns.clone(),
+            ));
+        }
         prefix.pop();
     }
     prefix.pop();

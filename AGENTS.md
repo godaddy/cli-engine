@@ -161,8 +161,7 @@ For a full module, prefer this shape:
 ```rust
 use clap::Arg;
 use cli_engine::{
-    CommandSpec, GroupSpec, HumanViewDef, Module, RuntimeCommandSpec, RuntimeGroupSpec,
-    TableColumn,
+    CommandSpec, GroupSpec, Module, RuntimeCommandSpec, RuntimeGroupSpec, TableColumn,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -180,14 +179,6 @@ pub fn module() -> Module {
         RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects"))
             .with_command(list_projects())
     })
-    .with_view(HumanViewDef::new(
-        "project:list",
-        vec![
-            TableColumn::new("id", "ID"),
-            TableColumn::new("name", "Name"),
-            TableColumn::new("status", "Status"),
-        ],
-    ))
 }
 
 fn list_projects() -> RuntimeCommandSpec {
@@ -196,6 +187,11 @@ fn list_projects() -> RuntimeCommandSpec {
             .with_system("projects-api")
             .with_default_fields("id,name,status")
             .with_json_schema::<Project>()
+            .with_view(vec![
+                TableColumn::new("id", "ID"),
+                TableColumn::new("name", "Name"),
+                TableColumn::new("status", "Status"),
+            ])
             .with_arg(Arg::new("team").long("team").required(true)),
         async |_credential, args| {
             let team = args
@@ -240,7 +236,7 @@ Command checklist:
   backend attribution.
 - Register schemas with `.with_json_schema::<T>()` when a Rust response type exists.
 - Use manual `OutputSchema`, `OutputField`, `FieldInfo`, and `SchemaInfo` only when generated JSON Schema is not practical.
-- Register human views with `HumanViewDef::new` and `TableColumn::new` when a command needs column-oriented terminal output.
+- Assign a human view to a command with `.with_view(vec![TableColumn::new(...), ...])` for an inline table, or `.with_view_id("shared-id")` to reuse a `HumanViewDef` registered on the module/CLI.
 - Keep stdout machine-friendly and stderr human-friendly for executable paths.
 
 Handlers should not print directly. Return data or an error and let the framework render the output envelope.
@@ -255,7 +251,7 @@ For agentic programming tools generating a new CLI or module:
 2. Create or update the module file first.
 3. Define response structs with `Serialize` and `JsonSchema` for command output.
 4. Add command specs and handlers with the builder API.
-5. Register human views for list commands.
+5. Assign human views to list commands with `.with_view(...)` (or `.with_view_id(...)`).
 6. Add integration tests that call `Cli::run(...)` or the consumer binary and assert exit code, stdout shape, stderr shape, and key output fields.
 7. Run the verification commands below.
 

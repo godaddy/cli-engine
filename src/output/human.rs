@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, OnceLock, RwLock},
 };
@@ -211,11 +211,31 @@ pub fn render_human_with_registry(envelope: &Envelope, registry: &HumanViewRegis
 }
 
 /// Renders an envelope using registry entries for a specific schema id.
+///
+/// Shows every column of the registered view. Use
+/// [`render_human_with_registry_selected`] to narrow the columns to a field
+/// selection.
 #[must_use]
 pub fn render_human_with_registry_for_schema(
     envelope: &Envelope,
     registry: &HumanViewRegistry,
     schema_id: &str,
+) -> String {
+    render_human_with_registry_selected(envelope, registry, schema_id, "")
+}
+
+/// Renders an envelope using a registered view, narrowed to `fields`.
+///
+/// `fields` uses the same comma-separated syntax as `--fields`: an empty
+/// string, `all`, or `*` keeps every column; otherwise only the view columns
+/// whose `field` is listed are shown. A custom view renderer receives the full
+/// data and ignores `fields`.
+#[must_use]
+pub fn render_human_with_registry_selected(
+    envelope: &Envelope,
+    registry: &HumanViewRegistry,
+    schema_id: &str,
+    fields: &str,
 ) -> String {
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
@@ -225,7 +245,33 @@ pub fn render_human_with_registry_for_schema(
     {
         return custom.render(data);
     }
-    render_human_with_view(envelope, registry.columns(schema_id))
+    match registry.columns(schema_id) {
+        Some(columns) => {
+            let selected = select_columns(columns, fields);
+            render_human_with_view(envelope, Some(&selected))
+        }
+        None => render_human_with_view(envelope, None),
+    }
+}
+
+/// Narrows view columns to a `--fields`-style selection. An empty string,
+/// `all`, or `*` keeps every column; otherwise a column survives when its
+/// `field` appears in the comma-separated list.
+fn select_columns(columns: &[TableColumn], fields: &str) -> Vec<TableColumn> {
+    let fields = fields.trim();
+    if fields.is_empty() || fields == "all" || fields == "*" {
+        return columns.to_vec();
+    }
+    let allowed: BTreeSet<&str> = fields
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    columns
+        .iter()
+        .filter(|column| allowed.contains(column.field.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Renders an envelope using explicit table columns.
