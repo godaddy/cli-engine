@@ -2610,9 +2610,11 @@ fn register_runtime_group_metadata(
         let command_path = prefix.join(":");
         register_command_schema(&child.spec, &command_path, schemas);
         // An inline `with_view` is registered under the command's own path; the
-        // dispatch references it by that path. Shared views (`with_view_id`) are
-        // registered separately by the module/CLI, so nothing to do here.
-        if !child.spec.view_columns.is_empty() {
+        // dispatch references it by that path. A `with_view_id` takes precedence
+        // (dispatch uses it instead), so skip the inline registration when one is
+        // set — registering it would leave an unused entry. Shared views are
+        // registered separately by the module/CLI.
+        if child.spec.view_id.is_none() && !child.spec.view_columns.is_empty() {
             views.register(HumanViewDef::new(
                 command_path,
                 child.spec.view_columns.clone(),

@@ -556,3 +556,48 @@ async fn fields_flag_selects_view_columns() {
     assert!(human.rendered.contains("active"), "{}", human.rendered);
     assert!(!human.rendered.contains("NAME"), "{}", human.rendered);
 }
+
+// A command that sets BOTH an inline view and a shared view id. `with_view_id`
+// takes precedence, so the shared view renders and the inline columns are unused
+// (and are not registered).
+fn combo_view_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(
+                Module::new("Demo", |_context| {
+                    RuntimeGroupSpec::new(GroupSpec::new("combo", "Manage combos")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("list", "List combos")
+                                .with_view(vec![TableColumn::new("id", "ID")])
+                                .with_view_id("combo-shared")
+                                .no_auth(true),
+                            async |_credential, _args| {
+                                Ok(CommandResult::new(json!([
+                                    {"id": "c1", "status": "active"}
+                                ])))
+                            },
+                        ),
+                    )
+                })
+                .with_view(HumanViewDef::new(
+                    "combo-shared",
+                    vec![TableColumn::new("status", "Status")],
+                )),
+            ),
+    )
+}
+
+#[tokio::test]
+async fn view_id_takes_precedence_over_inline_view() {
+    // The command sets both `with_view([id])` and `with_view_id("combo-shared")`.
+    // The shared view (a `status` column) wins; the inline `id` column is not used.
+    let cli = combo_view_cli();
+    let human = cli
+        .run(["my-cli", "combo", "list", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(human.rendered.contains("STATUS"), "{}", human.rendered);
+    assert!(human.rendered.contains("active"), "{}", human.rendered);
+    assert!(!human.rendered.contains("ID"), "{}", human.rendered);
+}
