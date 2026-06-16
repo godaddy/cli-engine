@@ -520,20 +520,42 @@ Human output is designed for readable terminal display:
 - Objects in fallback lines render as compact JSON.
 - JSON numbers use `serde_json` number text.
 
-Column views should be registered by command path or schema id:
+Views can be assigned to commands. There are two ways to do it.
+
+Assign an inline view directly to a command with `CommandSpec::with_view`:
 
 ```rust
-use cli_engine::{HumanViewDef, TableColumn};
+use cli_engine::{CommandSpec, TableColumn};
 
-let view = HumanViewDef::new(
-    "project:list",
+let spec = CommandSpec::new("list", "List projects").with_view(vec![
+    TableColumn::new("id", "ID"),
+    TableColumn::new("name", "Name"),
+    TableColumn::new("status", "Status"),
+]);
+```
+
+Or register a shared view once on the module (or CLI) and reference it by id from
+each command that should reuse it with `CommandSpec::with_view_id`:
+
+```rust
+use cli_engine::{CommandSpec, HumanViewDef, TableColumn};
+
+// Registered on the module/CLI with `.with_view(...)`:
+let shared = HumanViewDef::new(
+    "projects-table",
     vec![
         TableColumn::new("id", "ID"),
         TableColumn::new("name", "Name"),
         TableColumn::new("status", "Status"),
     ],
 );
+
+// Referenced from any command that should use it:
+let spec = CommandSpec::new("get", "Get a project").with_view_id("projects-table");
 ```
+
+Field selection composes with views. `--fields` (defaulting to the command's `default_fields`) selects which JSON fields appear when there is no view, and which of a view's columns appear when there is one. So a command with a view of `id`/`name`/`status` columns and `default_fields = "id,name"` shows just those two columns by default; `--fields all` shows every column, and `--fields id,status` shows that pair. A custom view renderer receives the full payload and
+ignores field selection.
 
 ## Guides
 

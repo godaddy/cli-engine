@@ -60,6 +60,32 @@ fn middleware_request<'request>(
         user_args,
         args,
         default_fields,
+        view_id: None,
+        auth: auth_requirement(no_auth),
+    }
+}
+
+/// Builds a request that declares a human view id, the way the engine does for a
+/// command with `with_view`/`with_view_id`.
+fn middleware_request_with_view<'request>(
+    meta: CommandMeta,
+    command_path: &'request str,
+    view_id: &'request str,
+    user_args: cli_engine::middleware::ValueMap,
+    args: cli_engine::middleware::ValueMap,
+    default_fields: &'request str,
+    no_auth: bool,
+) -> MiddlewareRequest<'request> {
+    MiddlewareRequest {
+        meta,
+        command_path,
+        system: command_path
+            .split_once(':')
+            .map_or(command_path, |(system, _)| system),
+        user_args,
+        args,
+        default_fields,
+        view_id: Some(view_id),
         auth: auth_requirement(no_auth),
     }
 }
@@ -91,6 +117,7 @@ fn middleware_request_with_system<'request>(
         user_args,
         args,
         default_fields,
+        view_id: None,
         auth: auth_requirement(no_auth),
     }
 }
@@ -1030,7 +1057,9 @@ async fn cli_config_registers_modules_guides_views_and_init_once() {
         )]);
         RuntimeGroupSpec::new(GroupSpec::new("things", "Manage things")).with_command(
             RuntimeCommandSpec::new(
-                CommandSpec::new("list", "List things").no_auth(true),
+                CommandSpec::new("list", "List things")
+                    .no_auth(true)
+                    .with_view_id("things"),
                 async |_credential, _args| {
                     Ok(CommandResult::new(json!([
                             {"name": "alpha", "enabled": true, "ignored": "x"},
@@ -1149,7 +1178,9 @@ async fn cli_config_accepts_trait_based_command_modules() {
             context.register_schema::<TraitThing>("trait-things:list");
             RuntimeGroupSpec::new(GroupSpec::new(&self.group_name, "Manage trait things"))
                 .with_command(RuntimeCommandSpec::new(
-                    CommandSpec::new("list", "List trait things").no_auth(true),
+                    CommandSpec::new("list", "List trait things")
+                        .no_auth(true)
+                        .with_view_id("trait-things"),
                     async |_credential, _args| {
                         Ok(CommandResult::new(json!([
                                 {"name": "alpha", "ignored": "x"},
@@ -1276,7 +1307,9 @@ async fn module_context_registration_merges_guides_views_schemas_and_middleware_
         )]);
         RuntimeGroupSpec::new(GroupSpec::new("context", "Context commands"))
             .with_command(RuntimeCommandSpec::new(
-                CommandSpec::new("list", "List context things").no_auth(true),
+                CommandSpec::new("list", "List context things")
+                    .no_auth(true)
+                    .with_view_id("context"),
                 async |_credential, _args| {
                     Ok(CommandResult::new(json!([
                             {"name": "alpha", "enabled": true},
@@ -1435,7 +1468,9 @@ async fn cli_seeds_schema_and_human_views_from_global_registries() {
         "Platform Systems",
         RuntimeGroupSpec::new(GroupSpec::new("global-things", "Manage global things"))
             .with_command(RuntimeCommandSpec::new(
-                CommandSpec::new("list", "List global things").no_auth(true),
+                CommandSpec::new("list", "List global things")
+                    .no_auth(true)
+                    .with_view_id("global-things"),
                 async |_credential, _args| {
                     Ok(CommandResult::new(json!([
                             {"name": "alpha", "enabled": true, "ignored": "x"},
@@ -6837,15 +6872,61 @@ async fn middleware_schema_short_circuit_precedes_no_auth_authorizer_and_dry_run
 }
 
 #[tokio::test]
-async fn middleware_human_output_skips_default_fields_for_registered_views() {
+async fn middleware_schema_without_registration_reports_no_schema_and_skips_command() {
+    // `--schema` on a command with no registered output schema must NOT silently
+    // run the command; it should report that no schema is registered.
+    let mut middleware = Middleware::new();
+    middleware.output_format = "json".to_owned();
+    middleware.schema = true;
+    let called = Arc::new(AtomicUsize::new(0));
+    let called_for_handler = Arc::clone(&called);
+
+    let output = middleware
+        .run_no_auth(
+            CommandMeta::default(),
+            "things:list",
+            value_map([]),
+            value_map([]),
+            "",
+            async || {
+                called_for_handler.fetch_add(1, Ordering::SeqCst);
+                Ok(CommandResult::new(json!([{"name": "alpha"}])))
+            },
+        )
+        .await
+        .expect("schema request should render");
+
+    assert_eq!(
+        called.load(Ordering::SeqCst),
+        0,
+        "the command must not run under --schema"
+    );
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"]["command"], "things:list");
+    // Same `{command, fields}` shape as a real SchemaInfo response (empty fields).
+    assert_eq!(rendered["data"]["fields"], serde_json::json!([]));
+    let message = rendered["data"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("No output schema is registered"),
+        "expected a no-schema message, got: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn middleware_human_output_default_fields_narrows_view_columns() {
     let mut middleware = Middleware::new();
     middleware
         .auth
         .register(Arc::new(FakeProvider::new("primary", "tester")));
     middleware.default_auth_provider = "primary".to_owned();
     middleware.output_format = "human".to_owned();
+    // `default_fields` is the default `--fields`, and it narrows a view's columns
+    // just like `--fields` would. With `default_fields="name"`, only the `name`
+    // column of the `things` view renders; `status` is omitted even though the
+    // view defines it and the data carries it.
     middleware.human_views.register(HumanViewDef {
-        schema_id: "things-api".to_owned(),
+        schema_id: "things".to_owned(),
         columns: vec![
             TableColumn {
                 field: "name".to_owned(),
@@ -6860,9 +6941,10 @@ async fn middleware_human_output_skips_default_fields_for_registered_views() {
 
     let output = middleware
         .run(
-            middleware_request(
+            middleware_request_with_view(
                 CommandMeta::default(),
                 "things:list",
+                "things",
                 value_map([]),
                 value_map([]),
                 "name",
@@ -6878,9 +6960,60 @@ async fn middleware_human_output_skips_default_fields_for_registered_views() {
         .await
         .expect("middleware human output should render");
 
-    assert!(output.rendered.contains("STATUS"));
-    assert!(output.rendered.contains("active"));
-    assert!(output.rendered.contains("disabled"));
+    assert!(output.rendered.contains("NAME"), "{}", output.rendered);
+    assert!(output.rendered.contains("alpha"), "{}", output.rendered);
+    assert!(!output.rendered.contains("STATUS"), "{}", output.rendered);
+    assert!(!output.rendered.contains("active"), "{}", output.rendered);
+}
+
+#[tokio::test]
+async fn middleware_human_output_resolves_declared_view_id() {
+    // The renderer resolves the view by the id the command declared, verbatim —
+    // not derived from the command path or `system`. Here the declared id
+    // (`projects-table`) matches neither, yet the view resolves and (with no
+    // field selection) renders all its columns.
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(FakeProvider::new("primary", "tester")));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.output_format = "human".to_owned();
+    middleware.human_views.register(HumanViewDef {
+        schema_id: "projects-table".to_owned(),
+        columns: vec![
+            TableColumn {
+                field: "name".to_owned(),
+                header: "Name".to_owned(),
+            },
+            TableColumn {
+                field: "status".to_owned(),
+                header: "Status".to_owned(),
+            },
+        ],
+    });
+
+    let output = middleware
+        .run(
+            middleware_request_with_view(
+                CommandMeta::default(),
+                "things:list",
+                "projects-table",
+                value_map([]),
+                value_map([]),
+                "",
+                false,
+            ),
+            async |_credential| {
+                Ok(CommandResult::new(json!([
+                        {"name": "alpha", "status": "active"}
+                ])))
+            },
+        )
+        .await
+        .expect("middleware human output should render");
+
+    assert!(output.rendered.contains("STATUS"), "{}", output.rendered);
+    assert!(output.rendered.contains("active"), "{}", output.rendered);
 }
 
 #[tokio::test]
@@ -6892,22 +7025,22 @@ async fn middleware_human_output_uses_custom_view_function_before_columns() {
     middleware.default_auth_provider = "primary".to_owned();
     middleware.output_format = "human".to_owned();
     middleware.human_views.register(HumanViewDef {
-        schema_id: "things-api".to_owned(),
+        schema_id: "things:list".to_owned(),
         columns: vec![TableColumn {
             field: "name".to_owned(),
             header: "Name".to_owned(),
         }],
     });
-    middleware.human_views.register_func("things-api", |data| {
+    middleware.human_views.register_func("things:list", |data| {
         format!("custom:{}\n", data.as_array().map_or(0, Vec::len))
     });
 
     let output = middleware
         .run(
-            middleware_request_with_system(
+            middleware_request_with_view(
                 CommandMeta::default(),
                 "things:list",
-                "things-api",
+                "things:list",
                 value_map([]),
                 value_map([]),
                 "",
@@ -9468,6 +9601,7 @@ async fn optional_skips_auth_when_handler_ignores_credential() {
                 user_args: value_map([]),
                 args: value_map([]),
                 default_fields: "",
+                view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
             },
             async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
@@ -9504,6 +9638,7 @@ async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() 
                 user_args: value_map([]),
                 args: value_map([]),
                 default_fields: "",
+                view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
             },
             async |resolver: CredentialResolver| {
@@ -9553,6 +9688,7 @@ async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
                 user_args: value_map([]),
                 args: value_map([]),
                 default_fields: "",
+                view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
             },
             async |resolver: CredentialResolver| {

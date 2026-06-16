@@ -147,8 +147,8 @@ pub use output::{
     register_global_schema_fields, register_global_schema_info, render, render_data,
     render_data_format, render_detailed_error, render_detailed_error_format, render_error,
     render_error_format, render_format, render_human, render_human_with_registry,
-    render_human_with_registry_for_schema, render_human_with_view, render_json, render_toon,
-    write_render,
+    render_human_with_registry_for_schema, render_human_with_registry_selected,
+    render_human_with_view, render_json, render_toon, write_render,
 };
 pub use search::{SearchDocument, SearchResult};
 pub use tier::Tier;

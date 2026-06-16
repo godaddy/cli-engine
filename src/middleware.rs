@@ -15,7 +15,7 @@ use crate::{
     error::{CliCoreError, exit_code_for_error},
     output::{
         Envelope, HumanViewRegistry, OutputFormat, PipelineOpts, apply_pipeline,
-        build_error_envelope, is_valid_output_format, render_human_with_registry_for_schema,
+        build_error_envelope, is_valid_output_format, render_human_with_registry_selected,
     },
 };
 
@@ -542,6 +542,12 @@ pub struct MiddlewareRequest<'request> {
     pub args: ValueMap,
     /// Default field projection when `--fields` is absent.
     pub default_fields: &'request str,
+    /// Id of the human view this command declared, if any.
+    ///
+    /// The command path for an inline [`with_view`](crate::CommandSpec::with_view),
+    /// or the shared id from [`with_view_id`](crate::CommandSpec::with_view_id).
+    /// `None` renders generic human output.
+    pub view_id: Option<&'request str>,
     /// Authentication requirement enforced by the engine for this command.
     pub auth: AuthRequirement,
 }
@@ -572,6 +578,7 @@ impl Middleware {
             user_args,
             mut args,
             default_fields,
+            view_id,
             auth,
         } = request;
         let no_auth = auth.is_none();
@@ -688,6 +695,7 @@ impl Middleware {
             return self.render_envelope(
                 envelope,
                 "",
+                "",
                 command_path,
                 start,
                 &user_args,
@@ -775,6 +783,7 @@ impl Middleware {
         self.render_envelope(
             Envelope::success(data, command_system).with_next_actions(metadata.next_actions),
             default_fields,
+            view_id.unwrap_or_default(),
             command_path,
             start,
             &user_args,
@@ -805,6 +814,7 @@ impl Middleware {
                 user_args,
                 args,
                 default_fields,
+                view_id: None,
                 auth: AuthRequirement::None,
             },
             async move |_resolver| command().await,
@@ -876,12 +886,26 @@ impl Middleware {
         effective_args: &ValueMap,
         identity: &str,
     ) -> Result<Option<MiddlewareOutput>> {
-        if self.schema
-            && let Some(schema) = self.schema_registry.get_by_path(command_path)
-        {
+        if self.schema {
+            // Registered schema: dump it. Otherwise don't silently run the
+            // command — report that no schema exists. (We deliberately don't
+            // suggest "run it with --fields all" here: that would execute the
+            // command, which is exactly wrong for a mutation.)
+            let envelope = match self.schema_registry.get_by_path(command_path) {
+                Some(schema) => Envelope::success(schema, self.app_id.clone()),
+                // Shared with the `Cli::run` `--schema` bypass so both paths emit
+                // an identical no-schema body: the same `{command, fields}` shape
+                // as a real SchemaInfo response (empty `fields`) plus an additive
+                // `message`.
+                None => Envelope::success(
+                    crate::output::no_schema_response(command_path),
+                    self.app_id.clone(),
+                ),
+            };
             return self
                 .render_envelope(
-                    Envelope::success(schema, self.app_id.clone()),
+                    envelope,
+                    "",
                     "",
                     command_path,
                     start,
@@ -899,6 +923,7 @@ impl Middleware {
         &self,
         mut envelope: Envelope,
         default_fields: &str,
+        view_id: &str,
         command_path: &str,
         start: Instant,
         user_args: &ValueMap,
@@ -917,14 +942,20 @@ impl Middleware {
             );
         }
         let output_format = self.output_format.parse::<OutputFormat>()?;
-        let mut fields = if self.fields.is_empty() {
+        // The effective field selection: an explicit `--fields` wins, otherwise
+        // the command's `default_fields` is the default. The same selection is
+        // applied two ways. With a registered human view, it narrows which of the
+        // view's columns show, so the view reads the full payload — the data is
+        // not projected, which would otherwise blank out the kept columns.
+        // Everywhere else (JSON/TOON, or generic human output) it projects the
+        // output data. Empty / `all` / `*` keeps everything.
+        let effective_fields = if self.fields.is_empty() {
             default_fields
         } else {
-            &self.fields
+            self.fields.as_str()
         };
-        if output_format == OutputFormat::Human && self.fields.is_empty() {
-            fields = "";
-        }
+        let human_view = output_format == OutputFormat::Human && self.human_views.has_view(view_id);
+        let projection_fields = if human_view { "" } else { effective_fields };
         if let Some(data) = &mut envelope.data {
             let pagination = apply_pipeline(
                 data,
@@ -933,7 +964,7 @@ impl Middleware {
                     limit: self.limit,
                     offset: self.offset,
                     expr: self.expr.clone(),
-                    fields: fields.to_owned(),
+                    fields: projection_fields.to_owned(),
                 },
             )?;
             if let Some(pagination) = pagination
@@ -950,15 +981,14 @@ impl Middleware {
             Some(Value::Object(user_args.clone())),
             Some(Value::Object(effective_args.clone())),
         );
-        let system = envelope
-            .metadata
-            .as_ref()
-            .map(|metadata| metadata.system.as_str())
-            .unwrap_or_default()
-            .to_owned();
         let prepared = envelope.prepare_for_render(&self.verbose);
         let rendered = if output_format == OutputFormat::Human {
-            render_human_with_registry_for_schema(&prepared, &self.human_views, &system)
+            render_human_with_registry_selected(
+                &prepared,
+                &self.human_views,
+                view_id,
+                effective_fields,
+            )
         } else {
             crate::output::render(output_format, &prepared)?
         };

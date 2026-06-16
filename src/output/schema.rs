@@ -77,6 +77,22 @@ impl SchemaInfo {
     }
 }
 
+/// Builds the `--schema` response body for a command with no registered schema.
+///
+/// `--schema` must never run the command, so when no schema exists we report
+/// that rather than executing. The body mirrors the `{ command, fields }` shape
+/// of a real [`SchemaInfo`] response (with an empty `fields` array) and adds a
+/// `message`, so callers can parse the schema and no-schema responses with one
+/// code path. Shared by the middleware and the `Cli::run` `--schema` bypass so
+/// both paths emit an identical body.
+pub(crate) fn no_schema_response(command_path: &str) -> Value {
+    serde_json::json!({
+        "command": command_path,
+        "fields": [],
+        "message": "No output schema is registered for this command.",
+    })
+}
+
 /// Manual output field descriptor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutputField {

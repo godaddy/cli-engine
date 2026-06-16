@@ -7,7 +7,9 @@ use tokio::sync::mpsc;
 
 use crate::{
     AuthRequirement, CommandMeta, Credential, CredentialResolver, Middleware, OutputSchema, Result,
-    SchemaInfo, Tier, middleware::ValueMap, output::NextAction,
+    SchemaInfo, Tier,
+    middleware::ValueMap,
+    output::{NextAction, TableColumn},
 };
 
 /// Sender half for streaming command output.
@@ -228,6 +230,19 @@ pub struct CommandSpec {
     pub args: Vec<Arg>,
     /// Optional output schema published through `--schema` and help.
     pub output_schema: Option<SchemaInfo>,
+    /// Inline human-output table columns assigned directly to this command.
+    ///
+    /// Set with [`with_view`](CommandSpec::with_view). When present (and
+    /// [`view_id`](CommandSpec::view_id) is unset), the engine registers these
+    /// columns under the command's own path so human output renders them.
+    pub view_columns: Vec<TableColumn>,
+    /// Id of a shared human view this command should use.
+    ///
+    /// Set with [`with_view_id`](CommandSpec::with_view_id). Names a
+    /// [`HumanViewDef`](crate::HumanViewDef) registered with `with_view` on the
+    /// module or CLI, so several commands can share one table. Takes precedence
+    /// over inline [`view_columns`](CommandSpec::view_columns).
+    pub view_id: Option<String>,
 }
 
 impl CommandSpec {
@@ -295,6 +310,32 @@ impl CommandSpec {
     #[must_use]
     pub fn with_default_fields(mut self, default_fields: impl Into<String>) -> Self {
         self.default_fields = Some(default_fields.into());
+        self
+    }
+
+    /// Assigns an inline human-output table view to this command.
+    ///
+    /// The columns are registered under the command's own path, so human output
+    /// renders this table directly. Field selection still applies: `--fields`
+    /// (defaulting to [`default_fields`](CommandSpec::default_fields)) narrows
+    /// which of these columns show. Use
+    /// [`with_view_id`](CommandSpec::with_view_id) instead to point at a shared
+    /// view registered with `with_view` on the module or CLI.
+    #[must_use]
+    pub fn with_view(mut self, columns: impl Into<Vec<TableColumn>>) -> Self {
+        self.view_columns = columns.into();
+        self
+    }
+
+    /// Points this command at a shared human view by id.
+    ///
+    /// The id must match a [`HumanViewDef`](crate::HumanViewDef) registered with
+    /// `with_view` on the module or CLI, letting several commands share one
+    /// table. Takes precedence over inline [`with_view`](CommandSpec::with_view)
+    /// columns.
+    #[must_use]
+    pub fn with_view_id(mut self, id: impl Into<String>) -> Self {
+        self.view_id = Some(id.into());
         self
     }
 

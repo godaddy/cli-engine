@@ -28,7 +28,7 @@ pub use human::{
     global_human_view_registry_snapshot, lookup_global_human_view_columns,
     lookup_global_human_view_func, register_global_human_view, register_global_human_view_func,
     render_human, render_human_with_registry, render_human_with_registry_for_schema,
-    render_human_with_view,
+    render_human_with_registry_selected, render_human_with_view,
 };
 pub use json::render_json;
 pub use pipeline::{PipelineOpts, apply_pipeline};
@@ -37,6 +37,7 @@ pub use renderer::{
     render_detailed_error, render_detailed_error_format, render_error, render_error_format,
     render_format, write_render,
 };
+pub(crate) use schema::no_schema_response;
 pub use schema::{
     FieldInfo, OutputField, OutputSchema, SchemaInfo, SchemaRegistry, fields_for,
     fields_from_json_schema, format_help_section, get_global_schema_by_path,
