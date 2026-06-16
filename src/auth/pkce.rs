@@ -50,7 +50,7 @@
 
 use std::{
     collections::HashMap,
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     net::{SocketAddr, TcpListener},
     sync::Arc,
     time::Duration,
@@ -502,8 +502,7 @@ impl PkceAuthProvider {
                 ))
             })?;
 
-        tracing::info!("Opening browser for authentication…");
-        tracing::info!("If the browser does not open, visit:\n  {url}");
+        emit_browser_login_prompt(&url);
         drop(open::that(url.as_str()));
 
         let code =
@@ -648,6 +647,15 @@ impl AuthProvider for PkceAuthProvider {
         let cache = self.cache.read().await;
         Ok(cache.keys().cloned().collect())
     }
+}
+
+fn emit_browser_login_prompt(url: &url::Url) {
+    let mut stderr = std::io::stderr().lock();
+    drop(writeln!(stderr, "Opening browser for authentication…"));
+    drop(writeln!(
+        stderr,
+        "If the browser does not open, visit:\n  {url}"
+    ));
 }
 
 /// Generates a PKCE code verifier and SHA-256 code challenge.
