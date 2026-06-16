@@ -2411,6 +2411,38 @@ async fn cli_runtime_auth_login_env_flag_overrides_middleware_env() {
 }
 
 #[tokio::test]
+async fn cli_runtime_auth_login_empty_env_flag_errors_instead_of_using_middleware_env() {
+    let cli = auth_cli_with_default_env("dev");
+
+    let output = cli
+        .run(["my-cli", "auth", "login", "--env", "", "--output", "json"])
+        .await;
+
+    assert_ne!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["error"]["message"],
+        "auth: missing environment; pass --env or configure a default environment"
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_auth_login_errors_when_env_missing() {
+    let cli = auth_cli_without_default_env();
+
+    let output = cli
+        .run(["my-cli", "auth", "login", "--output", "json"])
+        .await;
+
+    assert_ne!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["error"]["message"],
+        "auth: missing environment; pass --env or configure a default environment"
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_auth_logout_uses_middleware_env_when_env_flag_omitted() {
     let cli = auth_cli_with_default_env("dev");
 
@@ -2423,6 +2455,24 @@ async fn cli_runtime_auth_logout_uses_middleware_env_when_env_flag_omitted() {
     assert_eq!(
         rendered["data"],
         json!({"provider": "primary", "env": "dev", "status": "logged out"})
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_auth_logout_env_flag_overrides_middleware_env() {
+    let cli = auth_cli_with_default_env("dev");
+
+    let output = cli
+        .run([
+            "my-cli", "auth", "logout", "--env", "prod", "--output", "json",
+        ])
+        .await;
+
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["data"],
+        json!({"provider": "primary", "env": "prod", "status": "logged out"})
     );
 }
 
@@ -4174,6 +4224,21 @@ fn auth_cli_with_default_env(env: &'static str) -> Cli {
             }
             Ok(())
         })),
+        auth_providers: vec![Arc::new(FakeProvider {
+            name: "primary".to_owned(),
+            identity: "tester".to_owned(),
+            logout_fails: false,
+            environments: vec!["dev".to_owned(), "prod".to_owned()],
+        })],
+        ..CliConfig::default()
+    })
+}
+
+fn auth_cli_without_default_env() -> Cli {
+    Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
         auth_providers: vec![Arc::new(FakeProvider {
             name: "primary".to_owned(),
             identity: "tester".to_owned(),

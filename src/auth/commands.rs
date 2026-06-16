@@ -120,18 +120,24 @@ fn string_arg(args: &serde_json::Map<String, Value>, name: &str) -> String {
 }
 
 fn env_arg(context: &CommandContext) -> Result<String> {
-    let env = string_arg(&context.args, "env");
-    if !env.is_empty() {
-        return Ok(env);
+    if let Some(env) = context.user_args.get("env").and_then(Value::as_str) {
+        if env.is_empty() {
+            return Err(missing_env_error());
+        }
+        return Ok(env.to_owned());
     }
 
     if !context.middleware.env.is_empty() {
         return Ok(context.middleware.env.clone());
     }
 
-    Err(CliCoreError::message(
+    Err(missing_env_error())
+}
+
+fn missing_env_error() -> CliCoreError {
+    CliCoreError::message(
         "auth: missing environment; pass --env or configure a default environment",
-    ))
+    )
 }
 
 /// Reads a repeatable string argument as a `Vec<String>`, accepting either a
