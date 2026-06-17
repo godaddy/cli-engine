@@ -41,7 +41,15 @@
 //!     .with_auth_provider(provider);
 //! ```
 //!
-//! Override endpoints and client ID via environment variables:
+//! For per-environment OAuth config (different client id or endpoints per env),
+//! wire the provider to a shared
+//! [`Environments`](crate::environments::Environments) with
+//! [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments);
+//! the resolved environment then drives the OAuth config for the active `env`.
+//!
+//! Without a wired resolver (or for a field the resolved environment leaves
+//! empty), endpoints and client ID can still be overridden via environment
+//! variables:
 //! - `<PREFIX>_OAUTH_CLIENT_ID`
 //! - `<PREFIX>_OAUTH_AUTH_URL`
 //! - `<PREFIX>_OAUTH_TOKEN_URL`
@@ -77,6 +85,9 @@ use crate::{
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
+/// Default timeout applied to OAuth token-endpoint requests (exchange/refresh)
+/// so a stalled token server cannot hang the CLI indefinitely.
+const TOKEN_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 
 /// Stored token with expiry tracking.
 ///
@@ -124,6 +135,17 @@ impl StoredToken {
     }
 }
 
+/// The effective OAuth values for an environment, computed from a single
+/// environment resolution. A token flow resolves this once and reuses it across
+/// the authorize URL, code exchange, and refresh, rather than re-reading and
+/// re-parsing `environments.toml` once per field.
+struct EffectiveOAuth {
+    client_id: String,
+    auth_url: String,
+    token_url: String,
+    scopes: Vec<String>,
+}
+
 /// OAuth 2.0 PKCE authentication provider.
 ///
 /// Stores one token per `(env, provider)` pair in the system keychain.
@@ -135,8 +157,20 @@ pub struct PkceAuthProvider {
     token_url: String,
     client_id: String,
     scopes: Vec<String>,
+    /// Optional environment resolver; when set, per-env OAuth config comes from
+    /// the resolved environment instead of the base config / legacy env override.
+    /// Looked up by the `env` passed to [`AuthProvider::get_credential`].
+    environments: Option<Arc<crate::environments::Environments>>,
     redirect_port: u16,
     redirect_uri: Option<String>,
+    /// Timeout applied to token-endpoint requests (exchange and refresh).
+    token_timeout: Duration,
+    /// Shared HTTP client for token-endpoint traffic, built once and reused by
+    /// exchange and refresh so connections and TLS configuration are pooled
+    /// rather than rebuilt per request. The user-agent and timeout are applied
+    /// per request (not baked into the client) so they reflect the value
+    /// published at execution time, not at provider construction.
+    client: reqwest::Client,
     app_id: String,
     env_prefix: String,
     /// Explicit storage backend injected via [`PkceAuthProvider::with_storage`].
@@ -183,8 +217,11 @@ impl PkceAuthProvider {
             token_url: token_url.into(),
             client_id: client_id.into(),
             scopes: scopes.iter().map(|s| s.as_ref().to_owned()).collect(),
+            environments: None,
             redirect_port: REDIRECT_PORT_DEFAULT,
             redirect_uri: None,
+            token_timeout: TOKEN_REQUEST_TIMEOUT_DEFAULT,
+            client: reqwest::Client::new(),
             app_id: String::new(),
             env_prefix,
             storage_override: None,
@@ -198,10 +235,77 @@ impl PkceAuthProvider {
         }
     }
 
+    /// Sources per-environment OAuth config from a shared
+    /// [`Environments`](crate::environments::Environments).
+    ///
+    /// Given an `env`, the provider resolves the environment and uses its
+    /// [`OAuthConfig`](crate::environments::OAuthConfig). This is the
+    /// single-source-of-truth path; prefer it over the base
+    /// `client_id`/`auth_url`/`token_url` when the consumer registers
+    /// environments via
+    /// [`CliConfig::with_environments`](crate::CliConfig::with_environments).
+    ///
+    /// Precedence per OAuth field, for the resolved env: the resolved
+    /// environment's value when non-empty; otherwise the legacy
+    /// provider-prefixed env var (`<PREFIX>_OAUTH_CLIENT_ID`, `_AUTH_URL`,
+    /// `_TOKEN_URL`); otherwise the base configuration supplied to
+    /// [`PkceAuthProvider::new`]. An empty field on the resolved environment
+    /// falls through, so a partial environment can override only the client id
+    /// while inheriting the provider's base endpoints.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use cli_engine::{
+    ///     auth::pkce::PkceAuthProvider,
+    ///     environments::{EnvironmentDef, Environments},
+    /// };
+    ///
+    /// let environments = Arc::new(
+    ///     Environments::new("prod").with_environment(
+    ///         "dev",
+    ///         EnvironmentDef::new()
+    ///             .with_client_id("dev-client-id")
+    ///             .with_auth_url("https://api.dev-godaddy.com/v2/oauth2/authorize")
+    ///             .with_token_url("https://api.dev-godaddy.com/v2/oauth2/token"),
+    ///     ),
+    /// );
+    ///
+    /// let provider = PkceAuthProvider::new(
+    ///     "godaddy",
+    ///     "https://api.godaddy.com/v2/oauth2/authorize",
+    ///     "https://api.godaddy.com/v2/oauth2/token",
+    ///     "prod-client-id",
+    ///     &["openid", "profile"],
+    /// )
+    /// .with_environments(environments);
+    /// # let _ = provider;
+    /// ```
+    #[must_use]
+    pub fn with_environments(
+        mut self,
+        environments: Arc<crate::environments::Environments>,
+    ) -> Self {
+        self.environments = Some(environments);
+        self
+    }
+
     /// Sets the local redirect server port (default: 7443).
     #[must_use]
     pub fn with_redirect_port(mut self, port: u16) -> Self {
         self.redirect_port = port;
+        self
+    }
+
+    /// Sets the timeout applied to token-endpoint requests (authorization-code
+    /// exchange and refresh).
+    ///
+    /// Defaults to 30 seconds. This bounds only the HTTP token requests; the
+    /// interactive browser/callback wait has its own separate timeout.
+    #[must_use]
+    pub fn with_token_timeout(mut self, timeout: Duration) -> Self {
+        self.token_timeout = timeout;
         self
     }
 
@@ -317,19 +421,71 @@ impl PkceAuthProvider {
         }
     }
 
-    fn effective_client_id(&self) -> String {
-        let key = format!("{}_OAUTH_CLIENT_ID", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.client_id.clone())
+    /// Resolves the [`OAuthConfig`](crate::environments::OAuthConfig) for `env`
+    /// from the wired [`Environments`](crate::environments::Environments), if
+    /// any. Returns `None` when no resolver is wired, the env does not resolve,
+    /// or the resolved environment carries no OAuth slice.
+    fn resolved_oauth(&self, env: &str) -> Option<crate::environments::OAuthConfig> {
+        let envs = self.environments.as_ref()?;
+        match envs.resolve(env) {
+            Ok(resolved) => resolved.oauth,
+            Err(e) => {
+                tracing::debug!(
+                    env,
+                    error = %e,
+                    "environment resolve failed; falling back to base OAuth config"
+                );
+                None
+            }
+        }
     }
 
-    fn effective_auth_url(&self) -> String {
-        let key = format!("{}_OAUTH_AUTH_URL", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.auth_url.clone())
+    /// Computes the effective OAuth config for `env` with a SINGLE environment
+    /// resolution (at most one `environments.toml` read), then applies the
+    /// resolved → `<PREFIX>_OAUTH_*` env var → base precedence to each field.
+    ///
+    /// Token flows call this once and reuse the result so they don't re-read the
+    /// environments file once per field.
+    fn effective_oauth(&self, env: &str) -> EffectiveOAuth {
+        let resolved = self.resolved_oauth(env);
+        // Resolved value when non-empty, else the provider-prefixed env var, else base.
+        let field = |resolved_value: Option<&String>, var_suffix: &str, base: &str| -> String {
+            if let Some(value) = resolved_value
+                && !value.is_empty()
+            {
+                return value.clone();
+            }
+            std::env::var(format!("{}_OAUTH_{var_suffix}", self.env_prefix))
+                .unwrap_or_else(|_| base.to_owned())
+        };
+        let scopes = match &resolved {
+            Some(oauth) if !oauth.scopes.is_empty() => oauth.scopes.clone(),
+            _ => self.scopes.clone(),
+        };
+        EffectiveOAuth {
+            client_id: field(
+                resolved.as_ref().map(|o| &o.client_id),
+                "CLIENT_ID",
+                &self.client_id,
+            ),
+            auth_url: field(
+                resolved.as_ref().map(|o| &o.auth_url),
+                "AUTH_URL",
+                &self.auth_url,
+            ),
+            token_url: field(
+                resolved.as_ref().map(|o| &o.token_url),
+                "TOKEN_URL",
+                &self.token_url,
+            ),
+            scopes,
+        }
     }
 
-    fn effective_token_url(&self) -> String {
-        let key = format!("{}_OAUTH_TOKEN_URL", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.token_url.clone())
+    /// Default scopes for `env`: the resolved environment's scopes when
+    /// non-empty, otherwise the provider's base scopes.
+    fn effective_scopes(&self, env: &str) -> Vec<String> {
+        self.effective_oauth(env).scopes
     }
 
     fn effective_redirect_uri(&self) -> String {
@@ -424,7 +580,8 @@ impl PkceAuthProvider {
         if let Some(token) = self.existing_token(env).await? {
             return Ok(token);
         }
-        self.reauthenticate(env, &self.scopes).await
+        let scopes = self.effective_scopes(env);
+        self.reauthenticate(env, &scopes).await
     }
 
     /// Returns a usable token from the in-memory cache, keychain, or a refresh —
@@ -442,7 +599,7 @@ impl PkceAuthProvider {
             }
             if let Some(refresh_token) = token.refresh_token.as_deref()
                 && let Ok(mut refreshed) = self
-                    .refresh_access_token(refresh_token, &token.scopes)
+                    .refresh_access_token(env, refresh_token, &token.scopes)
                     .await
             {
                 if refreshed.refresh_token.is_none() {
@@ -459,7 +616,7 @@ impl PkceAuthProvider {
     /// Runs a fresh interactive PKCE flow requesting exactly `scopes`, replacing
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
-        let token = self.run_pkce_flow_with(scopes).await?;
+        let token = self.run_pkce_flow_with(env, scopes).await?;
         // Persist first — the keychain write overwrites the existing entry for
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails
@@ -471,24 +628,24 @@ impl PkceAuthProvider {
 
     /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
     /// default login and for scope step-up, which requests a wider union).
-    async fn run_pkce_flow_with(&self, scopes: &[String]) -> Result<StoredToken> {
+    async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
-        let client_id = self.effective_client_id();
-        let auth_url = self.effective_auth_url();
+        // Resolve the OAuth config once for this whole flow (authorize + exchange).
+        let oauth = self.effective_oauth(env);
         let redirect_uri = self.effective_redirect_uri();
         let scope = scopes.join(" ");
 
         let auth_params = [
             ("response_type", "code"),
-            ("client_id", &client_id),
+            ("client_id", &oauth.client_id),
             ("redirect_uri", &redirect_uri),
             ("scope", &scope),
             ("state", &state),
             ("code_challenge", &code_challenge),
             ("code_challenge_method", "S256"),
         ];
-        let url = url::Url::parse_with_params(&auth_url, &auth_params)
+        let url = url::Url::parse_with_params(&oauth.auth_url, &auth_params)
             .map_err(|err| CliCoreError::message(format!("invalid auth URL: {err}")))?;
 
         let (bind_port, callback_path) = self.parse_redirect_uri()?;
@@ -507,30 +664,47 @@ impl PkceAuthProvider {
 
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
-        self.exchange_code_for_token(&code, &code_verifier, scopes)
+        self.exchange_code_for_token(&oauth, &code, &code_verifier, scopes)
             .await
+    }
+
+    /// Builds a POST to an OAuth token endpoint on the provider's shared client.
+    ///
+    /// Token traffic does not go through [`HttpClient`](crate::transport::HttpClient)
+    /// — that client is built for authenticated, JSON-bodied backend calls,
+    /// whereas the token endpoint is unauthenticated and form-encoded. The
+    /// user-agent and timeout are attached here per request (read at call time)
+    /// so every outbound call, including credential acquisition and refresh, is
+    /// attributed consistently and bounded.
+    fn token_request(&self, token_url: &str, params: &[(&str, &str)]) -> reqwest::RequestBuilder {
+        self.client
+            .post(token_url)
+            .header(
+                reqwest::header::USER_AGENT,
+                crate::transport::client::default_user_agent(),
+            )
+            .timeout(self.token_timeout)
+            .form(params)
     }
 
     async fn exchange_code_for_token(
         &self,
+        oauth: &EffectiveOAuth,
         code: &str,
         code_verifier: &str,
         requested_scopes: &[String],
     ) -> Result<StoredToken> {
         let redirect_uri = self.effective_redirect_uri();
-        let client_id = self.effective_client_id();
-        let token_url = self.effective_token_url();
 
         let params = [
             ("grant_type", "authorization_code"),
-            ("client_id", &client_id),
+            ("client_id", &oauth.client_id),
             ("redirect_uri", &redirect_uri),
             ("code", code),
             ("code_verifier", code_verifier),
         ];
-        let response = reqwest::Client::new()
-            .post(&token_url)
-            .form(&params)
+        let response = self
+            .token_request(&oauth.token_url, &params)
             .send()
             .await
             .map_err(|err| CliCoreError::message(format!("token request failed: {err}")))?;
@@ -548,19 +722,18 @@ impl PkceAuthProvider {
 
     async fn refresh_access_token(
         &self,
+        env: &str,
         refresh_token: &str,
         prior_scopes: &[String],
     ) -> Result<StoredToken> {
-        let client_id = self.effective_client_id();
-        let token_url = self.effective_token_url();
+        let oauth = self.effective_oauth(env);
         let params = [
             ("grant_type", "refresh_token"),
-            ("client_id", &client_id),
+            ("client_id", &oauth.client_id),
             ("refresh_token", refresh_token),
         ];
-        let response = reqwest::Client::new()
-            .post(&token_url)
-            .form(&params)
+        let response = self
+            .token_request(&oauth.token_url, &params)
             .send()
             .await
             .map_err(|err| CliCoreError::message(format!("token refresh failed: {err}")))?;
@@ -602,14 +775,16 @@ impl AuthProvider for PkceAuthProvider {
             // server has no silent scope-expansion grant, so in non-interactive
             // contexts we fail fast rather than hang on the callback timeout.
             let granted = granted_scopes(&token);
-            match plan_step_up(&self.scopes, &granted, required, session_is_interactive()) {
+            match plan_step_up(&granted, required, session_is_interactive()) {
                 StepUp::Covered => return Ok(self.build_credential(env, &token)),
                 StepUp::MissingNonInteractive(missing) => {
                     return Err(missing_scope_error(env, &missing));
                 }
-                // Union (defaults ∪ already-granted ∪ required) so step-up never
-                // drops scopes acquired by an earlier login or step-up.
-                StepUp::Reauthenticate(union) => {
+                // Re-consent: resolve per-env defaults only now (off the
+                // cached-token hot path) and request defaults ∪ already-granted ∪
+                // required so step-up never drops previously-acquired scopes.
+                StepUp::Reauthenticate => {
+                    let union = union_scopes(&self.effective_scopes(env), &granted, required);
                     let token = self.reauthenticate(env, &union).await?;
                     ensure_granted(env, &token, required)?;
                     return Ok(self.build_credential(env, &token));
@@ -618,7 +793,7 @@ impl AuthProvider for PkceAuthProvider {
         }
 
         // No usable token: authenticate once, requesting defaults ∪ required.
-        let union = union_scopes(&self.scopes, &[], required);
+        let union = union_scopes(&self.effective_scopes(env), &[], required);
         let token = self.reauthenticate(env, &union).await?;
         ensure_granted(env, &token, required)?;
         Ok(self.build_credential(env, &token))
@@ -870,19 +1045,22 @@ fn granted_scopes(token: &StoredToken) -> Vec<String> {
 enum StepUp {
     /// The token already covers every required scope.
     Covered,
-    /// Re-authenticate requesting this scope set (defaults ∪ granted ∪ required).
-    Reauthenticate(Vec<String>),
+    /// Re-authenticate (interactively) to acquire the missing scopes. The caller
+    /// builds the requested set (defaults ∪ granted ∪ required) only on this
+    /// path, so resolving per-env default scopes stays off the cached-token hot
+    /// path.
+    Reauthenticate,
     /// Scopes are missing but the session is non-interactive, so step-up cannot
     /// prompt; carries the missing scopes for the error message.
     MissingNonInteractive(Vec<String>),
 }
 
-fn plan_step_up(
-    defaults: &[String],
-    granted: &[String],
-    required: &[String],
-    interactive: bool,
-) -> StepUp {
+/// Decides the step-up action from what the token grants versus what the command
+/// requires. Deliberately does NOT take the per-env default scopes: the coverage
+/// decision needs only `granted`/`required`, so the caller can avoid resolving
+/// defaults (potential `environments.toml` I/O) when a cached token already
+/// covers the requirement.
+fn plan_step_up(granted: &[String], required: &[String], interactive: bool) -> StepUp {
     let missing: Vec<String> = required
         .iter()
         .filter(|scope| !granted.iter().any(|have| have == *scope))
@@ -891,7 +1069,7 @@ fn plan_step_up(
     if missing.is_empty() {
         StepUp::Covered
     } else if interactive {
-        StepUp::Reauthenticate(union_scopes(defaults, granted, required))
+        StepUp::Reauthenticate
     } else {
         StepUp::MissingNonInteractive(missing)
     }
@@ -990,6 +1168,7 @@ async fn parse_token_response(
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use serde_json::json;
 
@@ -1033,6 +1212,100 @@ mod tests {
             refresh_token: None,
             scopes: Vec::new(),
         }
+    }
+
+    fn envs_for_test() -> Arc<crate::environments::Environments> {
+        use crate::environments::{EnvironmentDef, Environments};
+        Arc::new(
+            Environments::new("prod").with_environment(
+                "prod",
+                EnvironmentDef::new()
+                    .with_client_id("prod-client")
+                    .with_auth_url("https://prod.example.com/auth")
+                    .with_token_url("https://prod.example.com/token")
+                    .with_scopes(&["openid", "prod.read"]),
+            ),
+        )
+    }
+
+    /// A provider wired to an [`Environments`](crate::environments::Environments)
+    /// resolver sources its per-env OAuth config (client id, endpoints, scopes)
+    /// from the resolved environment, making the environment the single source
+    /// of truth.
+    #[test]
+    fn environment_wired_provider_sources_oauth_from_resolver() {
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid"],
+        )
+        .with_environments(envs_for_test());
+        let oauth = provider.effective_oauth("prod");
+        assert_eq!(oauth.client_id, "prod-client");
+        assert_eq!(oauth.auth_url, "https://prod.example.com/auth");
+        assert_eq!(oauth.token_url, "https://prod.example.com/token");
+        assert_eq!(
+            oauth.scopes,
+            vec!["openid".to_owned(), "prod.read".to_owned()]
+        );
+    }
+
+    /// A provider with no environment resolver falls back to the base client id,
+    /// endpoints, and scopes for every env.
+    #[test]
+    fn non_wired_provider_uses_base_config() {
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid"],
+        );
+        let oauth = provider.effective_oauth("anything");
+        assert_eq!(oauth.client_id, "base-client");
+        assert_eq!(oauth.scopes, vec!["openid".to_owned()]);
+    }
+
+    /// OAuth token traffic must carry the engine's configured default
+    /// user-agent so it is attributed consistently with all other outbound
+    /// calls (some upstream WAFs reject requests without a User-Agent).
+    #[test]
+    fn token_request_carries_default_user_agent() {
+        let _guard = crate::transport::client::UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultUserAgent;
+        crate::transport::set_default_user_agent("ua-probe/7.7");
+        let provider = test_provider().with_token_timeout(Duration::from_secs(12));
+        let request = provider
+            .token_request(
+                "https://example.com/token",
+                &[("grant_type", "refresh_token")],
+            )
+            .build()
+            .expect("token request should build");
+        let header = request
+            .headers()
+            .get(reqwest::header::USER_AGENT)
+            .expect("token request should set a user-agent");
+        assert_eq!(header, "ua-probe/7.7");
+        assert_eq!(request.timeout(), Some(&Duration::from_secs(12)));
+    }
+
+    /// OAuth token requests must not hang indefinitely: the provider applies a
+    /// 30s timeout by default.
+    #[test]
+    fn default_token_timeout_is_thirty_seconds() {
+        assert_eq!(test_provider().token_timeout, Duration::from_secs(30));
+    }
+
+    /// The default token timeout can be overridden per provider.
+    #[test]
+    fn with_token_timeout_overrides_default() {
+        let provider = test_provider().with_token_timeout(Duration::from_secs(5));
+        assert_eq!(provider.token_timeout, Duration::from_secs(5));
     }
 
     /// store_cached_token + cached_token round-trip: the mechanism used by
@@ -1114,30 +1387,22 @@ mod tests {
 
     #[test]
     fn plan_step_up_covers_reauths_and_fails_non_interactive() {
-        let defaults = vec!["base".to_owned()];
         let granted = vec!["base".to_owned(), "read".to_owned()];
         let read = vec!["read".to_owned()];
         let write = vec!["write".to_owned()];
 
-        // Already covered.
-        assert_eq!(
-            plan_step_up(&defaults, &granted, &read, true),
-            StepUp::Covered
-        );
-        // Missing + interactive → reauth requesting the union.
-        assert_eq!(
-            plan_step_up(&defaults, &granted, &write, true),
-            StepUp::Reauthenticate(vec![
-                "base".to_owned(),
-                "read".to_owned(),
-                "write".to_owned()
-            ])
-        );
+        // Already covered (decision needs only granted vs required).
+        assert_eq!(plan_step_up(&granted, &read, true), StepUp::Covered);
+        // Missing + interactive → reauth (the caller builds the union with
+        // per-env defaults only on this path).
+        assert_eq!(plan_step_up(&granted, &write, true), StepUp::Reauthenticate);
         // Missing + non-interactive → fail fast, carrying the missing scopes.
         assert_eq!(
-            plan_step_up(&defaults, &granted, &write, false),
+            plan_step_up(&granted, &write, false),
             StepUp::MissingNonInteractive(vec!["write".to_owned()])
         );
+        // The union itself (defaults ∪ granted ∪ required) is covered by
+        // union_scopes' own test.
     }
 
     /// An opaque cached token whose recorded scopes cover the requirement is
@@ -1553,5 +1818,96 @@ mod tests {
             .expect("save");
         let cred = provider.status("dev").await.expect("status");
         assert_eq!(cred.token, "filetok");
+    }
+
+    /// Serializes env-var access and removes the vars on drop (matching the
+    /// convention in `src/environments.rs` tests). Vars persist process-wide, so
+    /// concurrent tests would otherwise see each other's writes.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard removing an env var on drop, even on panic, while ENV_LOCK held.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the test holds ENV_LOCK for the guard's lifetime.
+            unsafe { std::env::remove_var(self.0) }
+        }
+    }
+
+    /// The fix: a provider wired to a shared `Arc<Environments>` whose
+    /// `environments.toml` file layer defines `prod` with a different `client_id`
+    /// resolves the FILE's client id. This proves the provider's file layer
+    /// resolves — the shared, app_id-stamped instance reaches the provider rather
+    /// than an unstamped copy whose file path is `None`.
+    #[test]
+    fn wired_provider_resolves_client_id_from_environments_file() {
+        use crate::environments::{EnvironmentDef, Environments};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("environments.toml");
+        std::fs::write(
+            &file,
+            r#"
+[prod]
+client_id = "file-prod-client"
+"#,
+        )
+        .expect("write environments.toml");
+
+        let environments = Arc::new(
+            Environments::new("prod")
+                .with_app_id("x")
+                .with_environment(
+                    "prod",
+                    EnvironmentDef::new().with_client_id("compiled-prod-client"),
+                )
+                .with_config_file_path_override(file),
+        );
+
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid"],
+        )
+        .with_environments(environments);
+
+        // The file overrides the compiled client id, which itself overrides the
+        // provider's base — proving the wired provider reads the file layer.
+        assert_eq!(
+            provider.effective_oauth("prod").client_id,
+            "file-prod-client"
+        );
+    }
+
+    /// Legacy escape hatch: a NON-wired provider still honors the provider-prefixed
+    /// `<PREFIX>_OAUTH_CLIENT_ID` env var, and a wired provider whose resolved env
+    /// yields a non-empty client id takes precedence over that legacy var.
+    #[test]
+    fn legacy_oauth_client_id_env_var_overrides_base_but_yields_to_wired_env() {
+        use crate::environments::{EnvironmentDef, Environments};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `<PREFIX>` = provider name uppercased, '-' -> '_'. Provider is "test".
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit.
+        unsafe { std::env::set_var("TEST_OAUTH_CLIENT_ID", "legacy-client") };
+        let _guard = EnvGuard("TEST_OAUTH_CLIENT_ID");
+
+        // Non-wired provider: the legacy var overrides the base client id.
+        let bare = test_provider();
+        assert_eq!(bare.effective_oauth("prod").client_id, "legacy-client");
+
+        // Wired provider whose resolved env carries a non-empty client id: the
+        // resolved environment wins over the legacy var.
+        let environments = Arc::new(
+            Environments::new("prod")
+                .with_app_id("x")
+                .with_environment("prod", EnvironmentDef::new().with_client_id("env-client")),
+        );
+        let wired = test_provider().with_environments(environments);
+        assert_eq!(wired.effective_oauth("prod").client_id, "env-client");
     }
 }

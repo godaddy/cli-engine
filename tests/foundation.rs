@@ -150,6 +150,18 @@ impl RecordingTransportLogger {
 
 static USER_AGENT_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Restores the process-wide default User-Agent to the builtin on drop, so a
+/// panicking assertion in a test that publishes a config-derived UA cannot leak
+/// it into later tests. Hold alongside (declared after) the `USER_AGENT_TEST_LOCK`
+/// guard so the reset runs while the lock is still held.
+struct RestoreDefaultUserAgent;
+
+impl Drop for RestoreDefaultUserAgent {
+    fn drop(&mut self) {
+        transport::set_default_user_agent("cli/dev");
+    }
+}
+
 #[test]
 fn tier_string_forms_and_mutating_parity() {
     assert_eq!(Tier::Read.to_string(), "read");
@@ -442,6 +454,11 @@ async fn cli_runtime_root_help_includes_find_commands_without_modules() {
 
 #[tokio::test]
 async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
+    // execute_from publishes the config-derived User-Agent process-wide, so this
+    // test shares the lock with the user-agent tests and restores the default
+    // on exit (including panic) via the RAII guard, while the lock is held.
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
@@ -487,6 +504,10 @@ async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
 
 #[tokio::test]
 async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
+    // execute_from_until_signal publishes the config-derived User-Agent
+    // process-wide; share the lock and restore the default (panic-safe) like above.
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     let shutdown_count = Arc::new(AtomicUsize::new(0));
     let shutdown_for_closure = Arc::clone(&shutdown_count);
     let mut cli = Cli::new(CliConfig {
@@ -4936,12 +4957,19 @@ async fn provider_bearer_injector_empty_token_does_not_short_circuit_cache_prese
 
 #[tokio::test]
 async fn client_credentials_injector_requests_and_caches_bearer_token() {
+    // The injector tags its token request with the process default User-Agent;
+    // hold the user-agent lock and pin the default so the assertion is stable,
+    // restoring it on unwind via the RAII guard while the lock is still held.
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let token_requests = Arc::new(AtomicUsize::new(0));
     let token_requests_for_server = Arc::clone(&token_requests);
     let server = TestServer::sequence(vec![Box::new(move |request| {
         token_requests_for_server.fetch_add(1, Ordering::SeqCst);
         assert!(request.contains("POST /token HTTP/1.1"));
         assert!(request.contains("content-type: application/x-www-form-urlencoded"));
+        assert!(request.contains("user-agent: cli/dev"));
         assert!(request.contains("grant_type=client_credentials"));
         assert!(request.contains("client_id=client"));
         assert!(request.contains("client_secret=secret"));
@@ -5074,6 +5102,8 @@ async fn client_credentials_injector_missing_token_and_negative_expiry_match_leg
 #[tokio::test]
 async fn http_client_get_sets_headers_and_decodes_json() {
     let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("GET /thing HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
@@ -5179,6 +5209,7 @@ async fn http_client_null_json_returns_default_result_preserves_legacy_zero_valu
 #[tokio::test]
 async fn http_client_set_default_user_agent_affects_new_clients_only() {
     let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     transport::set_default_user_agent("cli/custom");
     let custom_server = TestServer::new(|request| {
         assert!(request.contains("GET /thing HTTP/1.1"));
@@ -5215,8 +5246,6 @@ async fn http_client_set_default_user_agent_affects_new_clients_only() {
         .await
         .expect("explicit user agent should override default");
     assert_eq!(value, json!({"ok": true}));
-
-    transport::set_default_user_agent("cli/dev");
 }
 
 #[tokio::test]
@@ -5466,6 +5495,8 @@ async fn http_client_default_headers_can_override_json_content_type_preserves_le
 #[tokio::test]
 async fn http_client_do_raw_sends_method_content_type_body_and_decodes_json() {
     let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("OPTIONS /raw HTTP/1.1"));
         assert!(request.contains("content-type: application/x-www-form-urlencoded"));
@@ -5504,6 +5535,9 @@ async fn http_client_do_raw_sends_method_content_type_body_and_decodes_json() {
 
 #[tokio::test]
 async fn http_client_do_raw_optional_none_body_matches_legacy_nil_reader() {
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("OPTIONS /raw HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
@@ -5646,6 +5680,9 @@ async fn http_client_etag_if_match_and_multipart_without_response_skip_success_d
 
 #[tokio::test]
 async fn http_client_post_raw_none_body_omits_json_content_type_preserves_legacy() {
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("POST /raw HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
@@ -9882,6 +9919,56 @@ async fn auth_registered_after_construction_is_categorized() {
         !bare.rendered.contains("\n  Commands:"),
         "{}",
         bare.rendered
+    );
+}
+
+#[tokio::test]
+async fn env_group_lists_gets_and_shows_info_for_active_environment() {
+    use cli_engine::environments::{EnvironmentDef, Environments};
+
+    let cli = Cli::new(
+        CliConfig::new("envcmds", "Env cmds", "envcmds").with_environments(Arc::new(
+            Environments::new("prod")
+                .with_environment(
+                    "prod",
+                    EnvironmentDef::new().with_field("api_url", "https://p"),
+                )
+                .with_environment(
+                    "ote",
+                    EnvironmentDef::new().with_field("api_url", "https://o"),
+                ),
+        )),
+    );
+
+    // env list returns both environments.
+    let list = cli
+        .run(["envcmds", "env", "list", "--output", "json"])
+        .await;
+    assert_eq!(list.exit_code, 0, "env list failed: {}", list.rendered);
+    assert!(
+        list.rendered.contains("prod") && list.rendered.contains("ote"),
+        "env list missing environments: {}",
+        list.rendered
+    );
+
+    // env get returns the default active environment.
+    let get = cli.run(["envcmds", "env", "get", "--output", "json"]).await;
+    assert_eq!(get.exit_code, 0, "env get failed: {}", get.rendered);
+    assert!(
+        get.rendered.contains("prod"),
+        "env get missing default env: {}",
+        get.rendered
+    );
+
+    // env info --env ote shows ote's extra fields.
+    let info = cli
+        .run(["envcmds", "env", "info", "--env", "ote", "--output", "json"])
+        .await;
+    assert_eq!(info.exit_code, 0, "env info failed: {}", info.rendered);
+    assert!(
+        info.rendered.contains("https://o"),
+        "env info missing ote api_url: {}",
+        info.rendered
     );
 }
 

@@ -71,6 +71,10 @@ pub mod command;
 pub mod config;
 /// Built-in `config` command group.
 pub mod config_commands;
+/// Built-in `env` command group (private; only `cli.rs` consumes it).
+mod env_commands;
+/// First-class environment definitions and layered resolution.
+pub mod environments;
 /// Shared error type and error traits.
 pub mod error;
 /// Global framework flags and flag-extraction helpers.
@@ -120,6 +124,7 @@ pub use config::{
     credential_store_env_var, resolve_credential_store, resolve_credential_store_with,
 };
 pub use config_commands::config_command_group;
+pub use environments::{Environment, EnvironmentDef, Environments, OAuthConfig};
 pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };

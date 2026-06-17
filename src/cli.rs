@@ -210,6 +210,10 @@ pub struct CliConfig {
     pub views: Vec<HumanViewDef>,
     /// Providers registered before command execution starts.
     pub auth_providers: Vec<Arc<dyn AuthProvider>>,
+    /// Optional override for the process-wide outbound User-Agent. When unset,
+    /// the engine derives `name/version` from this config. See
+    /// [`CliConfig::user_agent_string`].
+    pub user_agent: Option<String>,
     /// Optional authorization gatekeeper injected into middleware.
     pub authz: Option<Arc<dyn Authorizer>>,
     /// Optional audit recorder injected into middleware.
@@ -250,6 +254,13 @@ pub struct CliConfig {
     /// to a binary that never opted in. Populate via [`CliConfig::with_argv0_alias`]
     /// and [`CliConfig::with_argv0_personality`].
     pub argv0_routes: BTreeMap<String, Argv0Route>,
+    /// Optional first-class environment system.
+    ///
+    /// Registered via [`CliConfig::with_environments`]. When set, the engine
+    /// registers a global `--env` flag, seeds the active environment into
+    /// middleware, and exposes it to handlers through
+    /// [`CommandContext::environment`](crate::command::CommandContext::environment).
+    pub environments: Option<Arc<crate::environments::Environments>>,
 }
 
 impl CliConfig {
@@ -287,6 +298,75 @@ impl CliConfig {
     pub fn with_default_auth_provider(mut self, provider: impl Into<String>) -> Self {
         self.default_auth_provider = Some(provider.into());
         self
+    }
+
+    /// Registers a first-class environment system.
+    ///
+    /// When set, [`Cli::new`] registers a global `--env` flag, seeds the active
+    /// environment into middleware (explicit `--env` > persisted active >
+    /// configured default), and exposes the resolved environment to handlers via
+    /// [`CommandContext::environment`](crate::command::CommandContext::environment).
+    ///
+    /// The [`Environments`](crate::environments::Environments) is stored as-is, so
+    /// the consumer is responsible for configuring it before wrapping it in an
+    /// `Arc`:
+    ///
+    /// - Call
+    ///   [`Environments::with_app_id`](crate::environments::Environments::with_app_id)
+    ///   with the **same** `app_id` passed to [`CliConfig::new`], so the config
+    ///   file and active-environment persistence resolve to the application's
+    ///   config directory. (An empty `app_id` makes
+    ///   [`Environments::config_file_path`](crate::environments::Environments::config_file_path)
+    ///   return `None`, silently disabling the `environments.toml` file layer.)
+    /// - Call
+    ///   [`Environments::with_config_file(true)`](crate::environments::Environments::with_config_file)
+    ///   if the application loads a user-editable `environments.toml`.
+    /// - **Share the same `Arc`** with any `PkceAuthProvider::with_environments`
+    ///   (available with the `pkce-auth` feature):
+    ///   the provider's OAuth file layer and active-environment persistence must
+    ///   resolve against the identical, `app_id`-stamped instance the engine sees,
+    ///   or a file-defined environment (or a file override of a compiled
+    ///   environment's `client_id`) will be visible to `env info` yet invisible to
+    ///   the actual OAuth login.
+    #[must_use]
+    pub fn with_environments(
+        mut self,
+        environments: Arc<crate::environments::Environments>,
+    ) -> Self {
+        self.environments = Some(environments);
+        self
+    }
+
+    /// Overrides the outbound User-Agent string for all HTTP traffic.
+    ///
+    /// When unset, the engine derives `name/version` from this config (see
+    /// [`CliConfig::user_agent_string`]). Set this when the upstream APIs expect
+    /// a specific product token. The resolved value is applied process-wide on
+    /// execution via [`crate::transport::set_default_user_agent`], so it reaches
+    /// both command [`HttpClient`](crate::transport::HttpClient)s and the
+    /// engine's own OAuth token requests.
+    #[must_use]
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Returns the outbound User-Agent string the CLI presents on HTTP requests.
+    ///
+    /// Resolution order:
+    /// 1. an explicit [`with_user_agent`](Self::with_user_agent) override;
+    /// 2. otherwise `name/version` (for example `gdx/1.2.3`);
+    /// 3. otherwise just `name` when no build version is set.
+    #[must_use]
+    pub fn user_agent_string(&self) -> String {
+        if let Some(user_agent) = &self.user_agent {
+            return user_agent.clone();
+        }
+        if self.build.version.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}/{}", self.name, self.build.version)
+        }
     }
 
     /// Adds one domain module.
@@ -688,6 +768,15 @@ impl Cli {
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
         }
+        if config.environments.is_some() {
+            root = root.arg(
+                clap::Arg::new("env")
+                    .long("env")
+                    .global(true)
+                    .value_name("ENV")
+                    .help("Override the active environment (see: env list)"),
+            );
+        }
         let intro = config
             .long
             .as_deref()
@@ -712,6 +801,14 @@ impl Cli {
         middleware
             .human_views
             .merge(&global_human_view_registry_snapshot());
+        if let Some(environments) = &config.environments {
+            // Seed the sticky/default active environment now; the global `--env`
+            // flag overrides it per invocation in `run_with_depth`. The same
+            // `Arc` the consumer shared with any `PkceAuthProvider` is reused, so
+            // the file layer and active-env persistence resolve consistently.
+            middleware.env = environments.effective_active(None, &middleware.config);
+            middleware.environments = Some(Arc::clone(environments));
+        }
 
         let mut cli = Self {
             config,
@@ -752,6 +849,9 @@ impl Cli {
         }
         if cli.config.config_commands {
             cli.ensure_config_command();
+        }
+        if cli.config.environments.is_some() {
+            cli.ensure_env_command();
         }
         cli
     }
@@ -845,6 +945,7 @@ impl Cli {
         E: Write,
         Shutdown: Future<Output = ()>,
     {
+        self.install_default_user_agent();
         let output = run_until_signal(self.run(args), shutdown).await;
         if output.exit_code == 130
             && output.rendered == "command interrupted\n"
@@ -858,6 +959,17 @@ impl Cli {
             stderr.write_all(output.rendered.as_bytes())?;
         }
         Ok(process_exit_code(output.exit_code))
+    }
+
+    /// Publishes the configured outbound User-Agent process-wide so that
+    /// command [`HttpClient`](crate::transport::HttpClient)s and the engine's
+    /// own OAuth token requests share it.
+    ///
+    /// Called from the execution entrypoints rather than [`Cli::new`] so that
+    /// merely constructing a `Cli` (as tests do in bulk) does not mutate global
+    /// state. See [`CliConfig::user_agent_string`] for resolution order.
+    fn install_default_user_agent(&self) {
+        crate::transport::set_default_user_agent(self.config.user_agent_string());
     }
 
     /// Registers an auth provider after construction.
@@ -1294,6 +1406,11 @@ impl Cli {
         if let Err(err) = self.apply_config_flags(&matches, &mut middleware) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
+        // Validate and apply `--env` for built-in paths (help/tree/guide/group
+        // help) so they reflect the selected environment and reject unknowns.
+        if let Err(err) = self.apply_env_flag(&matches, &mut middleware) {
+            return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+        }
 
         let command_path = command_path_from_matches(&self.config.name, &matches);
         if command_path == "help" {
@@ -1374,6 +1491,11 @@ impl Cli {
         };
         apply_global_flags(&mut middleware, &flags, command_timeout);
         if let Err(err) = self.apply_config_flags(&matches, &mut middleware) {
+            return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+        }
+        // The global `--env` flag overrides the seeded active environment for
+        // this invocation; an unknown name surfaces as an error envelope.
+        if let Err(err) = self.apply_env_flag(&matches, &mut middleware) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
 
@@ -1820,6 +1942,38 @@ impl Cli {
         self.refresh_root_long();
     }
 
+    /// Mounts the built-in `env` command group and files it under the admin
+    /// help category. Idempotent and yields to a consumer-defined `env`
+    /// subcommand if one already exists.
+    fn ensure_env_command(&mut self) {
+        if has_subcommand(&self.root, "env") {
+            return;
+        }
+        let group = crate::env_commands::env_command_group();
+        let mut prefix = Vec::new();
+        group.register_commands(&mut prefix, &mut self.commands);
+        let mut prefix = Vec::new();
+        let clap_group = runtime_group_clap_command_with_schema_help(
+            &group,
+            &mut prefix,
+            &self.middleware.schema_registry,
+        );
+        self.root = self.root.clone().subcommand(clap_group);
+        let category = self
+            .config
+            .admin_category
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ADMIN_CATEGORY.to_owned());
+        if !self.module_entries.iter().any(|e| e.name == "env") {
+            self.module_entries.push(ModuleHelpEntry {
+                category,
+                name: "env".to_owned(),
+                short: "Manage the active environment".to_owned(),
+            });
+        }
+        self.refresh_root_long();
+    }
+
     fn default_auth_provider(&self) -> String {
         if !self.middleware.default_auth_provider.is_empty() {
             return self.middleware.default_auth_provider.clone();
@@ -1854,6 +2008,28 @@ impl Cli {
     fn apply_config_flags(&self, matches: &ArgMatches, middleware: &mut Middleware) -> Result<()> {
         if let Some(apply_flags) = &self.apply_flags {
             apply_flags(matches, middleware)?;
+        }
+        Ok(())
+    }
+
+    /// Applies the global `--env` override to a per-run middleware snapshot.
+    ///
+    /// The flag is only registered when environments are configured, so when it
+    /// is present `middleware.environments` is set too. Validates the requested
+    /// name against the registered environments and updates `middleware.env`,
+    /// returning an error for an unknown environment.
+    fn apply_env_flag(&self, matches: &ArgMatches, middleware: &mut Middleware) -> Result<()> {
+        // Guard on the environment system FIRST. The `--env` arg is only
+        // registered when environments are configured (the same condition that
+        // sets `middleware.environments`); calling `matches.get_one("env")` for
+        // an arg that was never registered panics in clap, which would break
+        // every CLI that does not use environments.
+        let Some(environments) = middleware.environments.as_ref() else {
+            return Ok(());
+        };
+        if let Some(env) = matches.get_one::<String>("env") {
+            environments.resolve(env)?;
+            middleware.env = env.clone();
         }
         Ok(())
     }
@@ -2782,5 +2958,107 @@ async fn run_streaming_command(
             exit_code: exit_code_for_error(&err),
             rendered: render_cli_error(middleware, &err, middleware.app_id.as_str()).rendered,
         }),
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    #[test]
+    fn user_agent_string_derives_name_and_version_by_default() {
+        let config =
+            CliConfig::new("gdx", "GoDaddy CLI", "gdx").with_build(BuildInfo::new("1.2.3"));
+        assert_eq!(config.user_agent_string(), "gdx/1.2.3");
+    }
+
+    #[test]
+    fn user_agent_string_prefers_explicit_override() {
+        let config = CliConfig::new("gdx", "GoDaddy CLI", "gdx")
+            .with_build(BuildInfo::new("1.2.3"))
+            .with_user_agent("gdx-cli/9.9 (custom)");
+        assert_eq!(config.user_agent_string(), "gdx-cli/9.9 (custom)");
+    }
+
+    #[test]
+    fn user_agent_string_omits_version_when_absent() {
+        let config = CliConfig::new("gdx", "GoDaddy CLI", "gdx");
+        assert_eq!(config.user_agent_string(), "gdx");
+    }
+
+    #[test]
+    fn install_default_user_agent_publishes_config_value() {
+        let _guard = crate::transport::client::UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultUserAgent;
+        crate::transport::set_default_user_agent("cli/dev");
+        let cli = Cli::new(
+            CliConfig::new("uatest", "UA test", "uatest").with_build(BuildInfo::new("4.5.6")),
+        );
+        cli.install_default_user_agent();
+        assert_eq!(
+            crate::transport::client::default_user_agent(),
+            "uatest/4.5.6"
+        );
+    }
+}
+
+#[cfg(test)]
+mod env_config_tests {
+    use super::*;
+
+    #[test]
+    fn with_environments_stores_shared_arc_with_consumer_app_id() {
+        // The consumer sets app_id on the Environments before sharing the Arc;
+        // CliConfig stores it as-is, so the file path resolves only because the
+        // consumer stamped the matching app_id (not because the engine did).
+        let cfg = CliConfig::new("gddy", "GoDaddy CLI", "gddy").with_environments(Arc::new(
+            crate::environments::Environments::new("prod")
+                .with_app_id("gddy")
+                .with_config_file(true),
+        ));
+        let envs = cfg.environments.as_ref().expect("environments set");
+        assert!(envs.config_file_path().is_some());
+    }
+
+    #[tokio::test]
+    async fn env_flag_overrides_default_and_reaches_middleware_env() {
+        use crate::{CommandResult, CommandSpec, RuntimeCommandSpec};
+        use serde_json::json;
+        let mut cli = Cli::new(
+            CliConfig::new("envtest", "Env test", "envtest").with_environments(Arc::new(
+                crate::environments::Environments::new("prod")
+                    .with_environment("prod", crate::environments::EnvironmentDef::new())
+                    .with_environment("ote", crate::environments::EnvironmentDef::new()),
+            )),
+        );
+        cli.add_command(RuntimeCommandSpec::new_with_context(
+            CommandSpec::new("whichenv", "echo env").no_auth(true),
+            async |ctx| {
+                Ok(CommandResult::new(
+                    json!({ "env": ctx.environment()?.name }),
+                ))
+            },
+        ));
+        let out = cli
+            .run(["envtest", "whichenv", "--env", "ote", "--output", "json"])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        assert!(out.rendered.contains("\"env\""));
+        assert!(out.rendered.contains("ote"));
+    }
+
+    #[tokio::test]
+    async fn unknown_env_flag_produces_error_envelope() {
+        let cli = Cli::new(
+            CliConfig::new("envtest2", "Env test", "envtest2").with_environments(Arc::new(
+                crate::environments::Environments::new("prod")
+                    .with_environment("prod", crate::environments::EnvironmentDef::new()),
+            )),
+        );
+        let out = cli.run(["envtest2", "tree", "--env", "nope"]).await;
+        assert_ne!(out.exit_code, 0);
+        assert!(out.rendered.contains("nope"));
     }
 }
