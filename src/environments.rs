@@ -175,6 +175,13 @@ impl Environments {
     /// the compiled-in names are returned. Use [`resolve`](Self::resolve) when
     /// you need those errors surfaced; a fallible listing variant can be added
     /// later if needed.
+    ///
+    /// # Blocking
+    ///
+    /// When the config-file layer is enabled, this performs synchronous
+    /// filesystem I/O to read and parse `environments.toml` (like
+    /// [`resolve`](Self::resolve)). Avoid calling it repeatedly on a
+    /// latency-sensitive async path.
     #[must_use]
     pub fn list(&self) -> Vec<String> {
         let mut names: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
