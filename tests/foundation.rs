@@ -4958,8 +4958,10 @@ async fn provider_bearer_injector_empty_token_does_not_short_circuit_cache_prese
 #[tokio::test]
 async fn client_credentials_injector_requests_and_caches_bearer_token() {
     // The injector tags its token request with the process default User-Agent;
-    // hold the user-agent lock and pin the default so the assertion is stable.
+    // hold the user-agent lock and pin the default so the assertion is stable,
+    // restoring it on unwind via the RAII guard while the lock is still held.
     let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     transport::set_default_user_agent("cli/dev");
     let token_requests = Arc::new(AtomicUsize::new(0));
     let token_requests_for_server = Arc::clone(&token_requests);
@@ -5100,6 +5102,8 @@ async fn client_credentials_injector_missing_token_and_negative_expiry_match_leg
 #[tokio::test]
 async fn http_client_get_sets_headers_and_decodes_json() {
     let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("GET /thing HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
@@ -5205,6 +5209,7 @@ async fn http_client_null_json_returns_default_result_preserves_legacy_zero_valu
 #[tokio::test]
 async fn http_client_set_default_user_agent_affects_new_clients_only() {
     let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     transport::set_default_user_agent("cli/custom");
     let custom_server = TestServer::new(|request| {
         assert!(request.contains("GET /thing HTTP/1.1"));
@@ -5241,8 +5246,6 @@ async fn http_client_set_default_user_agent_affects_new_clients_only() {
         .await
         .expect("explicit user agent should override default");
     assert_eq!(value, json!({"ok": true}));
-
-    transport::set_default_user_agent("cli/dev");
 }
 
 #[tokio::test]
@@ -5492,6 +5495,8 @@ async fn http_client_default_headers_can_override_json_content_type_preserves_le
 #[tokio::test]
 async fn http_client_do_raw_sends_method_content_type_body_and_decodes_json() {
     let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("OPTIONS /raw HTTP/1.1"));
         assert!(request.contains("content-type: application/x-www-form-urlencoded"));
