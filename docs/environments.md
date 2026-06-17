@@ -40,7 +40,8 @@ api_url    = "https://api.ote.example.com"
 ```
 
 The recognized OAuth keys — `client_id`, `auth_url`, `token_url`, and `scopes` (an array of strings) — are parsed into the typed `OAuthConfig` slice of the resolved `Environment`.
-Every other string key is captured as a free-form field in `Environment::extra` (for example `api_url` above).
+Every other key is captured as a free-form field in `Environment::extra`, which is a `BTreeMap<String, String>` — so these values **must be TOML strings** (for example `api_url` above).
+A non-OAuth key whose value is a number, boolean, or array fails to parse; quote it as a string instead.
 The `extra` bag is printed verbatim by `env info`, so it must not hold secrets.
 
 ## Environment-Variable Overrides
