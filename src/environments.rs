@@ -220,9 +220,13 @@ impl Environments {
             let mut known: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
             known.extend(all_file_defs.into_keys());
             let known_list: Vec<String> = known.into_iter().collect();
-            return Err(CliCoreError::message(format!(
-                "unknown environment {name:?}; known: {}",
+            let known_display = if known_list.is_empty() {
+                "(none defined)".to_owned()
+            } else {
                 known_list.join(", ")
+            };
+            return Err(CliCoreError::message(format!(
+                "unknown environment {name:?}; known: {known_display}"
             )));
         }
         let mut merged = EnvironmentDef::default();
@@ -425,6 +429,20 @@ mod tests {
     fn oauth_config_defaults_are_empty() {
         let c = OAuthConfig::default();
         assert!(c.client_id.is_empty() && c.scopes.is_empty());
+    }
+
+    /// With no environments defined at all, the unknown-env error renders a
+    /// readable placeholder instead of a dangling `known: `.
+    #[test]
+    fn resolve_unknown_env_with_no_defs_uses_placeholder() {
+        let err = Environments::new("prod")
+            .resolve("prod")
+            .expect_err("nothing defined should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("(none defined)"),
+            "expected placeholder, got: {message}"
+        );
     }
 
     /// `persist_active` without an `app_id` returns a clear, actionable error
