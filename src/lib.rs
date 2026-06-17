@@ -71,6 +71,8 @@ pub mod command;
 pub mod config;
 /// Built-in `config` command group.
 pub mod config_commands;
+/// Built-in `env` command group (private; only `cli.rs` consumes it).
+mod env_commands;
 /// First-class environment definitions and layered resolution.
 pub mod environments;
 /// Shared error type and error traits.

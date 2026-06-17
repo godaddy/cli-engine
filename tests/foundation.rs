@@ -9900,6 +9900,56 @@ async fn auth_registered_after_construction_is_categorized() {
     );
 }
 
+#[tokio::test]
+async fn env_group_lists_gets_and_shows_info_for_active_environment() {
+    use cli_engine::environments::{EnvironmentDef, Environments};
+
+    let cli = Cli::new(
+        CliConfig::new("envcmds", "Env cmds", "envcmds").with_environments(
+            Environments::new("prod")
+                .with_environment(
+                    "prod",
+                    EnvironmentDef::new().with_field("api_url", "https://p"),
+                )
+                .with_environment(
+                    "ote",
+                    EnvironmentDef::new().with_field("api_url", "https://o"),
+                ),
+        ),
+    );
+
+    // env list returns both environments.
+    let list = cli
+        .run(["envcmds", "env", "list", "--output", "json"])
+        .await;
+    assert_eq!(list.exit_code, 0, "env list failed: {}", list.rendered);
+    assert!(
+        list.rendered.contains("prod") && list.rendered.contains("ote"),
+        "env list missing environments: {}",
+        list.rendered
+    );
+
+    // env get returns the default active environment.
+    let get = cli.run(["envcmds", "env", "get", "--output", "json"]).await;
+    assert_eq!(get.exit_code, 0, "env get failed: {}", get.rendered);
+    assert!(
+        get.rendered.contains("prod"),
+        "env get missing default env: {}",
+        get.rendered
+    );
+
+    // env info --env ote shows ote's extra fields.
+    let info = cli
+        .run(["envcmds", "env", "info", "--env", "ote", "--output", "json"])
+        .await;
+    assert_eq!(info.exit_code, 0, "env info failed: {}", info.rendered);
+    assert!(
+        info.rendered.contains("https://o"),
+        "env info missing ote api_url: {}",
+        info.rendered
+    );
+}
+
 #[derive(Debug)]
 struct RecordingEnvProvider {
     envs: Arc<Mutex<Vec<String>>>,

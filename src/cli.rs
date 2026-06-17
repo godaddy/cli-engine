@@ -828,6 +828,9 @@ impl Cli {
         if cli.config.config_commands {
             cli.ensure_config_command();
         }
+        if cli.config.environments.is_some() {
+            cli.ensure_env_command();
+        }
         cli
     }
 
@@ -1912,6 +1915,38 @@ impl Cli {
                 category,
                 name: "config".to_owned(),
                 short: "Read and write the CLI config file".to_owned(),
+            });
+        }
+        self.refresh_root_long();
+    }
+
+    /// Mounts the built-in `env` command group and files it under the admin
+    /// help category. Idempotent and yields to a consumer-defined `env`
+    /// subcommand if one already exists.
+    fn ensure_env_command(&mut self) {
+        if has_subcommand(&self.root, "env") {
+            return;
+        }
+        let group = crate::env_commands::env_command_group();
+        let mut prefix = Vec::new();
+        group.register_commands(&mut prefix, &mut self.commands);
+        let mut prefix = Vec::new();
+        let clap_group = runtime_group_clap_command_with_schema_help(
+            &group,
+            &mut prefix,
+            &self.middleware.schema_registry,
+        );
+        self.root = self.root.clone().subcommand(clap_group);
+        let category = self
+            .config
+            .admin_category
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ADMIN_CATEGORY.to_owned());
+        if !self.module_entries.iter().any(|e| e.name == "env") {
+            self.module_entries.push(ModuleHelpEntry {
+                category,
+                name: "env".to_owned(),
+                short: "Manage the active environment".to_owned(),
             });
         }
         self.refresh_root_long();
