@@ -189,6 +189,14 @@ impl Environments {
     /// strings. Consumers should treat empty endpoint strings as "fall back to
     /// the provider's default base endpoints".
     ///
+    /// # Blocking
+    ///
+    /// When the config-file layer is enabled (via
+    /// [`with_config_file`](Self::with_config_file)), this performs synchronous
+    /// filesystem I/O to read and parse `environments.toml`. Resolve the
+    /// environment once at startup (or off the latency-sensitive path) rather
+    /// than calling it per request inside an async handler.
+    ///
     /// # Errors
     ///
     /// Returns an error when `name` is not known to any layer or when the

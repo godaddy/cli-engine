@@ -150,6 +150,18 @@ impl RecordingTransportLogger {
 
 static USER_AGENT_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Restores the process-wide default User-Agent to the builtin on drop, so a
+/// panicking assertion in a test that publishes a config-derived UA cannot leak
+/// it into later tests. Hold alongside (declared after) the `USER_AGENT_TEST_LOCK`
+/// guard so the reset runs while the lock is still held.
+struct RestoreDefaultUserAgent;
+
+impl Drop for RestoreDefaultUserAgent {
+    fn drop(&mut self) {
+        transport::set_default_user_agent("cli/dev");
+    }
+}
+
 #[test]
 fn tier_string_forms_and_mutating_parity() {
     assert_eq!(Tier::Read.to_string(), "read");
@@ -443,8 +455,10 @@ async fn cli_runtime_root_help_includes_find_commands_without_modules() {
 #[tokio::test]
 async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
     // execute_from publishes the config-derived User-Agent process-wide, so this
-    // test shares the lock with the user-agent tests and restores the default.
+    // test shares the lock with the user-agent tests and restores the default
+    // on exit (including panic) via the RAII guard, while the lock is held.
     let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
@@ -486,14 +500,14 @@ async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
     assert!(stdout.is_empty());
     let rendered = String::from_utf8(stderr).expect("utf8");
     assert!(rendered.contains("missing"));
-    transport::set_default_user_agent("cli/dev");
 }
 
 #[tokio::test]
 async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
     // execute_from_until_signal publishes the config-derived User-Agent
-    // process-wide; share the lock and restore the default like the tests above.
+    // process-wide; share the lock and restore the default (panic-safe) like above.
     let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
     let shutdown_count = Arc::new(AtomicUsize::new(0));
     let shutdown_for_closure = Arc::clone(&shutdown_count);
     let mut cli = Cli::new(CliConfig {
@@ -527,7 +541,6 @@ async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
         "command interrupted\n"
     );
     assert_eq!(shutdown_count.load(Ordering::SeqCst), 1);
-    transport::set_default_user_agent("cli/dev");
 }
 
 #[tokio::test]
