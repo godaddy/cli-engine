@@ -122,7 +122,7 @@ pub use config::{
     credential_store_env_var, resolve_credential_store, resolve_credential_store_with,
 };
 pub use config_commands::config_command_group;
-pub use environments::{Environment, OAuthConfig};
+pub use environments::{Environment, EnvironmentDef, Environments, OAuthConfig};
 pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };
