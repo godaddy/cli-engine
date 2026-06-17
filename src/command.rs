@@ -136,6 +136,14 @@ impl CommandContext {
     /// the compiled-in definition, the `environments.toml` file layer, and
     /// `<ENV>_*` environment-variable overrides.
     ///
+    /// # Blocking
+    ///
+    /// When the `environments.toml` file layer is enabled, this performs
+    /// synchronous filesystem I/O via
+    /// [`Environments::resolve`](crate::environments::Environments::resolve).
+    /// Call it once per invocation and reuse the result rather than calling it
+    /// repeatedly inside an async handler on a latency-sensitive path.
+    ///
     /// # Errors
     ///
     /// Returns an error if no environment system was registered via

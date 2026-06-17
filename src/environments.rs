@@ -170,8 +170,11 @@ impl Environments {
 
     /// Enumerable environment names (compiled-in + file-defined), sorted.
     ///
-    /// File parse errors are silently swallowed; compiled names are still
-    /// returned. A fallible variant can be added later if needed.
+    /// Any error from reading or parsing the environments file (missing file,
+    /// permission/read error, or malformed TOML) is silently swallowed and only
+    /// the compiled-in names are returned. Use [`resolve`](Self::resolve) when
+    /// you need those errors surfaced; a fallible listing variant can be added
+    /// later if needed.
     #[must_use]
     pub fn list(&self) -> Vec<String> {
         let mut names: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
