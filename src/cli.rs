@@ -1997,10 +1997,15 @@ impl Cli {
     /// name against the registered environments and updates `middleware.env`,
     /// returning an error for an unknown environment.
     fn apply_env_flag(&self, matches: &ArgMatches, middleware: &mut Middleware) -> Result<()> {
-        if let (Some(env), Some(environments)) = (
-            matches.get_one::<String>("env"),
-            middleware.environments.clone(),
-        ) {
+        // Guard on the environment system FIRST. The `--env` arg is only
+        // registered when environments are configured (the same condition that
+        // sets `middleware.environments`); calling `matches.get_one("env")` for
+        // an arg that was never registered panics in clap, which would break
+        // every CLI that does not use environments.
+        let Some(environments) = middleware.environments.clone() else {
+            return Ok(());
+        };
+        if let Some(env) = matches.get_one::<String>("env") {
             environments.resolve(env)?;
             middleware.env = env.clone();
         }
