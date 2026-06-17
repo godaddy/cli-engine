@@ -5531,6 +5531,8 @@ async fn http_client_do_raw_sends_method_content_type_body_and_decodes_json() {
 #[tokio::test]
 async fn http_client_do_raw_optional_none_body_matches_legacy_nil_reader() {
     let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("OPTIONS /raw HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
@@ -5674,6 +5676,8 @@ async fn http_client_etag_if_match_and_multipart_without_response_skip_success_d
 #[tokio::test]
 async fn http_client_post_raw_none_body_omits_json_content_type_preserves_legacy() {
     let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore_ua = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("cli/dev");
     let server = TestServer::new(|request| {
         assert!(request.contains("POST /raw HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
