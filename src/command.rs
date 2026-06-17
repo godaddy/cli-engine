@@ -127,6 +127,27 @@ impl CommandContext {
         &self.middleware.config
     }
 
+    /// Resolves the active [`Environment`](crate::environments::Environment) for
+    /// this invocation.
+    ///
+    /// The active environment name is `self.middleware.env`, seeded at startup
+    /// from the persisted active environment or configured default and
+    /// overridden per invocation by the global `--env` flag. Resolution merges
+    /// the compiled-in definition, the `environments.toml` file layer, and
+    /// `<ENV>_*` environment-variable overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no environment system was registered via
+    /// [`CliConfig::with_environments`](crate::CliConfig::with_environments) or
+    /// if the active name does not resolve to a known environment.
+    pub fn environment(&self) -> Result<crate::environments::Environment> {
+        let environments = self.middleware.environments.as_ref().ok_or_else(|| {
+            crate::error::CliCoreError::message("no environment system configured")
+        })?;
+        environments.resolve(&self.middleware.env)
+    }
+
     /// Deserializes the raw argument matches into a typed args struct.
     ///
     /// Use this with `#[derive(clap::Args)]` structs to get type-safe access
