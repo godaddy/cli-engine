@@ -1,7 +1,7 @@
 # First-Class Environments in cli-engine — Design
 
 Date: 2026-06-17
-Status: Implemented (plan in `docs/plans/2026-06-17-engine-environments-plan.md`)
+Status: Implemented
 
 ## Context
 
