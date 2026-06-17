@@ -134,7 +134,7 @@ impl Environments {
     }
 
     /// Sets the application id used to locate the config file. Set automatically
-    /// by [`crate::CliConfig::with_environments`]; only call directly in tests.
+    /// by `CliConfig::with_environments`; only call directly in tests.
     #[must_use]
     pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
         self.app_id = app_id.into();
