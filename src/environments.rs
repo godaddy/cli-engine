@@ -297,6 +297,16 @@ impl Environments {
     /// when the config file cannot be written.
     pub fn persist_active(&self, name: &str) -> Result<()> {
         self.resolve(name)?; // reject unknown names
+        // Persisting writes the engine config file, which is keyed by app_id.
+        // Validate it up front so a missing/invalid app_id yields a clear,
+        // actionable error rather than a misleading "no config path" failure
+        // from ConfigFile::save() that points at XDG/HOME.
+        if crate::config::config_file_path(&self.app_id).is_none() {
+            return Err(CliCoreError::message(format!(
+                "cannot persist active environment {name:?}: the environment system has no usable app_id; \
+                 set one via Environments::with_app_id (matching the CliConfig app_id)"
+            )));
+        }
         let mut config = crate::config::ConfigFile::load(&self.app_id);
         config.set(Self::ACTIVE_ENV_KEY, name)?;
         config.save()
@@ -408,6 +418,20 @@ mod tests {
     fn oauth_config_defaults_are_empty() {
         let c = OAuthConfig::default();
         assert!(c.client_id.is_empty() && c.scopes.is_empty());
+    }
+
+    /// `persist_active` without an `app_id` returns a clear, actionable error
+    /// (mentioning `app_id`) rather than a misleading config-path failure.
+    #[test]
+    fn persist_active_without_app_id_errors_clearly() {
+        let err = sample()
+            .persist_active("prod")
+            .expect_err("persist without app_id should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("app_id"),
+            "error should mention app_id, got: {message}"
+        );
     }
 
     #[test]

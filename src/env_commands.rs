@@ -20,7 +20,9 @@ use crate::{
 pub fn env_command_group() -> RuntimeGroupSpec {
     RuntimeGroupSpec::new(GroupSpec::new("env", "Manage the active environment"))
         .with_command(RuntimeCommandSpec::new_with_context(
-            CommandSpec::new("list", "List known environments").no_auth(true),
+            CommandSpec::new("list", "List known environments")
+                .no_auth(true)
+                .with_system("env"),
             async |ctx| {
                 let envs = ctx
                     .middleware
@@ -40,11 +42,15 @@ pub fn env_command_group() -> RuntimeGroupSpec {
             },
         ))
         .with_command(RuntimeCommandSpec::new_with_context(
-            CommandSpec::new("get", "Show the active environment name").no_auth(true),
+            CommandSpec::new("get", "Show the active environment name")
+                .no_auth(true)
+                .with_system("env"),
             async |ctx| Ok(CommandResult::new(json!({ "active": ctx.middleware.env }))),
         ))
         .with_command(RuntimeCommandSpec::new_with_context(
-            CommandSpec::new("info", "Show the resolved active environment").no_auth(true),
+            CommandSpec::new("info", "Show the resolved active environment")
+                .no_auth(true)
+                .with_system("env"),
             async |ctx| {
                 let env = ctx.environment()?;
                 let oauth = env.oauth.map(|o| {
@@ -65,6 +71,7 @@ pub fn env_command_group() -> RuntimeGroupSpec {
         .with_command(RuntimeCommandSpec::new_with_context(
             CommandSpec::new("set", "Set and persist the active environment")
                 .no_auth(true)
+                .with_system("env")
                 .with_tier(Tier::Mutate)
                 .mutates(true)
                 .with_arg(clap::Arg::new("name").required(true)),

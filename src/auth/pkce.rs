@@ -1264,6 +1264,7 @@ mod tests {
         let _guard = crate::transport::client::UA_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultUserAgent;
         crate::transport::set_default_user_agent("ua-probe/7.7");
         let provider = test_provider().with_token_timeout(Duration::from_secs(12));
         let request = provider
@@ -1279,7 +1280,6 @@ mod tests {
             .expect("token request should set a user-agent");
         assert_eq!(header, "ua-probe/7.7");
         assert_eq!(request.timeout(), Some(&Duration::from_secs(12)));
-        crate::transport::set_default_user_agent("cli/dev");
     }
 
     /// OAuth token requests must not hang indefinitely: the provider applies a

@@ -2991,6 +2991,7 @@ mod user_agent_tests {
         let _guard = crate::transport::client::UA_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultUserAgent;
         crate::transport::set_default_user_agent("cli/dev");
         let cli = Cli::new(
             CliConfig::new("uatest", "UA test", "uatest").with_build(BuildInfo::new("4.5.6")),
@@ -3000,7 +3001,6 @@ mod user_agent_tests {
             crate::transport::client::default_user_agent(),
             "uatest/4.5.6"
         );
-        crate::transport::set_default_user_agent("cli/dev");
     }
 }
 

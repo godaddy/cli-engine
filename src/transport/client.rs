@@ -49,6 +49,20 @@ pub(crate) fn default_user_agent() -> String {
 #[cfg(test)]
 pub(crate) static UA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Restores the process-wide default user-agent to the builtin on drop, so a
+/// panicking assertion in a test that mutates it cannot leak the value into
+/// later tests in this binary. Declare it after acquiring [`UA_TEST_LOCK`] so
+/// the reset runs while the lock is still held.
+#[cfg(test)]
+pub(crate) struct RestoreDefaultUserAgent;
+
+#[cfg(test)]
+impl Drop for RestoreDefaultUserAgent {
+    fn drop(&mut self) {
+        set_default_user_agent(BUILTIN_DEFAULT_USER_AGENT);
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct GraphQlError {
     message: String,
