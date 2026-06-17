@@ -135,6 +135,17 @@ impl StoredToken {
     }
 }
 
+/// The effective OAuth values for an environment, computed from a single
+/// environment resolution. A token flow resolves this once and reuses it across
+/// the authorize URL, code exchange, and refresh, rather than re-reading and
+/// re-parsing `environments.toml` once per field.
+struct EffectiveOAuth {
+    client_id: String,
+    auth_url: String,
+    token_url: String,
+    scopes: Vec<String>,
+}
+
 /// OAuth 2.0 PKCE authentication provider.
 ///
 /// Stores one token per `(env, provider)` pair in the system keychain.
@@ -429,45 +440,52 @@ impl PkceAuthProvider {
         }
     }
 
-    fn effective_client_id(&self, env: &str) -> String {
-        if let Some(oauth) = self.resolved_oauth(env)
-            && !oauth.client_id.is_empty()
-        {
-            return oauth.client_id;
+    /// Computes the effective OAuth config for `env` with a SINGLE environment
+    /// resolution (at most one `environments.toml` read), then applies the
+    /// resolved → `<PREFIX>_OAUTH_*` env var → base precedence to each field.
+    ///
+    /// Token flows call this once and reuse the result so they don't re-read the
+    /// environments file once per field.
+    fn effective_oauth(&self, env: &str) -> EffectiveOAuth {
+        let resolved = self.resolved_oauth(env);
+        // Resolved value when non-empty, else the provider-prefixed env var, else base.
+        let field = |resolved_value: Option<&String>, var_suffix: &str, base: &str| -> String {
+            if let Some(value) = resolved_value
+                && !value.is_empty()
+            {
+                return value.clone();
+            }
+            std::env::var(format!("{}_OAUTH_{var_suffix}", self.env_prefix))
+                .unwrap_or_else(|_| base.to_owned())
+        };
+        let scopes = match &resolved {
+            Some(oauth) if !oauth.scopes.is_empty() => oauth.scopes.clone(),
+            _ => self.scopes.clone(),
+        };
+        EffectiveOAuth {
+            client_id: field(
+                resolved.as_ref().map(|o| &o.client_id),
+                "CLIENT_ID",
+                &self.client_id,
+            ),
+            auth_url: field(
+                resolved.as_ref().map(|o| &o.auth_url),
+                "AUTH_URL",
+                &self.auth_url,
+            ),
+            token_url: field(
+                resolved.as_ref().map(|o| &o.token_url),
+                "TOKEN_URL",
+                &self.token_url,
+            ),
+            scopes,
         }
-        let key = format!("{}_OAUTH_CLIENT_ID", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.client_id.clone())
-    }
-
-    fn effective_auth_url(&self, env: &str) -> String {
-        if let Some(oauth) = self.resolved_oauth(env)
-            && !oauth.auth_url.is_empty()
-        {
-            return oauth.auth_url;
-        }
-        let key = format!("{}_OAUTH_AUTH_URL", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.auth_url.clone())
-    }
-
-    fn effective_token_url(&self, env: &str) -> String {
-        if let Some(oauth) = self.resolved_oauth(env)
-            && !oauth.token_url.is_empty()
-        {
-            return oauth.token_url;
-        }
-        let key = format!("{}_OAUTH_TOKEN_URL", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.token_url.clone())
     }
 
     /// Default scopes for `env`: the resolved environment's scopes when
     /// non-empty, otherwise the provider's base scopes.
     fn effective_scopes(&self, env: &str) -> Vec<String> {
-        if let Some(oauth) = self.resolved_oauth(env)
-            && !oauth.scopes.is_empty()
-        {
-            return oauth.scopes;
-        }
-        self.scopes.clone()
+        self.effective_oauth(env).scopes
     }
 
     fn effective_redirect_uri(&self) -> String {
@@ -613,21 +631,21 @@ impl PkceAuthProvider {
     async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
-        let client_id = self.effective_client_id(env);
-        let auth_url = self.effective_auth_url(env);
+        // Resolve the OAuth config once for this whole flow (authorize + exchange).
+        let oauth = self.effective_oauth(env);
         let redirect_uri = self.effective_redirect_uri();
         let scope = scopes.join(" ");
 
         let auth_params = [
             ("response_type", "code"),
-            ("client_id", &client_id),
+            ("client_id", &oauth.client_id),
             ("redirect_uri", &redirect_uri),
             ("scope", &scope),
             ("state", &state),
             ("code_challenge", &code_challenge),
             ("code_challenge_method", "S256"),
         ];
-        let url = url::Url::parse_with_params(&auth_url, &auth_params)
+        let url = url::Url::parse_with_params(&oauth.auth_url, &auth_params)
             .map_err(|err| CliCoreError::message(format!("invalid auth URL: {err}")))?;
 
         let (bind_port, callback_path) = self.parse_redirect_uri()?;
@@ -646,7 +664,7 @@ impl PkceAuthProvider {
 
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
-        self.exchange_code_for_token(env, &code, &code_verifier, scopes)
+        self.exchange_code_for_token(&oauth, &code, &code_verifier, scopes)
             .await
     }
 
@@ -671,24 +689,22 @@ impl PkceAuthProvider {
 
     async fn exchange_code_for_token(
         &self,
-        env: &str,
+        oauth: &EffectiveOAuth,
         code: &str,
         code_verifier: &str,
         requested_scopes: &[String],
     ) -> Result<StoredToken> {
         let redirect_uri = self.effective_redirect_uri();
-        let client_id = self.effective_client_id(env);
-        let token_url = self.effective_token_url(env);
 
         let params = [
             ("grant_type", "authorization_code"),
-            ("client_id", &client_id),
+            ("client_id", &oauth.client_id),
             ("redirect_uri", &redirect_uri),
             ("code", code),
             ("code_verifier", code_verifier),
         ];
         let response = self
-            .token_request(&token_url, &params)
+            .token_request(&oauth.token_url, &params)
             .send()
             .await
             .map_err(|err| CliCoreError::message(format!("token request failed: {err}")))?;
@@ -710,15 +726,14 @@ impl PkceAuthProvider {
         refresh_token: &str,
         prior_scopes: &[String],
     ) -> Result<StoredToken> {
-        let client_id = self.effective_client_id(env);
-        let token_url = self.effective_token_url(env);
+        let oauth = self.effective_oauth(env);
         let params = [
             ("grant_type", "refresh_token"),
-            ("client_id", &client_id),
+            ("client_id", &oauth.client_id),
             ("refresh_token", refresh_token),
         ];
         let response = self
-            .token_request(&token_url, &params)
+            .token_request(&oauth.token_url, &params)
             .send()
             .await
             .map_err(|err| CliCoreError::message(format!("token refresh failed: {err}")))?;
@@ -1223,17 +1238,12 @@ mod tests {
             &["openid"],
         )
         .with_environments(envs_for_test());
-        assert_eq!(provider.effective_client_id("prod"), "prod-client");
+        let oauth = provider.effective_oauth("prod");
+        assert_eq!(oauth.client_id, "prod-client");
+        assert_eq!(oauth.auth_url, "https://prod.example.com/auth");
+        assert_eq!(oauth.token_url, "https://prod.example.com/token");
         assert_eq!(
-            provider.effective_auth_url("prod"),
-            "https://prod.example.com/auth"
-        );
-        assert_eq!(
-            provider.effective_token_url("prod"),
-            "https://prod.example.com/token"
-        );
-        assert_eq!(
-            provider.effective_scopes("prod"),
+            oauth.scopes,
             vec!["openid".to_owned(), "prod.read".to_owned()]
         );
     }
@@ -1249,11 +1259,9 @@ mod tests {
             "base-client",
             &["openid"],
         );
-        assert_eq!(provider.effective_client_id("anything"), "base-client");
-        assert_eq!(
-            provider.effective_scopes("anything"),
-            vec!["openid".to_owned()]
-        );
+        let oauth = provider.effective_oauth("anything");
+        assert_eq!(oauth.client_id, "base-client");
+        assert_eq!(oauth.scopes, vec!["openid".to_owned()]);
     }
 
     /// OAuth token traffic must carry the engine's configured default
@@ -1871,7 +1879,10 @@ client_id = "file-prod-client"
 
         // The file overrides the compiled client id, which itself overrides the
         // provider's base — proving the wired provider reads the file layer.
-        assert_eq!(provider.effective_client_id("prod"), "file-prod-client");
+        assert_eq!(
+            provider.effective_oauth("prod").client_id,
+            "file-prod-client"
+        );
     }
 
     /// Legacy escape hatch: a NON-wired provider still honors the provider-prefixed
@@ -1891,7 +1902,7 @@ client_id = "file-prod-client"
 
         // Non-wired provider: the legacy var overrides the base client id.
         let bare = test_provider();
-        assert_eq!(bare.effective_client_id("prod"), "legacy-client");
+        assert_eq!(bare.effective_oauth("prod").client_id, "legacy-client");
 
         // Wired provider whose resolved env carries a non-empty client id: the
         // resolved environment wins over the legacy var.
@@ -1901,6 +1912,6 @@ client_id = "file-prod-client"
                 .with_environment("prod", EnvironmentDef::new().with_client_id("env-client")),
         );
         let wired = test_provider().with_environments(environments);
-        assert_eq!(wired.effective_client_id("prod"), "env-client");
+        assert_eq!(wired.effective_oauth("prod").client_id, "env-client");
     }
 }
