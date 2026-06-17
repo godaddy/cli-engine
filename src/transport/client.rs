@@ -19,7 +19,13 @@ const BASE_BACKOFF: Duration = Duration::from_millis(500);
 const BUILTIN_DEFAULT_USER_AGENT: &str = "cli/dev";
 static DEFAULT_USER_AGENT: OnceLock<RwLock<String>> = OnceLock::new();
 
-/// Sets the user-agent used by subsequently created [`HttpClient`] values.
+/// Sets the process-wide default user-agent for outbound requests.
+///
+/// Applies to subsequently created [`HttpClient`] values (those that do not set
+/// their own via [`HttpClientBuilder::user_agent`]) and to the engine's other
+/// outbound token traffic that reads this default — the PKCE provider's
+/// token/refresh requests and the client-credentials injector. A per-client
+/// user-agent still overrides it for that client.
 pub fn set_default_user_agent(user_agent: impl Into<String>) {
     let lock =
         DEFAULT_USER_AGENT.get_or_init(|| RwLock::new(BUILTIN_DEFAULT_USER_AGENT.to_owned()));
