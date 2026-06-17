@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.0...cli-engine-v0.3.1) (2026-06-17)
+
+
+### Features
+
+* first-class environments, per-env OAuth, consistent User-Agent, token timeout ([1f3ace2](https://github.com/godaddy/cli-engine/commit/1f3ace26a3f242aab90ad9e7ada2289a40857ec9))
+
 ## [0.3.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.2.2...cli-engine-v0.3.0) (2026-06-16)
 
 
