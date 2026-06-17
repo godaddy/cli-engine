@@ -514,6 +514,13 @@ pub struct Middleware {
     /// module registration via
     /// [`ModuleContext::config`](crate::module::ModuleContext::config).
     pub config: Arc<crate::config::ConfigFile>,
+    /// Optional first-class environment system.
+    ///
+    /// Set by [`CliConfig::with_environments`](crate::CliConfig::with_environments)
+    /// and cloned into each per-run middleware snapshot. Handlers resolve the
+    /// active environment through
+    /// [`CommandContext::environment`](crate::command::CommandContext::environment).
+    pub environments: Option<Arc<crate::environments::Environments>>,
 }
 
 /// Rendered result produced by middleware.
@@ -1052,5 +1059,24 @@ fn fallback_system(command_path: &str) -> &str {
 impl From<CliCoreError> for Value {
     fn from(error: CliCoreError) -> Self {
         Value::String(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod env_wire_tests {
+    use super::*;
+
+    #[test]
+    fn middleware_carries_optional_environments() {
+        use std::sync::Arc;
+        let mut mw = Middleware::new();
+        assert!(mw.environments.is_none());
+        mw.environments = Some(Arc::new(crate::environments::Environments::new("prod")));
+        assert_eq!(
+            mw.environments
+                .as_ref()
+                .map(|envs| envs.default_env().to_owned()),
+            Some("prod".to_owned())
+        );
     }
 }
