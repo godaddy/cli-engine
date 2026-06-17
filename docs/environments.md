@@ -102,7 +102,7 @@ Each field falls through to the next source when empty:
 
 Scopes follow the same pattern: the resolved environment's scopes when non-empty, otherwise the provider's base scopes.
 
-If `Environments::resolve` fails — because the name is unknown or the environments file cannot be parsed — the provider logs the error at `TRACE`/`DEBUG` level and falls back to the next source.
+If `Environments::resolve` fails — because the name is unknown or the environments file cannot be parsed — the provider logs the error at `DEBUG` level and falls back to the next source.
 No token or secret is included in the log; only the environment name and error message appear.
 
 ## Example
