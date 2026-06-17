@@ -254,6 +254,13 @@ pub struct CliConfig {
     /// to a binary that never opted in. Populate via [`CliConfig::with_argv0_alias`]
     /// and [`CliConfig::with_argv0_personality`].
     pub argv0_routes: BTreeMap<String, Argv0Route>,
+    /// Optional first-class environment system.
+    ///
+    /// Registered via [`CliConfig::with_environments`]. When set, the engine
+    /// registers a global `--env` flag, seeds the active environment into
+    /// middleware, and exposes it to handlers through
+    /// [`CommandContext::environment`](crate::command::CommandContext::environment).
+    pub environments: Option<crate::environments::Environments>,
 }
 
 impl CliConfig {
@@ -290,6 +297,22 @@ impl CliConfig {
     #[must_use]
     pub fn with_default_auth_provider(mut self, provider: impl Into<String>) -> Self {
         self.default_auth_provider = Some(provider.into());
+        self
+    }
+
+    /// Registers a first-class environment system.
+    ///
+    /// When set, [`Cli::new`] registers a global `--env` flag, seeds the active
+    /// environment into middleware (explicit `--env` > persisted active >
+    /// configured default), and exposes the resolved environment to handlers via
+    /// [`CommandContext::environment`](crate::command::CommandContext::environment).
+    ///
+    /// The provided [`Environments`](crate::environments::Environments) has this
+    /// config's `app_id` applied so its config file and active-env persistence
+    /// resolve to the application's config directory.
+    #[must_use]
+    pub fn with_environments(mut self, environments: crate::environments::Environments) -> Self {
+        self.environments = Some(environments.with_app_id(self.app_id.clone()));
         self
     }
 
@@ -2873,5 +2896,20 @@ mod user_agent_tests {
             "uatest/4.5.6"
         );
         crate::transport::set_default_user_agent("cli/dev");
+    }
+}
+
+#[cfg(test)]
+mod env_config_tests {
+    use super::*;
+
+    #[test]
+    fn with_environments_stores_and_app_id_is_injected() {
+        let cfg = CliConfig::new("gddy", "GoDaddy CLI", "gddy").with_environments(
+            crate::environments::Environments::new("prod").with_config_file(true),
+        );
+        let envs = cfg.environments.as_ref().expect("environments set");
+        // app_id is stamped from CliConfig so the file path resolves.
+        assert!(envs.config_file_path().is_some());
     }
 }
