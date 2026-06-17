@@ -9905,7 +9905,7 @@ async fn env_group_lists_gets_and_shows_info_for_active_environment() {
     use cli_engine::environments::{EnvironmentDef, Environments};
 
     let cli = Cli::new(
-        CliConfig::new("envcmds", "Env cmds", "envcmds").with_environments(
+        CliConfig::new("envcmds", "Env cmds", "envcmds").with_environments(Arc::new(
             Environments::new("prod")
                 .with_environment(
                     "prod",
@@ -9915,7 +9915,7 @@ async fn env_group_lists_gets_and_shows_info_for_active_environment() {
                     "ote",
                     EnvironmentDef::new().with_field("api_url", "https://o"),
                 ),
-        ),
+        )),
     );
 
     // env list returns both environments.

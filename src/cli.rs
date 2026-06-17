@@ -260,7 +260,7 @@ pub struct CliConfig {
     /// registers a global `--env` flag, seeds the active environment into
     /// middleware, and exposes it to handlers through
     /// [`CommandContext::environment`](crate::command::CommandContext::environment).
-    pub environments: Option<crate::environments::Environments>,
+    pub environments: Option<Arc<crate::environments::Environments>>,
 }
 
 impl CliConfig {
@@ -307,12 +307,33 @@ impl CliConfig {
     /// configured default), and exposes the resolved environment to handlers via
     /// [`CommandContext::environment`](crate::command::CommandContext::environment).
     ///
-    /// The provided [`Environments`](crate::environments::Environments) has this
-    /// config's `app_id` applied so its config file and active-env persistence
-    /// resolve to the application's config directory.
+    /// The [`Environments`](crate::environments::Environments) is stored as-is, so
+    /// the consumer is responsible for configuring it before wrapping it in an
+    /// `Arc`:
+    ///
+    /// - Call
+    ///   [`Environments::with_app_id`](crate::environments::Environments::with_app_id)
+    ///   with the **same** `app_id` passed to [`CliConfig::new`], so the config
+    ///   file and active-environment persistence resolve to the application's
+    ///   config directory. (An empty `app_id` makes
+    ///   [`Environments::config_file_path`](crate::environments::Environments::config_file_path)
+    ///   return `None`, silently disabling the `environments.toml` file layer.)
+    /// - Call
+    ///   [`Environments::with_config_file(true)`](crate::environments::Environments::with_config_file)
+    ///   if the application loads a user-editable `environments.toml`.
+    /// - **Share the same `Arc`** with any
+    ///   [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments):
+    ///   the provider's OAuth file layer and active-environment persistence must
+    ///   resolve against the identical, `app_id`-stamped instance the engine sees,
+    ///   or a file-defined environment (or a file override of a compiled
+    ///   environment's `client_id`) will be visible to `env info` yet invisible to
+    ///   the actual OAuth login.
     #[must_use]
-    pub fn with_environments(mut self, environments: crate::environments::Environments) -> Self {
-        self.environments = Some(environments.with_app_id(self.app_id.clone()));
+    pub fn with_environments(
+        mut self,
+        environments: Arc<crate::environments::Environments>,
+    ) -> Self {
+        self.environments = Some(environments);
         self
     }
 
@@ -781,11 +802,12 @@ impl Cli {
             .human_views
             .merge(&global_human_view_registry_snapshot());
         if let Some(environments) = &config.environments {
-            let environments = Arc::new(environments.clone());
             // Seed the sticky/default active environment now; the global `--env`
-            // flag overrides it per invocation in `run_with_depth`.
+            // flag overrides it per invocation in `run_with_depth`. The same
+            // `Arc` the consumer shared with any `PkceAuthProvider` is reused, so
+            // the file layer and active-env persistence resolve consistently.
             middleware.env = environments.effective_active(None, &middleware.config);
-            middleware.environments = Some(environments);
+            middleware.environments = Some(Arc::clone(environments));
         }
 
         let mut cli = Self {
@@ -2987,12 +3009,16 @@ mod env_config_tests {
     use super::*;
 
     #[test]
-    fn with_environments_stores_and_app_id_is_injected() {
-        let cfg = CliConfig::new("gddy", "GoDaddy CLI", "gddy").with_environments(
-            crate::environments::Environments::new("prod").with_config_file(true),
-        );
+    fn with_environments_stores_shared_arc_with_consumer_app_id() {
+        // The consumer sets app_id on the Environments before sharing the Arc;
+        // CliConfig stores it as-is, so the file path resolves only because the
+        // consumer stamped the matching app_id (not because the engine did).
+        let cfg = CliConfig::new("gddy", "GoDaddy CLI", "gddy").with_environments(Arc::new(
+            crate::environments::Environments::new("prod")
+                .with_app_id("gddy")
+                .with_config_file(true),
+        ));
         let envs = cfg.environments.as_ref().expect("environments set");
-        // app_id is stamped from CliConfig so the file path resolves.
         assert!(envs.config_file_path().is_some());
     }
 
@@ -3001,11 +3027,11 @@ mod env_config_tests {
         use crate::{CommandResult, CommandSpec, RuntimeCommandSpec};
         use serde_json::json;
         let mut cli = Cli::new(
-            CliConfig::new("envtest", "Env test", "envtest").with_environments(
+            CliConfig::new("envtest", "Env test", "envtest").with_environments(Arc::new(
                 crate::environments::Environments::new("prod")
                     .with_environment("prod", crate::environments::EnvironmentDef::new())
                     .with_environment("ote", crate::environments::EnvironmentDef::new()),
-            ),
+            )),
         );
         cli.add_command(RuntimeCommandSpec::new_with_context(
             CommandSpec::new("whichenv", "echo env").no_auth(true),
@@ -3026,10 +3052,10 @@ mod env_config_tests {
     #[tokio::test]
     async fn unknown_env_flag_produces_error_envelope() {
         let cli = Cli::new(
-            CliConfig::new("envtest2", "Env test", "envtest2").with_environments(
+            CliConfig::new("envtest2", "Env test", "envtest2").with_environments(Arc::new(
                 crate::environments::Environments::new("prod")
                     .with_environment("prod", crate::environments::EnvironmentDef::new()),
-            ),
+            )),
         );
         let out = cli.run(["envtest2", "tree", "--env", "nope"]).await;
         assert_ne!(out.exit_code, 0);

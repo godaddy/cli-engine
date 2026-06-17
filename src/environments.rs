@@ -139,8 +139,15 @@ impl Environments {
         self
     }
 
-    /// Sets the application id used to locate the config file. Set automatically
-    /// by `CliConfig::with_environments`; only call directly in tests.
+    /// Sets the application id used to locate the config file.
+    ///
+    /// The consumer must set this to the same `app_id` passed to
+    /// [`CliConfig::new`](crate::CliConfig::new) before sharing the
+    /// [`Environments`] with both
+    /// [`CliConfig::with_environments`](crate::CliConfig::with_environments) and
+    /// [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments),
+    /// or [`config_file_path`](Self::config_file_path) returns `None` and the
+    /// `environments.toml` file layer silently resolves empty.
     #[must_use]
     pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
         self.app_id = app_id.into();

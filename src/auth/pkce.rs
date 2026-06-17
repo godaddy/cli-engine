@@ -1149,6 +1149,7 @@ async fn parse_token_response(
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use serde_json::json;
 
@@ -1813,5 +1814,93 @@ mod tests {
             .expect("save");
         let cred = provider.status("dev").await.expect("status");
         assert_eq!(cred.token, "filetok");
+    }
+
+    /// Serializes env-var access and removes the vars on drop (matching the
+    /// convention in `src/environments.rs` tests). Vars persist process-wide, so
+    /// concurrent tests would otherwise see each other's writes.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard removing an env var on drop, even on panic, while ENV_LOCK held.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: the test holds ENV_LOCK for the guard's lifetime.
+            unsafe { std::env::remove_var(self.0) }
+        }
+    }
+
+    /// The fix: a provider wired to a shared `Arc<Environments>` whose
+    /// `environments.toml` file layer defines `prod` with a different `client_id`
+    /// resolves the FILE's client id. This proves the provider's file layer
+    /// resolves — the shared, app_id-stamped instance reaches the provider rather
+    /// than an unstamped copy whose file path is `None`.
+    #[test]
+    fn wired_provider_resolves_client_id_from_environments_file() {
+        use crate::environments::{EnvironmentDef, Environments};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("environments.toml");
+        std::fs::write(
+            &file,
+            r#"
+[prod]
+client_id = "file-prod-client"
+"#,
+        )
+        .expect("write environments.toml");
+
+        let environments = Arc::new(
+            Environments::new("prod")
+                .with_app_id("x")
+                .with_environment(
+                    "prod",
+                    EnvironmentDef::new().with_client_id("compiled-prod-client"),
+                )
+                .with_config_file_path_override(file),
+        );
+
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid"],
+        )
+        .with_environments(environments);
+
+        // The file overrides the compiled client id, which itself overrides the
+        // provider's base — proving the wired provider reads the file layer.
+        assert_eq!(provider.effective_client_id("prod"), "file-prod-client");
+    }
+
+    /// Legacy escape hatch: a NON-wired provider still honors the provider-prefixed
+    /// `<PREFIX>_OAUTH_CLIENT_ID` env var, and a wired provider whose resolved env
+    /// yields a non-empty client id takes precedence over that legacy var.
+    #[test]
+    fn legacy_oauth_client_id_env_var_overrides_base_but_yields_to_wired_env() {
+        use crate::environments::{EnvironmentDef, Environments};
+
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `<PREFIX>` = provider name uppercased, '-' -> '_'. Provider is "test".
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit.
+        unsafe { std::env::set_var("TEST_OAUTH_CLIENT_ID", "legacy-client") };
+        let _guard = EnvGuard("TEST_OAUTH_CLIENT_ID");
+
+        // Non-wired provider: the legacy var overrides the base client id.
+        let bare = test_provider();
+        assert_eq!(bare.effective_client_id("prod"), "legacy-client");
+
+        // Wired provider whose resolved env carries a non-empty client id: the
+        // resolved environment wins over the legacy var.
+        let environments = Arc::new(
+            Environments::new("prod")
+                .with_app_id("x")
+                .with_environment("prod", EnvironmentDef::new().with_client_id("env-client")),
+        );
+        let wired = test_provider().with_environments(environments);
+        assert_eq!(wired.effective_client_id("prod"), "env-client");
     }
 }

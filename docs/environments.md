@@ -41,6 +41,7 @@ api_url    = "https://api.ote.example.com"
 
 The recognized OAuth keys — `client_id`, `auth_url`, `token_url`, and `scopes` (an array of strings) — are parsed into the typed `OAuthConfig` slice of the resolved `Environment`.
 Every other string key is captured as a free-form field in `Environment::extra` (for example `api_url` above).
+The `extra` bag is printed verbatim by `env info`, so it must not hold secrets.
 
 ## Environment-Variable Overrides
 
@@ -87,6 +88,8 @@ The built-in commands are:
 ## Per-Environment OAuth via PkceAuthProvider
 
 `PkceAuthProvider::with_environments(Arc<Environments>)` wires the provider to the same `Environments` instance, making it the single source of truth for per-environment OAuth config.
+Build one `Arc<Environments>` — with `Environments::with_app_id(<same app_id as CliConfig>)` set on it — and share that same `Arc` between the provider and `CliConfig::with_environments`.
+If the two receive different instances, a file-defined environment (or a file override of a compiled environment's `client_id`) is visible to `env info` yet invisible to the actual OAuth login.
 
 When the provider resolves a credential for `env`, it calls `Environments::resolve(env)` and uses the resulting `OAuthConfig`.
 Each field falls through to the next source when empty:
@@ -110,8 +113,11 @@ use cli_engine::{
     environments::{EnvironmentDef, Environments},
 };
 
+// Build one Arc<Environments> and share it. `with_app_id` must match the
+// CliConfig app_id ("my-cli") so the environments.toml file path resolves.
 let environments = Arc::new(
     Environments::new("prod")
+        .with_app_id("my-cli")
         .with_environment(
             "prod",
             EnvironmentDef::new()
@@ -148,7 +154,9 @@ let cli = Cli::new(
         .with_build(BuildInfo::new(env!("CARGO_PKG_VERSION")))
         .with_default_auth_provider("primary")
         .with_auth_provider(provider)
-        .with_environments((*environments).clone()),
+        // The same Arc the provider was wired with — not a separate copy — so the
+        // file layer and active-env persistence resolve identically for both.
+        .with_environments(environments),
 );
 ```
 
