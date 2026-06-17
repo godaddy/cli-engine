@@ -11,7 +11,7 @@
 use serde_json::json;
 
 use crate::{
-    CommandResult, CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec,
+    CommandResult, CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec, Tier,
     error::CliCoreError,
 };
 
@@ -65,6 +65,8 @@ pub fn env_command_group() -> RuntimeGroupSpec {
         .with_command(RuntimeCommandSpec::new_with_context(
             CommandSpec::new("set", "Set and persist the active environment")
                 .no_auth(true)
+                .with_tier(Tier::Mutate)
+                .mutates(true)
                 .with_arg(clap::Arg::new("name").required(true)),
             async |ctx| {
                 let envs = ctx

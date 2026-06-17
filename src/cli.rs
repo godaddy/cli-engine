@@ -753,7 +753,7 @@ impl Cli {
                     .long("env")
                     .global(true)
                     .value_name("ENV")
-                    .help("Target environment"),
+                    .help("Override the active environment (see: env list)"),
             );
         }
         let intro = config
@@ -2002,7 +2002,7 @@ impl Cli {
         // sets `middleware.environments`); calling `matches.get_one("env")` for
         // an arg that was never registered panics in clap, which would break
         // every CLI that does not use environments.
-        let Some(environments) = middleware.environments.clone() else {
+        let Some(environments) = middleware.environments.as_ref() else {
             return Ok(());
         };
         if let Some(env) = matches.get_one::<String>("env") {

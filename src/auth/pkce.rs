@@ -415,10 +415,18 @@ impl PkceAuthProvider {
     /// any. Returns `None` when no resolver is wired, the env does not resolve,
     /// or the resolved environment carries no OAuth slice.
     fn resolved_oauth(&self, env: &str) -> Option<crate::environments::OAuthConfig> {
-        self.environments
-            .as_ref()
-            .and_then(|envs| envs.resolve(env).ok())
-            .and_then(|resolved| resolved.oauth)
+        let envs = self.environments.as_ref()?;
+        match envs.resolve(env) {
+            Ok(resolved) => resolved.oauth,
+            Err(e) => {
+                tracing::debug!(
+                    env,
+                    error = %e,
+                    "environment resolve failed; falling back to base OAuth config"
+                );
+                None
+            }
+        }
     }
 
     fn effective_client_id(&self, env: &str) -> String {

@@ -406,9 +406,7 @@ path.
 
 ## Environments
 
-Environment selection is application-defined. If an application needs an environment flag, it can
-register one through `CliConfig::register_flags` and store the parsed value on middleware through
-`CliConfig::apply_flags`. Auth providers receive the environment value during credential operations.
+`cli_engine` provides a first-class environment system with layered resolution, a config-file layer, env-var overrides, sticky active-env persistence, and per-environment OAuth for `PkceAuthProvider`; see [Environments](environments.md) for the full reference.
 
 ## Risk Tiers
 
