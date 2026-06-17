@@ -74,7 +74,12 @@ pub fn env_command_group() -> RuntimeGroupSpec {
                 .with_system("env")
                 .with_tier(Tier::Mutate)
                 .mutates(true)
-                .with_arg(clap::Arg::new("name").required(true)),
+                .with_arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Environment to make active (must be a known environment)"),
+                ),
             async |ctx| {
                 let envs = ctx
                     .middleware
