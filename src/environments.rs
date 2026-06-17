@@ -145,7 +145,7 @@ impl Environments {
     /// [`CliConfig::new`](crate::CliConfig::new) before sharing the
     /// [`Environments`] with both
     /// [`CliConfig::with_environments`](crate::CliConfig::with_environments) and
-    /// [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments),
+    /// `PkceAuthProvider::with_environments` (with the `pkce-auth` feature),
     /// or [`config_file_path`](Self::config_file_path) returns `None` and the
     /// `environments.toml` file layer silently resolves empty.
     #[must_use]

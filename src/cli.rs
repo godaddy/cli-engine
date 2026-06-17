@@ -321,8 +321,8 @@ impl CliConfig {
     /// - Call
     ///   [`Environments::with_config_file(true)`](crate::environments::Environments::with_config_file)
     ///   if the application loads a user-editable `environments.toml`.
-    /// - **Share the same `Arc`** with any
-    ///   [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments):
+    /// - **Share the same `Arc`** with any `PkceAuthProvider::with_environments`
+    ///   (available with the `pkce-auth` feature):
     ///   the provider's OAuth file layer and active-environment persistence must
     ///   resolve against the identical, `app_id`-stamped instance the engine sees,
     ///   or a file-defined environment (or a file override of a compiled
