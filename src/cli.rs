@@ -747,6 +747,15 @@ impl Cli {
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
         }
+        if config.environments.is_some() {
+            root = root.arg(
+                clap::Arg::new("env")
+                    .long("env")
+                    .global(true)
+                    .value_name("ENV")
+                    .help("Target environment"),
+            );
+        }
         let intro = config
             .long
             .as_deref()
@@ -771,6 +780,13 @@ impl Cli {
         middleware
             .human_views
             .merge(&global_human_view_registry_snapshot());
+        if let Some(environments) = &config.environments {
+            let environments = Arc::new(environments.clone());
+            // Seed the sticky/default active environment now; the global `--env`
+            // flag overrides it per invocation in `run_with_depth`.
+            middleware.env = environments.effective_active(None, &middleware.config);
+            middleware.environments = Some(environments);
+        }
 
         let mut cli = Self {
             config,
@@ -1365,6 +1381,11 @@ impl Cli {
         if let Err(err) = self.apply_config_flags(&matches, &mut middleware) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
+        // Validate and apply `--env` for built-in paths (help/tree/guide/group
+        // help) so they reflect the selected environment and reject unknowns.
+        if let Err(err) = self.apply_env_flag(&matches, &mut middleware) {
+            return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+        }
 
         let command_path = command_path_from_matches(&self.config.name, &matches);
         if command_path == "help" {
@@ -1445,6 +1466,11 @@ impl Cli {
         };
         apply_global_flags(&mut middleware, &flags, command_timeout);
         if let Err(err) = self.apply_config_flags(&matches, &mut middleware) {
+            return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+        }
+        // The global `--env` flag overrides the seeded active environment for
+        // this invocation; an unknown name surfaces as an error envelope.
+        if let Err(err) = self.apply_env_flag(&matches, &mut middleware) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
 
@@ -1925,6 +1951,23 @@ impl Cli {
     fn apply_config_flags(&self, matches: &ArgMatches, middleware: &mut Middleware) -> Result<()> {
         if let Some(apply_flags) = &self.apply_flags {
             apply_flags(matches, middleware)?;
+        }
+        Ok(())
+    }
+
+    /// Applies the global `--env` override to a per-run middleware snapshot.
+    ///
+    /// The flag is only registered when environments are configured, so when it
+    /// is present `middleware.environments` is set too. Validates the requested
+    /// name against the registered environments and updates `middleware.env`,
+    /// returning an error for an unknown environment.
+    fn apply_env_flag(&self, matches: &ArgMatches, middleware: &mut Middleware) -> Result<()> {
+        if let (Some(env), Some(environments)) = (
+            matches.get_one::<String>("env"),
+            middleware.environments.clone(),
+        ) {
+            environments.resolve(env)?;
+            middleware.env = env.clone();
         }
         Ok(())
     }
@@ -2911,5 +2954,45 @@ mod env_config_tests {
         let envs = cfg.environments.as_ref().expect("environments set");
         // app_id is stamped from CliConfig so the file path resolves.
         assert!(envs.config_file_path().is_some());
+    }
+
+    #[tokio::test]
+    async fn env_flag_overrides_default_and_reaches_middleware_env() {
+        use crate::{CommandResult, CommandSpec, RuntimeCommandSpec};
+        use serde_json::json;
+        let mut cli = Cli::new(
+            CliConfig::new("envtest", "Env test", "envtest").with_environments(
+                crate::environments::Environments::new("prod")
+                    .with_environment("prod", crate::environments::EnvironmentDef::new())
+                    .with_environment("ote", crate::environments::EnvironmentDef::new()),
+            ),
+        );
+        cli.add_command(RuntimeCommandSpec::new_with_context(
+            CommandSpec::new("whichenv", "echo env").no_auth(true),
+            async |ctx| {
+                Ok(CommandResult::new(
+                    json!({ "env": ctx.environment()?.name }),
+                ))
+            },
+        ));
+        let out = cli
+            .run(["envtest", "whichenv", "--env", "ote", "--output", "json"])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        assert!(out.rendered.contains("\"env\""));
+        assert!(out.rendered.contains("ote"));
+    }
+
+    #[tokio::test]
+    async fn unknown_env_flag_produces_error_envelope() {
+        let cli = Cli::new(
+            CliConfig::new("envtest2", "Env test", "envtest2").with_environments(
+                crate::environments::Environments::new("prod")
+                    .with_environment("prod", crate::environments::EnvironmentDef::new()),
+            ),
+        );
+        let out = cli.run(["envtest2", "tree", "--env", "nope"]).await;
+        assert_ne!(out.exit_code, 0);
+        assert!(out.rendered.contains("nope"));
     }
 }
