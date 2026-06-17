@@ -41,7 +41,15 @@
 //!     .with_auth_provider(provider);
 //! ```
 //!
-//! Override endpoints and client ID via environment variables:
+//! For per-environment OAuth config (different client id or endpoints per env),
+//! wire the provider to a shared
+//! [`Environments`](crate::environments::Environments) with
+//! [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments);
+//! the resolved environment then drives the OAuth config for the active `env`.
+//!
+//! Without a wired resolver (or for a field the resolved environment leaves
+//! empty), endpoints and client ID can still be overridden via environment
+//! variables:
 //! - `<PREFIX>_OAUTH_CLIENT_ID`
 //! - `<PREFIX>_OAUTH_AUTH_URL`
 //! - `<PREFIX>_OAUTH_TOKEN_URL`
@@ -127,74 +135,6 @@ impl StoredToken {
     }
 }
 
-/// Per-environment OAuth configuration for [`PkceAuthProvider`].
-///
-/// A single provider often serves several environments (for example `dev`,
-/// `test`, and `prod`) that each use a different OAuth client id and set of
-/// endpoints. Register one of these per environment with
-/// [`PkceAuthProvider::with_environment`]. Any field left unset falls back to
-/// the provider's base configuration, so an override can change just the client
-/// id while reusing the base endpoints, or vice versa.
-///
-/// # Examples
-///
-/// ```
-/// use cli_engine::auth::pkce::OAuthEnvironment;
-///
-/// let prod = OAuthEnvironment::new()
-///     .with_client_id("prod-client-id")
-///     .with_auth_url("https://api.example.com/v2/oauth2/authorize")
-///     .with_token_url("https://api.example.com/v2/oauth2/token");
-/// # let _ = prod;
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct OAuthEnvironment {
-    client_id: Option<String>,
-    auth_url: Option<String>,
-    token_url: Option<String>,
-    scopes: Option<Vec<String>>,
-}
-
-impl OAuthEnvironment {
-    /// Creates an empty override. Every field falls back to the provider's base
-    /// configuration until set.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Overrides the OAuth client id for this environment.
-    #[must_use]
-    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
-        self.client_id = Some(client_id.into());
-        self
-    }
-
-    /// Overrides the authorization endpoint for this environment.
-    #[must_use]
-    pub fn with_auth_url(mut self, auth_url: impl Into<String>) -> Self {
-        self.auth_url = Some(auth_url.into());
-        self
-    }
-
-    /// Overrides the token endpoint for this environment.
-    #[must_use]
-    pub fn with_token_url(mut self, token_url: impl Into<String>) -> Self {
-        self.token_url = Some(token_url.into());
-        self
-    }
-
-    /// Overrides the default scopes requested for this environment.
-    ///
-    /// Replaces the base scope set for this environment rather than extending
-    /// it. Leave unset to reuse the provider's base scopes.
-    #[must_use]
-    pub fn with_scopes(mut self, scopes: &[impl AsRef<str>]) -> Self {
-        self.scopes = Some(scopes.iter().map(|s| s.as_ref().to_owned()).collect());
-        self
-    }
-}
-
 /// OAuth 2.0 PKCE authentication provider.
 ///
 /// Stores one token per `(env, provider)` pair in the system keychain.
@@ -206,10 +146,10 @@ pub struct PkceAuthProvider {
     token_url: String,
     client_id: String,
     scopes: Vec<String>,
-    /// Per-environment configuration overrides keyed by env name. Looked up by
-    /// the `env` passed to [`AuthProvider::get_credential`]; unmatched envs use
-    /// the base `client_id`/`auth_url`/`token_url`/`scopes` above.
-    environments: HashMap<String, OAuthEnvironment>,
+    /// Optional environment resolver; when set, per-env OAuth config comes from
+    /// the resolved environment instead of the base config / legacy env override.
+    /// Looked up by the `env` passed to [`AuthProvider::get_credential`].
+    environments: Option<Arc<crate::environments::Environments>>,
     redirect_port: u16,
     redirect_uri: Option<String>,
     /// Timeout applied to token-endpoint requests (exchange and refresh).
@@ -266,7 +206,7 @@ impl PkceAuthProvider {
             token_url: token_url.into(),
             client_id: client_id.into(),
             scopes: scopes.iter().map(|s| s.as_ref().to_owned()).collect(),
-            environments: HashMap::new(),
+            environments: None,
             redirect_port: REDIRECT_PORT_DEFAULT,
             redirect_uri: None,
             token_timeout: TOKEN_REQUEST_TIMEOUT_DEFAULT,
@@ -284,25 +224,42 @@ impl PkceAuthProvider {
         }
     }
 
-    /// Registers per-environment OAuth configuration.
+    /// Sources per-environment OAuth config from a shared
+    /// [`Environments`](crate::environments::Environments).
     ///
-    /// Use this when one provider serves several environments that each use a
-    /// different OAuth client id or set of endpoints (for example `dev`,
-    /// `test`, and `prod`). The override is selected by the `env` argument
-    /// passed to [`AuthProvider::get_credential`]; environments without an
-    /// override use the base configuration supplied to
-    /// [`PkceAuthProvider::new`]. Registering the same env twice replaces the
-    /// earlier override.
+    /// Given an `env`, the provider resolves the environment and uses its
+    /// [`OAuthConfig`](crate::environments::OAuthConfig). This is the
+    /// single-source-of-truth path; prefer it over the base
+    /// `client_id`/`auth_url`/`token_url` when the consumer registers
+    /// environments via
+    /// [`CliConfig::with_environments`](crate::CliConfig::with_environments).
     ///
-    /// Provider-prefixed environment variables
-    /// (`<PREFIX>_OAUTH_CLIENT_ID`, `_AUTH_URL`, `_TOKEN_URL`) still take
-    /// precedence over both the per-environment override and the base
-    /// configuration, so operators retain a single escape hatch.
+    /// Precedence per OAuth field, for the resolved env: the resolved
+    /// environment's value when non-empty; otherwise the legacy
+    /// provider-prefixed env var (`<PREFIX>_OAUTH_CLIENT_ID`, `_AUTH_URL`,
+    /// `_TOKEN_URL`); otherwise the base configuration supplied to
+    /// [`PkceAuthProvider::new`]. An empty field on the resolved environment
+    /// falls through, so a partial environment can override only the client id
+    /// while inheriting the provider's base endpoints.
     ///
     /// # Examples
     ///
     /// ```
-    /// use cli_engine::auth::pkce::{OAuthEnvironment, PkceAuthProvider};
+    /// use std::sync::Arc;
+    /// use cli_engine::{
+    ///     auth::pkce::PkceAuthProvider,
+    ///     environments::{EnvironmentDef, Environments},
+    /// };
+    ///
+    /// let environments = Arc::new(
+    ///     Environments::new("prod").with_environment(
+    ///         "dev",
+    ///         EnvironmentDef::new()
+    ///             .with_client_id("dev-client-id")
+    ///             .with_auth_url("https://api.dev-godaddy.com/v2/oauth2/authorize")
+    ///             .with_token_url("https://api.dev-godaddy.com/v2/oauth2/token"),
+    ///     ),
+    /// );
     ///
     /// let provider = PkceAuthProvider::new(
     ///     "godaddy",
@@ -311,18 +268,15 @@ impl PkceAuthProvider {
     ///     "prod-client-id",
     ///     &["openid", "profile"],
     /// )
-    /// .with_environment(
-    ///     "dev",
-    ///     OAuthEnvironment::new()
-    ///         .with_client_id("dev-client-id")
-    ///         .with_auth_url("https://api.dev-godaddy.com/v2/oauth2/authorize")
-    ///         .with_token_url("https://api.dev-godaddy.com/v2/oauth2/token"),
-    /// );
+    /// .with_environments(environments);
     /// # let _ = provider;
     /// ```
     #[must_use]
-    pub fn with_environment(mut self, env: impl Into<String>, config: OAuthEnvironment) -> Self {
-        self.environments.insert(env.into(), config);
+    pub fn with_environments(
+        mut self,
+        environments: Arc<crate::environments::Environments>,
+    ) -> Self {
+        self.environments = Some(environments);
         self
     }
 
@@ -456,44 +410,56 @@ impl PkceAuthProvider {
         }
     }
 
-    /// Resolves a value for `env` with precedence: provider-prefixed env var
-    /// (operator escape hatch) > per-environment override > base configuration.
-    fn effective_value(
-        &self,
-        env: &str,
-        var_suffix: &str,
-        select: impl Fn(&OAuthEnvironment) -> Option<&String>,
-        base: &str,
-    ) -> String {
-        let key = format!("{}_OAUTH_{var_suffix}", self.env_prefix);
-        if let Ok(value) = std::env::var(&key) {
-            return value;
-        }
+    /// Resolves the [`OAuthConfig`](crate::environments::OAuthConfig) for `env`
+    /// from the wired [`Environments`](crate::environments::Environments), if
+    /// any. Returns `None` when no resolver is wired, the env does not resolve,
+    /// or the resolved environment carries no OAuth slice.
+    fn resolved_oauth(&self, env: &str) -> Option<crate::environments::OAuthConfig> {
         self.environments
-            .get(env)
-            .and_then(select)
-            .map_or_else(|| base.to_owned(), Clone::clone)
+            .as_ref()
+            .and_then(|envs| envs.resolve(env).ok())
+            .and_then(|resolved| resolved.oauth)
     }
 
     fn effective_client_id(&self, env: &str) -> String {
-        self.effective_value(env, "CLIENT_ID", |e| e.client_id.as_ref(), &self.client_id)
+        if let Some(oauth) = self.resolved_oauth(env)
+            && !oauth.client_id.is_empty()
+        {
+            return oauth.client_id;
+        }
+        let key = format!("{}_OAUTH_CLIENT_ID", self.env_prefix);
+        std::env::var(&key).unwrap_or_else(|_| self.client_id.clone())
     }
 
     fn effective_auth_url(&self, env: &str) -> String {
-        self.effective_value(env, "AUTH_URL", |e| e.auth_url.as_ref(), &self.auth_url)
+        if let Some(oauth) = self.resolved_oauth(env)
+            && !oauth.auth_url.is_empty()
+        {
+            return oauth.auth_url;
+        }
+        let key = format!("{}_OAUTH_AUTH_URL", self.env_prefix);
+        std::env::var(&key).unwrap_or_else(|_| self.auth_url.clone())
     }
 
     fn effective_token_url(&self, env: &str) -> String {
-        self.effective_value(env, "TOKEN_URL", |e| e.token_url.as_ref(), &self.token_url)
+        if let Some(oauth) = self.resolved_oauth(env)
+            && !oauth.token_url.is_empty()
+        {
+            return oauth.token_url;
+        }
+        let key = format!("{}_OAUTH_TOKEN_URL", self.env_prefix);
+        std::env::var(&key).unwrap_or_else(|_| self.token_url.clone())
     }
 
-    /// Default scopes for `env`: a per-environment scope override when set,
-    /// otherwise the provider's base scopes.
+    /// Default scopes for `env`: the resolved environment's scopes when
+    /// non-empty, otherwise the provider's base scopes.
     fn effective_scopes(&self, env: &str) -> Vec<String> {
-        self.environments
-            .get(env)
-            .and_then(|e| e.scopes.clone())
-            .unwrap_or_else(|| self.scopes.clone())
+        if let Some(oauth) = self.resolved_oauth(env)
+            && !oauth.scopes.is_empty()
+        {
+            return oauth.scopes;
+        }
+        self.scopes.clone()
     }
 
     fn effective_redirect_uri(&self) -> String {
@@ -1220,30 +1186,34 @@ mod tests {
         }
     }
 
-    fn perenv_provider() -> PkceAuthProvider {
-        PkceAuthProvider::new(
-            "perenv",
-            "https://base.example.com/auth",
-            "https://base.example.com/token",
-            "base-client",
-            &["openid"],
-        )
-        .with_environment(
-            "prod",
-            OAuthEnvironment::new()
-                .with_client_id("prod-client")
-                .with_auth_url("https://prod.example.com/auth")
-                .with_token_url("https://prod.example.com/token")
-                .with_scopes(&["openid", "prod.read"]),
+    fn envs_for_test() -> Arc<crate::environments::Environments> {
+        use crate::environments::{EnvironmentDef, Environments};
+        Arc::new(
+            Environments::new("prod").with_environment(
+                "prod",
+                EnvironmentDef::new()
+                    .with_client_id("prod-client")
+                    .with_auth_url("https://prod.example.com/auth")
+                    .with_token_url("https://prod.example.com/token")
+                    .with_scopes(&["openid", "prod.read"]),
+            ),
         )
     }
 
-    /// A per-environment override wins over the provider's base configuration
-    /// for the matching env, so one provider can serve dev/test/prod with
-    /// distinct OAuth clients and endpoints.
+    /// A provider wired to an [`Environments`](crate::environments::Environments)
+    /// resolver sources its per-env OAuth config (client id, endpoints, scopes)
+    /// from the resolved environment, making the environment the single source
+    /// of truth.
     #[test]
-    fn environment_override_selects_per_env_oauth_config() {
-        let provider = perenv_provider();
+    fn environment_wired_provider_sources_oauth_from_resolver() {
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid"],
+        )
+        .with_environments(envs_for_test());
         assert_eq!(provider.effective_client_id("prod"), "prod-client");
         assert_eq!(
             provider.effective_auth_url("prod"),
@@ -1259,21 +1229,22 @@ mod tests {
         );
     }
 
-    /// An environment with no registered override falls back to the base
-    /// client id, endpoints, and scopes.
+    /// A provider with no environment resolver falls back to the base client id,
+    /// endpoints, and scopes for every env.
     #[test]
-    fn unconfigured_environment_falls_back_to_base_config() {
-        let provider = perenv_provider();
-        assert_eq!(provider.effective_client_id("dev"), "base-client");
-        assert_eq!(
-            provider.effective_auth_url("dev"),
-            "https://base.example.com/auth"
+    fn non_wired_provider_uses_base_config() {
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid"],
         );
+        assert_eq!(provider.effective_client_id("anything"), "base-client");
         assert_eq!(
-            provider.effective_token_url("dev"),
-            "https://base.example.com/token"
+            provider.effective_scopes("anything"),
+            vec!["openid".to_owned()]
         );
-        assert_eq!(provider.effective_scopes("dev"), vec!["openid".to_owned()]);
     }
 
     /// OAuth token traffic must carry the engine's configured default
