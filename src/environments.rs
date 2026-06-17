@@ -11,6 +11,11 @@ use serde::Deserialize;
 use crate::{Result, error::CliCoreError};
 
 /// Standard OAuth slice of an environment, consumed by `PkceAuthProvider`.
+///
+/// `auth_url`, `token_url`, and `scopes` may be empty when a layer set only
+/// `client_id`. Consumers should treat empty endpoint strings as "fall back to
+/// the provider's default base endpoints".
+#[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OAuthConfig {
     /// OAuth client id.
@@ -24,6 +29,7 @@ pub struct OAuthConfig {
 }
 
 /// A fully-resolved environment.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Environment {
     /// Environment name (e.g. `prod`).
@@ -156,6 +162,9 @@ impl Environments {
     }
 
     /// Enumerable environment names (compiled-in + file-defined), sorted.
+    ///
+    /// File parse errors are silently swallowed; compiled names are still
+    /// returned. A fallible variant can be added later if needed.
     #[must_use]
     pub fn list(&self) -> Vec<String> {
         let mut names: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
@@ -168,17 +177,27 @@ impl Environments {
     /// Resolves `name` by merging compiled defaults, the config file,
     /// and `<ENV>_*` env-var overrides (later wins) into an [`Environment`].
     ///
+    /// When only `client_id` was set on the matching layer(s), the returned
+    /// [`Environment`]'s `oauth.auth_url` / `oauth.token_url` will be empty
+    /// strings. Consumers should treat empty endpoint strings as "fall back to
+    /// the provider's default base endpoints".
+    ///
     /// # Errors
     ///
     /// Returns an error when `name` is not known to any layer or when the
     /// environments file exists but cannot be read or parsed.
     pub fn resolve(&self, name: &str) -> Result<Environment> {
         let compiled = self.defs.get(name);
-        let file = self.file_def(name)?;
+        // Parse the file once; reuse for both membership check and merge.
+        let mut all_file_defs = self.file_defs()?;
+        let file = all_file_defs.remove(name);
         if compiled.is_none() && file.is_none() {
+            let mut known: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
+            known.extend(all_file_defs.into_keys());
+            let known_list: Vec<String> = known.into_iter().collect();
             return Err(CliCoreError::message(format!(
                 "unknown environment {name:?}; known: {}",
-                self.list().join(", ")
+                known_list.join(", ")
             )));
         }
         let mut merged = EnvironmentDef::default();
@@ -227,10 +246,6 @@ impl Environments {
         toml_edit::de::from_str::<BTreeMap<String, EnvironmentDef>>(&text).map_err(|err| {
             CliCoreError::message(format!("parsing environments file {path:?}: {err}"))
         })
-    }
-
-    fn file_def(&self, name: &str) -> Result<Option<EnvironmentDef>> {
-        Ok(self.file_defs()?.remove(name))
     }
 
     /// Config-file key under which the sticky active environment is stored.
@@ -291,6 +306,12 @@ fn merge_into(dst: &mut EnvironmentDef, src: &EnvironmentDef) {
 
 /// Applies `<ENV>_*` overrides: the three OAuth fields always, and any bag key
 /// already present in the merged record (keyed `<ENV>_<KEY>`).
+///
+/// The prefix is `name.to_uppercase().replace('-', "_")`, so environment names
+/// that differ only by `-` vs `_` map to the same prefix and will collide.
+///
+/// Scopes are intentionally not env-var overridable; set them via the
+/// compiled-in layer or the `environments.toml` file.
 fn apply_env_vars(name: &str, def: &mut EnvironmentDef) {
     let prefix = name.to_uppercase().replace('-', "_");
     if let Ok(v) = std::env::var(format!("{prefix}_OAUTH_CLIENT_ID")) {
@@ -314,16 +335,23 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) {
 /// Turns a fully-merged declaration into a resolved [`Environment`]. OAuth is
 /// present when a client id was set by any layer.
 fn finalize(name: &str, def: EnvironmentDef) -> Environment {
-    let oauth = def.client_id.as_ref().map(|client_id| OAuthConfig {
-        client_id: client_id.clone(),
-        auth_url: def.auth_url.clone().unwrap_or_default(),
-        token_url: def.token_url.clone().unwrap_or_default(),
-        scopes: def.scopes.clone().unwrap_or_default(),
+    let EnvironmentDef {
+        client_id,
+        auth_url,
+        token_url,
+        scopes,
+        extra,
+    } = def;
+    let oauth = client_id.map(|id| OAuthConfig {
+        client_id: id,
+        auth_url: auth_url.unwrap_or_default(),
+        token_url: token_url.unwrap_or_default(),
+        scopes: scopes.unwrap_or_default(),
     });
     Environment {
         name: name.to_owned(),
         oauth,
-        extra: def.extra,
+        extra,
     }
 }
 
@@ -334,6 +362,15 @@ mod tests {
 
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that removes an env var on drop, even if a test panics.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: test holds ENV_LOCK; clean up on any exit including panic.
+            unsafe { std::env::remove_var(self.0) }
+        }
+    }
 
     fn sample() -> Environments {
         Environments::new("prod")
@@ -396,25 +433,43 @@ mod tests {
     }
 
     #[test]
+    fn resolve_with_only_client_id_yields_partial_oauth() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = Environments::new("dev")
+            .with_environment("dev", EnvironmentDef::new().with_client_id("dev-only"));
+        let env = envs.resolve("dev").expect("dev resolves");
+        let oauth = env.oauth.expect("oauth present when client_id is set");
+        assert_eq!(oauth.client_id, "dev-only");
+        assert!(
+            oauth.auth_url.is_empty(),
+            "auth_url should be empty (fall back to provider default)"
+        );
+        assert!(
+            oauth.token_url.is_empty(),
+            "token_url should be empty (fall back to provider default)"
+        );
+        assert!(oauth.scopes.is_empty());
+    }
+
+    #[test]
     fn env_var_layer_overrides_oauth_and_known_bag_keys() {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: serialized by ENV_LOCK; removed below.
-        unsafe {
-            std::env::set_var("PROD_OAUTH_CLIENT_ID", "override-client");
-            std::env::set_var("PROD_API_URL", "https://api.override.example.com");
-        }
+        // SAFETY: serialized by ENV_LOCK; guards remove vars on any exit incl. panic.
+        unsafe { std::env::set_var("PROD_OAUTH_CLIENT_ID", "override-client") };
+        let _g1 = EnvGuard("PROD_OAUTH_CLIENT_ID");
+        unsafe { std::env::set_var("PROD_API_URL", "https://api.override.example.com") };
+        let _g2 = EnvGuard("PROD_API_URL");
+
         let env = sample().resolve("prod").expect("prod resolves");
         assert_eq!(env.oauth.unwrap().client_id, "override-client");
         assert_eq!(
             env.extra.get("api_url").map(String::as_str),
             Some("https://api.override.example.com")
         );
-        unsafe {
-            std::env::remove_var("PROD_OAUTH_CLIENT_ID");
-            std::env::remove_var("PROD_API_URL");
-        }
     }
 
     #[test]
