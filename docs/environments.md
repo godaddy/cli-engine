@@ -71,7 +71,8 @@ The active environment controls which environment is targeted when no `--env` fl
 2. The `environment.active` key in the per-application config file (persisted by `env set`).
 3. The default set in `Environments::new(default_env)`.
 
-`env set <name>` validates the name against all three layers and then writes `environment.active` to the config file.
+`env set <name>` validates that the environment is defined — by a compiled default or `environments.toml` — and then writes `environment.active` to the config file.
+Environment variables override fields of a defined environment but cannot define a new, selectable environment on their own, so a name known only through `<ENV>_*` variables is rejected.
 The next invocation (without `--env`) picks it up from layer 2.
 
 The built-in commands are:

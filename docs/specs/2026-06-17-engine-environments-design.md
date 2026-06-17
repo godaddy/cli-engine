@@ -109,8 +109,9 @@ parse the TOML file); `Environment` is the *resolved* result after merging layer
 
 Behavior:
 - Unknown env name → typed error listing enumerable env names.
-- `Environments::list()` returns compiled + file-defined envs. Env-var-only envs are
-  resolvable but not enumerable (matches `gddy`).
+- `Environments::list()` returns compiled + file-defined envs. Environment-variable
+  layers only *override fields* of an environment already defined by a compiled
+  default or the file; env vars alone do not define a new, selectable environment.
 - Merge is field-level: a file or env-var layer may override individual OAuth fields
   or individual bag keys without restating the whole record.
 
@@ -123,8 +124,8 @@ Behavior:
 - Auto-mounted **`env` command group** (mounted like the built-in `auth` group):
   - `env list` — enumerable environments, marking the active one.
   - `env get` — prints the active environment name.
-  - `env set <name>` — validates via `resolve()` (so env-var-only envs are accepted),
-    then persists to `ConfigFile`.
+  - `env set <name>` — validates via `resolve()` (the name must be defined by a
+    compiled default or `environments.toml`), then persists to `ConfigFile`.
   - `env info` — shows the resolved active environment (OAuth endpoints + bag),
     with secrets omitted.
 - The resolved active env name is written to the existing `Middleware.env`, so
@@ -179,7 +180,8 @@ Behavior:
 ## Testing
 
 - **Unit:** resolution precedence across all three layers; field-level merge;
-  unknown-env error contents; `list()` enumeration vs env-var-only resolvability;
+  unknown-env error contents; `list()` enumeration; env-var layers override fields of
+  a defined env (not define new ones);
   env-var keying (`<ENV>_OAUTH_*`, `<ENV>_<KEY>`); active-env persistence round-trip
   through `ConfigFile`; lazy resolution (no file/env access on `--schema`/`--dry-run`).
 - **Integration (`Cli::run`):** `env set`/`get`/`list`/`info`; `--env` overrides the
@@ -192,7 +194,9 @@ Behavior:
 
 ## Clarifications (decided; called out for implementation)
 
-- `env set` validates via `resolve()` so env-var-only environments can be selected.
+- `env set` validates via `resolve()`; the name must be defined by a compiled default
+  or `environments.toml`. Environment variables override fields of a defined env but
+  cannot define a new, selectable environment on their own.
 - Exact reconciliation of the `<ENV>_OAUTH_*` (environment layer) vs `<PROVIDER>_OAUTH_*`
   (legacy provider layer) precedence is: environment-wired providers use the environment
   layer exclusively; non-wired providers retain the legacy layer.
