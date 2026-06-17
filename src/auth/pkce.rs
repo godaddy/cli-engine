@@ -764,7 +764,6 @@ impl AuthProvider for PkceAuthProvider {
     async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
         let env = req.env;
         let required = &req.meta.scopes;
-        let defaults = self.effective_scopes(env);
 
         // Look for a usable token WITHOUT launching a flow, so we can pick the
         // scope set for a single login rather than authenticating twice (e.g.
@@ -776,14 +775,16 @@ impl AuthProvider for PkceAuthProvider {
             // server has no silent scope-expansion grant, so in non-interactive
             // contexts we fail fast rather than hang on the callback timeout.
             let granted = granted_scopes(&token);
-            match plan_step_up(&defaults, &granted, required, session_is_interactive()) {
+            match plan_step_up(&granted, required, session_is_interactive()) {
                 StepUp::Covered => return Ok(self.build_credential(env, &token)),
                 StepUp::MissingNonInteractive(missing) => {
                     return Err(missing_scope_error(env, &missing));
                 }
-                // Union (defaults ∪ already-granted ∪ required) so step-up never
-                // drops scopes acquired by an earlier login or step-up.
-                StepUp::Reauthenticate(union) => {
+                // Re-consent: resolve per-env defaults only now (off the
+                // cached-token hot path) and request defaults ∪ already-granted ∪
+                // required so step-up never drops previously-acquired scopes.
+                StepUp::Reauthenticate => {
+                    let union = union_scopes(&self.effective_scopes(env), &granted, required);
                     let token = self.reauthenticate(env, &union).await?;
                     ensure_granted(env, &token, required)?;
                     return Ok(self.build_credential(env, &token));
@@ -792,7 +793,7 @@ impl AuthProvider for PkceAuthProvider {
         }
 
         // No usable token: authenticate once, requesting defaults ∪ required.
-        let union = union_scopes(&defaults, &[], required);
+        let union = union_scopes(&self.effective_scopes(env), &[], required);
         let token = self.reauthenticate(env, &union).await?;
         ensure_granted(env, &token, required)?;
         Ok(self.build_credential(env, &token))
@@ -1044,19 +1045,22 @@ fn granted_scopes(token: &StoredToken) -> Vec<String> {
 enum StepUp {
     /// The token already covers every required scope.
     Covered,
-    /// Re-authenticate requesting this scope set (defaults ∪ granted ∪ required).
-    Reauthenticate(Vec<String>),
+    /// Re-authenticate (interactively) to acquire the missing scopes. The caller
+    /// builds the requested set (defaults ∪ granted ∪ required) only on this
+    /// path, so resolving per-env default scopes stays off the cached-token hot
+    /// path.
+    Reauthenticate,
     /// Scopes are missing but the session is non-interactive, so step-up cannot
     /// prompt; carries the missing scopes for the error message.
     MissingNonInteractive(Vec<String>),
 }
 
-fn plan_step_up(
-    defaults: &[String],
-    granted: &[String],
-    required: &[String],
-    interactive: bool,
-) -> StepUp {
+/// Decides the step-up action from what the token grants versus what the command
+/// requires. Deliberately does NOT take the per-env default scopes: the coverage
+/// decision needs only `granted`/`required`, so the caller can avoid resolving
+/// defaults (potential `environments.toml` I/O) when a cached token already
+/// covers the requirement.
+fn plan_step_up(granted: &[String], required: &[String], interactive: bool) -> StepUp {
     let missing: Vec<String> = required
         .iter()
         .filter(|scope| !granted.iter().any(|have| have == *scope))
@@ -1065,7 +1069,7 @@ fn plan_step_up(
     if missing.is_empty() {
         StepUp::Covered
     } else if interactive {
-        StepUp::Reauthenticate(union_scopes(defaults, granted, required))
+        StepUp::Reauthenticate
     } else {
         StepUp::MissingNonInteractive(missing)
     }
@@ -1383,30 +1387,22 @@ mod tests {
 
     #[test]
     fn plan_step_up_covers_reauths_and_fails_non_interactive() {
-        let defaults = vec!["base".to_owned()];
         let granted = vec!["base".to_owned(), "read".to_owned()];
         let read = vec!["read".to_owned()];
         let write = vec!["write".to_owned()];
 
-        // Already covered.
-        assert_eq!(
-            plan_step_up(&defaults, &granted, &read, true),
-            StepUp::Covered
-        );
-        // Missing + interactive → reauth requesting the union.
-        assert_eq!(
-            plan_step_up(&defaults, &granted, &write, true),
-            StepUp::Reauthenticate(vec![
-                "base".to_owned(),
-                "read".to_owned(),
-                "write".to_owned()
-            ])
-        );
+        // Already covered (decision needs only granted vs required).
+        assert_eq!(plan_step_up(&granted, &read, true), StepUp::Covered);
+        // Missing + interactive → reauth (the caller builds the union with
+        // per-env defaults only on this path).
+        assert_eq!(plan_step_up(&granted, &write, true), StepUp::Reauthenticate);
         // Missing + non-interactive → fail fast, carrying the missing scopes.
         assert_eq!(
-            plan_step_up(&defaults, &granted, &write, false),
+            plan_step_up(&granted, &write, false),
             StepUp::MissingNonInteractive(vec!["write".to_owned()])
         );
+        // The union itself (defaults ∪ granted ∪ required) is covered by
+        // union_scopes' own test.
     }
 
     /// An opaque cached token whose recorded scopes cover the requirement is
