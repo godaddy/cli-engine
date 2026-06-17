@@ -28,7 +28,12 @@ pub fn set_default_user_agent(user_agent: impl Into<String>) {
     }
 }
 
-fn default_user_agent() -> String {
+/// Returns the process-wide default user-agent set via
+/// [`set_default_user_agent`], or the builtin default when none was set.
+///
+/// Used by [`HttpClientBuilder`] and by the engine's OAuth token requests so
+/// that all outbound traffic carries the same user-agent.
+pub(crate) fn default_user_agent() -> String {
     DEFAULT_USER_AGENT
         .get_or_init(|| RwLock::new(BUILTIN_DEFAULT_USER_AGENT.to_owned()))
         .read()
@@ -37,6 +42,12 @@ fn default_user_agent() -> String {
             |value| value.clone(),
         )
 }
+
+/// Serializes unit tests that mutate the process-wide default user-agent so
+/// they cannot observe one another's writes. Integration tests in
+/// `tests/foundation.rs` run in a separate binary and use their own lock.
+#[cfg(test)]
+pub(crate) static UA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(serde::Deserialize)]
 struct GraphQlError {

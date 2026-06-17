@@ -259,6 +259,10 @@ impl ClientCredentialsInjector {
                     reqwest::header::CONTENT_TYPE,
                     "application/x-www-form-urlencoded",
                 )
+                .header(
+                    reqwest::header::USER_AGENT,
+                    crate::transport::client::default_user_agent(),
+                )
                 .form(&form)
                 .send(),
         )

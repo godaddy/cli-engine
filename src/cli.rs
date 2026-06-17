@@ -210,6 +210,10 @@ pub struct CliConfig {
     pub views: Vec<HumanViewDef>,
     /// Providers registered before command execution starts.
     pub auth_providers: Vec<Arc<dyn AuthProvider>>,
+    /// Optional override for the process-wide outbound User-Agent. When unset,
+    /// the engine derives `name/version` from this config. See
+    /// [`CliConfig::user_agent_string`].
+    pub user_agent: Option<String>,
     /// Optional authorization gatekeeper injected into middleware.
     pub authz: Option<Arc<dyn Authorizer>>,
     /// Optional audit recorder injected into middleware.
@@ -287,6 +291,38 @@ impl CliConfig {
     pub fn with_default_auth_provider(mut self, provider: impl Into<String>) -> Self {
         self.default_auth_provider = Some(provider.into());
         self
+    }
+
+    /// Overrides the outbound User-Agent string for all HTTP traffic.
+    ///
+    /// When unset, the engine derives `name/version` from this config (see
+    /// [`CliConfig::user_agent_string`]). Set this when the upstream APIs expect
+    /// a specific product token. The resolved value is applied process-wide on
+    /// execution via [`crate::transport::set_default_user_agent`], so it reaches
+    /// both command [`HttpClient`](crate::transport::HttpClient)s and the
+    /// engine's own OAuth token requests.
+    #[must_use]
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Returns the outbound User-Agent string the CLI presents on HTTP requests.
+    ///
+    /// Resolution order:
+    /// 1. an explicit [`with_user_agent`](Self::with_user_agent) override;
+    /// 2. otherwise `name/version` (for example `gdx/1.2.3`);
+    /// 3. otherwise just `name` when no build version is set.
+    #[must_use]
+    pub fn user_agent_string(&self) -> String {
+        if let Some(user_agent) = &self.user_agent {
+            return user_agent.clone();
+        }
+        if self.build.version.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}/{}", self.name, self.build.version)
+        }
     }
 
     /// Adds one domain module.
@@ -845,6 +881,7 @@ impl Cli {
         E: Write,
         Shutdown: Future<Output = ()>,
     {
+        self.install_default_user_agent();
         let output = run_until_signal(self.run(args), shutdown).await;
         if output.exit_code == 130
             && output.rendered == "command interrupted\n"
@@ -858,6 +895,17 @@ impl Cli {
             stderr.write_all(output.rendered.as_bytes())?;
         }
         Ok(process_exit_code(output.exit_code))
+    }
+
+    /// Publishes the configured outbound User-Agent process-wide so that
+    /// command [`HttpClient`](crate::transport::HttpClient)s and the engine's
+    /// own OAuth token requests share it.
+    ///
+    /// Called from the execution entrypoints rather than [`Cli::new`] so that
+    /// merely constructing a `Cli` (as tests do in bulk) does not mutate global
+    /// state. See [`CliConfig::user_agent_string`] for resolution order.
+    fn install_default_user_agent(&self) {
+        crate::transport::set_default_user_agent(self.config.user_agent_string());
     }
 
     /// Registers an auth provider after construction.
@@ -2782,5 +2830,48 @@ async fn run_streaming_command(
             exit_code: exit_code_for_error(&err),
             rendered: render_cli_error(middleware, &err, middleware.app_id.as_str()).rendered,
         }),
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    #[test]
+    fn user_agent_string_derives_name_and_version_by_default() {
+        let config =
+            CliConfig::new("gdx", "GoDaddy CLI", "gdx").with_build(BuildInfo::new("1.2.3"));
+        assert_eq!(config.user_agent_string(), "gdx/1.2.3");
+    }
+
+    #[test]
+    fn user_agent_string_prefers_explicit_override() {
+        let config = CliConfig::new("gdx", "GoDaddy CLI", "gdx")
+            .with_build(BuildInfo::new("1.2.3"))
+            .with_user_agent("gdx-cli/9.9 (custom)");
+        assert_eq!(config.user_agent_string(), "gdx-cli/9.9 (custom)");
+    }
+
+    #[test]
+    fn user_agent_string_omits_version_when_absent() {
+        let config = CliConfig::new("gdx", "GoDaddy CLI", "gdx");
+        assert_eq!(config.user_agent_string(), "gdx");
+    }
+
+    #[test]
+    fn install_default_user_agent_publishes_config_value() {
+        let _guard = crate::transport::client::UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::transport::set_default_user_agent("cli/dev");
+        let cli = Cli::new(
+            CliConfig::new("uatest", "UA test", "uatest").with_build(BuildInfo::new("4.5.6")),
+        );
+        cli.install_default_user_agent();
+        assert_eq!(
+            crate::transport::client::default_user_agent(),
+            "uatest/4.5.6"
+        );
+        crate::transport::set_default_user_agent("cli/dev");
     }
 }

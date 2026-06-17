@@ -442,6 +442,9 @@ async fn cli_runtime_root_help_includes_find_commands_without_modules() {
 
 #[tokio::test]
 async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
+    // execute_from publishes the config-derived User-Agent process-wide, so this
+    // test shares the lock with the user-agent tests and restores the default.
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
@@ -483,10 +486,14 @@ async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
     assert!(stdout.is_empty());
     let rendered = String::from_utf8(stderr).expect("utf8");
     assert!(rendered.contains("missing"));
+    transport::set_default_user_agent("cli/dev");
 }
 
 #[tokio::test]
 async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
+    // execute_from_until_signal publishes the config-derived User-Agent
+    // process-wide; share the lock and restore the default like the tests above.
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
     let shutdown_count = Arc::new(AtomicUsize::new(0));
     let shutdown_for_closure = Arc::clone(&shutdown_count);
     let mut cli = Cli::new(CliConfig {
@@ -520,6 +527,7 @@ async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
         "command interrupted\n"
     );
     assert_eq!(shutdown_count.load(Ordering::SeqCst), 1);
+    transport::set_default_user_agent("cli/dev");
 }
 
 #[tokio::test]
@@ -4936,12 +4944,17 @@ async fn provider_bearer_injector_empty_token_does_not_short_circuit_cache_prese
 
 #[tokio::test]
 async fn client_credentials_injector_requests_and_caches_bearer_token() {
+    // The injector tags its token request with the process default User-Agent;
+    // hold the user-agent lock and pin the default so the assertion is stable.
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
+    transport::set_default_user_agent("cli/dev");
     let token_requests = Arc::new(AtomicUsize::new(0));
     let token_requests_for_server = Arc::clone(&token_requests);
     let server = TestServer::sequence(vec![Box::new(move |request| {
         token_requests_for_server.fetch_add(1, Ordering::SeqCst);
         assert!(request.contains("POST /token HTTP/1.1"));
         assert!(request.contains("content-type: application/x-www-form-urlencoded"));
+        assert!(request.contains("user-agent: cli/dev"));
         assert!(request.contains("grant_type=client_credentials"));
         assert!(request.contains("client_id=client"));
         assert!(request.contains("client_secret=secret"));
@@ -5504,6 +5517,7 @@ async fn http_client_do_raw_sends_method_content_type_body_and_decodes_json() {
 
 #[tokio::test]
 async fn http_client_do_raw_optional_none_body_matches_legacy_nil_reader() {
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
     let server = TestServer::new(|request| {
         assert!(request.contains("OPTIONS /raw HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));
@@ -5646,6 +5660,7 @@ async fn http_client_etag_if_match_and_multipart_without_response_skip_success_d
 
 #[tokio::test]
 async fn http_client_post_raw_none_body_omits_json_content_type_preserves_legacy() {
+    let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
     let server = TestServer::new(|request| {
         assert!(request.contains("POST /raw HTTP/1.1"));
         assert!(request.contains("user-agent: cli/dev"));

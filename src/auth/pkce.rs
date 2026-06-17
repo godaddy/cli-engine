@@ -77,6 +77,9 @@ use crate::{
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
+/// Default timeout applied to OAuth token-endpoint requests (exchange/refresh)
+/// so a stalled token server cannot hang the CLI indefinitely.
+const TOKEN_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 
 /// Stored token with expiry tracking.
 ///
@@ -124,6 +127,74 @@ impl StoredToken {
     }
 }
 
+/// Per-environment OAuth configuration for [`PkceAuthProvider`].
+///
+/// A single provider often serves several environments (for example `dev`,
+/// `test`, and `prod`) that each use a different OAuth client id and set of
+/// endpoints. Register one of these per environment with
+/// [`PkceAuthProvider::with_environment`]. Any field left unset falls back to
+/// the provider's base configuration, so an override can change just the client
+/// id while reusing the base endpoints, or vice versa.
+///
+/// # Examples
+///
+/// ```
+/// use cli_engine::auth::pkce::OAuthEnvironment;
+///
+/// let prod = OAuthEnvironment::new()
+///     .with_client_id("prod-client-id")
+///     .with_auth_url("https://api.example.com/v2/oauth2/authorize")
+///     .with_token_url("https://api.example.com/v2/oauth2/token");
+/// # let _ = prod;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct OAuthEnvironment {
+    client_id: Option<String>,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    scopes: Option<Vec<String>>,
+}
+
+impl OAuthEnvironment {
+    /// Creates an empty override. Every field falls back to the provider's base
+    /// configuration until set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Overrides the OAuth client id for this environment.
+    #[must_use]
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
+    }
+
+    /// Overrides the authorization endpoint for this environment.
+    #[must_use]
+    pub fn with_auth_url(mut self, auth_url: impl Into<String>) -> Self {
+        self.auth_url = Some(auth_url.into());
+        self
+    }
+
+    /// Overrides the token endpoint for this environment.
+    #[must_use]
+    pub fn with_token_url(mut self, token_url: impl Into<String>) -> Self {
+        self.token_url = Some(token_url.into());
+        self
+    }
+
+    /// Overrides the default scopes requested for this environment.
+    ///
+    /// Replaces the base scope set for this environment rather than extending
+    /// it. Leave unset to reuse the provider's base scopes.
+    #[must_use]
+    pub fn with_scopes(mut self, scopes: &[impl AsRef<str>]) -> Self {
+        self.scopes = Some(scopes.iter().map(|s| s.as_ref().to_owned()).collect());
+        self
+    }
+}
+
 /// OAuth 2.0 PKCE authentication provider.
 ///
 /// Stores one token per `(env, provider)` pair in the system keychain.
@@ -135,8 +206,20 @@ pub struct PkceAuthProvider {
     token_url: String,
     client_id: String,
     scopes: Vec<String>,
+    /// Per-environment configuration overrides keyed by env name. Looked up by
+    /// the `env` passed to [`AuthProvider::get_credential`]; unmatched envs use
+    /// the base `client_id`/`auth_url`/`token_url`/`scopes` above.
+    environments: HashMap<String, OAuthEnvironment>,
     redirect_port: u16,
     redirect_uri: Option<String>,
+    /// Timeout applied to token-endpoint requests (exchange and refresh).
+    token_timeout: Duration,
+    /// Shared HTTP client for token-endpoint traffic, built once and reused by
+    /// exchange and refresh so connections and TLS configuration are pooled
+    /// rather than rebuilt per request. The user-agent and timeout are applied
+    /// per request (not baked into the client) so they reflect the value
+    /// published at execution time, not at provider construction.
+    client: reqwest::Client,
     app_id: String,
     env_prefix: String,
     /// Explicit storage backend injected via [`PkceAuthProvider::with_storage`].
@@ -183,8 +266,11 @@ impl PkceAuthProvider {
             token_url: token_url.into(),
             client_id: client_id.into(),
             scopes: scopes.iter().map(|s| s.as_ref().to_owned()).collect(),
+            environments: HashMap::new(),
             redirect_port: REDIRECT_PORT_DEFAULT,
             redirect_uri: None,
+            token_timeout: TOKEN_REQUEST_TIMEOUT_DEFAULT,
+            client: reqwest::Client::new(),
             app_id: String::new(),
             env_prefix,
             storage_override: None,
@@ -198,10 +284,63 @@ impl PkceAuthProvider {
         }
     }
 
+    /// Registers per-environment OAuth configuration.
+    ///
+    /// Use this when one provider serves several environments that each use a
+    /// different OAuth client id or set of endpoints (for example `dev`,
+    /// `test`, and `prod`). The override is selected by the `env` argument
+    /// passed to [`AuthProvider::get_credential`]; environments without an
+    /// override use the base configuration supplied to
+    /// [`PkceAuthProvider::new`]. Registering the same env twice replaces the
+    /// earlier override.
+    ///
+    /// Provider-prefixed environment variables
+    /// (`<PREFIX>_OAUTH_CLIENT_ID`, `_AUTH_URL`, `_TOKEN_URL`) still take
+    /// precedence over both the per-environment override and the base
+    /// configuration, so operators retain a single escape hatch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cli_engine::auth::pkce::{OAuthEnvironment, PkceAuthProvider};
+    ///
+    /// let provider = PkceAuthProvider::new(
+    ///     "godaddy",
+    ///     "https://api.godaddy.com/v2/oauth2/authorize",
+    ///     "https://api.godaddy.com/v2/oauth2/token",
+    ///     "prod-client-id",
+    ///     &["openid", "profile"],
+    /// )
+    /// .with_environment(
+    ///     "dev",
+    ///     OAuthEnvironment::new()
+    ///         .with_client_id("dev-client-id")
+    ///         .with_auth_url("https://api.dev-godaddy.com/v2/oauth2/authorize")
+    ///         .with_token_url("https://api.dev-godaddy.com/v2/oauth2/token"),
+    /// );
+    /// # let _ = provider;
+    /// ```
+    #[must_use]
+    pub fn with_environment(mut self, env: impl Into<String>, config: OAuthEnvironment) -> Self {
+        self.environments.insert(env.into(), config);
+        self
+    }
+
     /// Sets the local redirect server port (default: 7443).
     #[must_use]
     pub fn with_redirect_port(mut self, port: u16) -> Self {
         self.redirect_port = port;
+        self
+    }
+
+    /// Sets the timeout applied to token-endpoint requests (authorization-code
+    /// exchange and refresh).
+    ///
+    /// Defaults to 30 seconds. This bounds only the HTTP token requests; the
+    /// interactive browser/callback wait has its own separate timeout.
+    #[must_use]
+    pub fn with_token_timeout(mut self, timeout: Duration) -> Self {
+        self.token_timeout = timeout;
         self
     }
 
@@ -317,19 +456,44 @@ impl PkceAuthProvider {
         }
     }
 
-    fn effective_client_id(&self) -> String {
-        let key = format!("{}_OAUTH_CLIENT_ID", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.client_id.clone())
+    /// Resolves a value for `env` with precedence: provider-prefixed env var
+    /// (operator escape hatch) > per-environment override > base configuration.
+    fn effective_value(
+        &self,
+        env: &str,
+        var_suffix: &str,
+        select: impl Fn(&OAuthEnvironment) -> Option<&String>,
+        base: &str,
+    ) -> String {
+        let key = format!("{}_OAUTH_{var_suffix}", self.env_prefix);
+        if let Ok(value) = std::env::var(&key) {
+            return value;
+        }
+        self.environments
+            .get(env)
+            .and_then(select)
+            .map_or_else(|| base.to_owned(), Clone::clone)
     }
 
-    fn effective_auth_url(&self) -> String {
-        let key = format!("{}_OAUTH_AUTH_URL", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.auth_url.clone())
+    fn effective_client_id(&self, env: &str) -> String {
+        self.effective_value(env, "CLIENT_ID", |e| e.client_id.as_ref(), &self.client_id)
     }
 
-    fn effective_token_url(&self) -> String {
-        let key = format!("{}_OAUTH_TOKEN_URL", self.env_prefix);
-        std::env::var(&key).unwrap_or_else(|_| self.token_url.clone())
+    fn effective_auth_url(&self, env: &str) -> String {
+        self.effective_value(env, "AUTH_URL", |e| e.auth_url.as_ref(), &self.auth_url)
+    }
+
+    fn effective_token_url(&self, env: &str) -> String {
+        self.effective_value(env, "TOKEN_URL", |e| e.token_url.as_ref(), &self.token_url)
+    }
+
+    /// Default scopes for `env`: a per-environment scope override when set,
+    /// otherwise the provider's base scopes.
+    fn effective_scopes(&self, env: &str) -> Vec<String> {
+        self.environments
+            .get(env)
+            .and_then(|e| e.scopes.clone())
+            .unwrap_or_else(|| self.scopes.clone())
     }
 
     fn effective_redirect_uri(&self) -> String {
@@ -424,7 +588,8 @@ impl PkceAuthProvider {
         if let Some(token) = self.existing_token(env).await? {
             return Ok(token);
         }
-        self.reauthenticate(env, &self.scopes).await
+        let scopes = self.effective_scopes(env);
+        self.reauthenticate(env, &scopes).await
     }
 
     /// Returns a usable token from the in-memory cache, keychain, or a refresh —
@@ -442,7 +607,7 @@ impl PkceAuthProvider {
             }
             if let Some(refresh_token) = token.refresh_token.as_deref()
                 && let Ok(mut refreshed) = self
-                    .refresh_access_token(refresh_token, &token.scopes)
+                    .refresh_access_token(env, refresh_token, &token.scopes)
                     .await
             {
                 if refreshed.refresh_token.is_none() {
@@ -459,7 +624,7 @@ impl PkceAuthProvider {
     /// Runs a fresh interactive PKCE flow requesting exactly `scopes`, replacing
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
-        let token = self.run_pkce_flow_with(scopes).await?;
+        let token = self.run_pkce_flow_with(env, scopes).await?;
         // Persist first — the keychain write overwrites the existing entry for
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails
@@ -471,11 +636,11 @@ impl PkceAuthProvider {
 
     /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
     /// default login and for scope step-up, which requests a wider union).
-    async fn run_pkce_flow_with(&self, scopes: &[String]) -> Result<StoredToken> {
+    async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
-        let client_id = self.effective_client_id();
-        let auth_url = self.effective_auth_url();
+        let client_id = self.effective_client_id(env);
+        let auth_url = self.effective_auth_url(env);
         let redirect_uri = self.effective_redirect_uri();
         let scope = scopes.join(" ");
 
@@ -507,19 +672,39 @@ impl PkceAuthProvider {
 
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
-        self.exchange_code_for_token(&code, &code_verifier, scopes)
+        self.exchange_code_for_token(env, &code, &code_verifier, scopes)
             .await
+    }
+
+    /// Builds a POST to an OAuth token endpoint on the provider's shared client.
+    ///
+    /// Token traffic does not go through [`HttpClient`](crate::transport::HttpClient)
+    /// — that client is built for authenticated, JSON-bodied backend calls,
+    /// whereas the token endpoint is unauthenticated and form-encoded. The
+    /// user-agent and timeout are attached here per request (read at call time)
+    /// so every outbound call, including credential acquisition and refresh, is
+    /// attributed consistently and bounded.
+    fn token_request(&self, token_url: &str, params: &[(&str, &str)]) -> reqwest::RequestBuilder {
+        self.client
+            .post(token_url)
+            .header(
+                reqwest::header::USER_AGENT,
+                crate::transport::client::default_user_agent(),
+            )
+            .timeout(self.token_timeout)
+            .form(params)
     }
 
     async fn exchange_code_for_token(
         &self,
+        env: &str,
         code: &str,
         code_verifier: &str,
         requested_scopes: &[String],
     ) -> Result<StoredToken> {
         let redirect_uri = self.effective_redirect_uri();
-        let client_id = self.effective_client_id();
-        let token_url = self.effective_token_url();
+        let client_id = self.effective_client_id(env);
+        let token_url = self.effective_token_url(env);
 
         let params = [
             ("grant_type", "authorization_code"),
@@ -528,9 +713,8 @@ impl PkceAuthProvider {
             ("code", code),
             ("code_verifier", code_verifier),
         ];
-        let response = reqwest::Client::new()
-            .post(&token_url)
-            .form(&params)
+        let response = self
+            .token_request(&token_url, &params)
             .send()
             .await
             .map_err(|err| CliCoreError::message(format!("token request failed: {err}")))?;
@@ -548,19 +732,19 @@ impl PkceAuthProvider {
 
     async fn refresh_access_token(
         &self,
+        env: &str,
         refresh_token: &str,
         prior_scopes: &[String],
     ) -> Result<StoredToken> {
-        let client_id = self.effective_client_id();
-        let token_url = self.effective_token_url();
+        let client_id = self.effective_client_id(env);
+        let token_url = self.effective_token_url(env);
         let params = [
             ("grant_type", "refresh_token"),
             ("client_id", &client_id),
             ("refresh_token", refresh_token),
         ];
-        let response = reqwest::Client::new()
-            .post(&token_url)
-            .form(&params)
+        let response = self
+            .token_request(&token_url, &params)
             .send()
             .await
             .map_err(|err| CliCoreError::message(format!("token refresh failed: {err}")))?;
@@ -591,6 +775,7 @@ impl AuthProvider for PkceAuthProvider {
     async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
         let env = req.env;
         let required = &req.meta.scopes;
+        let defaults = self.effective_scopes(env);
 
         // Look for a usable token WITHOUT launching a flow, so we can pick the
         // scope set for a single login rather than authenticating twice (e.g.
@@ -602,7 +787,7 @@ impl AuthProvider for PkceAuthProvider {
             // server has no silent scope-expansion grant, so in non-interactive
             // contexts we fail fast rather than hang on the callback timeout.
             let granted = granted_scopes(&token);
-            match plan_step_up(&self.scopes, &granted, required, session_is_interactive()) {
+            match plan_step_up(&defaults, &granted, required, session_is_interactive()) {
                 StepUp::Covered => return Ok(self.build_credential(env, &token)),
                 StepUp::MissingNonInteractive(missing) => {
                     return Err(missing_scope_error(env, &missing));
@@ -618,7 +803,7 @@ impl AuthProvider for PkceAuthProvider {
         }
 
         // No usable token: authenticate once, requesting defaults ∪ required.
-        let union = union_scopes(&self.scopes, &[], required);
+        let union = union_scopes(&defaults, &[], required);
         let token = self.reauthenticate(env, &union).await?;
         ensure_granted(env, &token, required)?;
         Ok(self.build_credential(env, &token))
@@ -1033,6 +1218,102 @@ mod tests {
             refresh_token: None,
             scopes: Vec::new(),
         }
+    }
+
+    fn perenv_provider() -> PkceAuthProvider {
+        PkceAuthProvider::new(
+            "perenv",
+            "https://base.example.com/auth",
+            "https://base.example.com/token",
+            "base-client",
+            &["openid"],
+        )
+        .with_environment(
+            "prod",
+            OAuthEnvironment::new()
+                .with_client_id("prod-client")
+                .with_auth_url("https://prod.example.com/auth")
+                .with_token_url("https://prod.example.com/token")
+                .with_scopes(&["openid", "prod.read"]),
+        )
+    }
+
+    /// A per-environment override wins over the provider's base configuration
+    /// for the matching env, so one provider can serve dev/test/prod with
+    /// distinct OAuth clients and endpoints.
+    #[test]
+    fn environment_override_selects_per_env_oauth_config() {
+        let provider = perenv_provider();
+        assert_eq!(provider.effective_client_id("prod"), "prod-client");
+        assert_eq!(
+            provider.effective_auth_url("prod"),
+            "https://prod.example.com/auth"
+        );
+        assert_eq!(
+            provider.effective_token_url("prod"),
+            "https://prod.example.com/token"
+        );
+        assert_eq!(
+            provider.effective_scopes("prod"),
+            vec!["openid".to_owned(), "prod.read".to_owned()]
+        );
+    }
+
+    /// An environment with no registered override falls back to the base
+    /// client id, endpoints, and scopes.
+    #[test]
+    fn unconfigured_environment_falls_back_to_base_config() {
+        let provider = perenv_provider();
+        assert_eq!(provider.effective_client_id("dev"), "base-client");
+        assert_eq!(
+            provider.effective_auth_url("dev"),
+            "https://base.example.com/auth"
+        );
+        assert_eq!(
+            provider.effective_token_url("dev"),
+            "https://base.example.com/token"
+        );
+        assert_eq!(provider.effective_scopes("dev"), vec!["openid".to_owned()]);
+    }
+
+    /// OAuth token traffic must carry the engine's configured default
+    /// user-agent so it is attributed consistently with all other outbound
+    /// calls (some upstream WAFs reject requests without a User-Agent).
+    #[test]
+    fn token_request_carries_default_user_agent() {
+        let _guard = crate::transport::client::UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::transport::set_default_user_agent("ua-probe/7.7");
+        let provider = test_provider().with_token_timeout(Duration::from_secs(12));
+        let request = provider
+            .token_request(
+                "https://example.com/token",
+                &[("grant_type", "refresh_token")],
+            )
+            .build()
+            .expect("token request should build");
+        let header = request
+            .headers()
+            .get(reqwest::header::USER_AGENT)
+            .expect("token request should set a user-agent");
+        assert_eq!(header, "ua-probe/7.7");
+        assert_eq!(request.timeout(), Some(&Duration::from_secs(12)));
+        crate::transport::set_default_user_agent("cli/dev");
+    }
+
+    /// OAuth token requests must not hang indefinitely: the provider applies a
+    /// 30s timeout by default.
+    #[test]
+    fn default_token_timeout_is_thirty_seconds() {
+        assert_eq!(test_provider().token_timeout, Duration::from_secs(30));
+    }
+
+    /// The default token timeout can be overridden per provider.
+    #[test]
+    fn with_token_timeout_overrides_default() {
+        let provider = test_provider().with_token_timeout(Duration::from_secs(5));
+        assert_eq!(provider.token_timeout, Duration::from_secs(5));
     }
 
     /// store_cached_token + cached_token round-trip: the mechanism used by
