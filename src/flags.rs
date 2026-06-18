@@ -508,6 +508,10 @@ fn collect_flag_names(command: &Command, visit: &mut impl FnMut(&Arg, String)) {
 #[must_use]
 pub fn debug_component_enabled(pattern: &str, component: &str) -> bool {
     let component = component.trim().to_ascii_lowercase();
+    // Fail closed: an empty component name is never enabled, not even by `*`.
+    if component.is_empty() {
+        return false;
+    }
     let mut enabled = false;
     for raw in pattern.split(',') {
         let token = raw.trim();
@@ -565,6 +569,9 @@ mod tests {
         assert!(debug_component_enabled("-*,transport", "transport"));
         // Whitespace and case are ignored.
         assert!(debug_component_enabled(" Transport , -auth ", "transport"));
+        // An empty component fails closed, even against a wildcard.
+        assert!(!debug_component_enabled("*", ""));
+        assert!(!debug_component_enabled("*", "   "));
     }
 
     #[test]
