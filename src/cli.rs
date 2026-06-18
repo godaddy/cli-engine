@@ -3063,27 +3063,18 @@ mod user_agent_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _restore = crate::transport::client::RestoreDefaultTransportLogger;
 
-        // `transport` selected -> a real stderr logger is published.
+        // `transport` selected -> an active (enabled) logger is published.
         install_debug_transport_logger("transport", &[]);
-        assert!(
-            format!("{:?}", crate::transport::default_transport_logger())
-                .starts_with("StderrTransportLogger")
-        );
+        assert!(crate::transport::default_transport_logger().enabled());
 
-        // Wildcard with transport excluded -> back to the noop.
+        // Wildcard with transport excluded -> back to a disabled (noop) logger.
         install_debug_transport_logger("*,-transport", &[]);
-        assert_eq!(
-            format!("{:?}", crate::transport::default_transport_logger()),
-            "NoopTransportLogger"
-        );
+        assert!(!crate::transport::default_transport_logger().enabled());
 
-        // Empty pattern -> noop.
+        // Empty pattern -> disabled (noop).
         install_debug_transport_logger("transport", &[]);
         install_debug_transport_logger("", &[]);
-        assert_eq!(
-            format!("{:?}", crate::transport::default_transport_logger()),
-            "NoopTransportLogger"
-        );
+        assert!(!crate::transport::default_transport_logger().enabled());
     }
 }
 

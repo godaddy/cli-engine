@@ -270,7 +270,7 @@ populate middleware:
 | `--schema` | `schema` | `false` | Renders command schema instead of running business logic. |
 | `--reason` | `reason` | empty | Reason passed to authorization. |
 | `--timeout` | `timeout` | `0s` | Command deadline (e.g. `60s`, `5m`); default `0s` = no timeout. |
-| `--debug` | `debug` | empty | Enables debug components (comma-separated patterns: `*`, `transport`, `*,-auth`). `transport` dumps HTTP requests/responses to stderr. See [HTTP debug logging](#http-debug-logging). |
+| `--debug` | `debug` | empty | Enables debug components (comma-separated patterns). Bare `--debug` enables all; a specific value uses the `=` form: `--debug=transport`, `--debug='*,-auth'`. `transport` dumps HTTP requests/responses to stderr. See [HTTP debug logging](#http-debug-logging). |
 | `--search` | `search` | empty | Searches command and guide documentation before command execution. |
 
 Applications can add additional global flags through `CliConfig::register_flags` and copy parsed
@@ -591,7 +591,7 @@ credentials, and no-op injectors.
 
 ### HTTP debug logging
 
-The global `--debug` flag drives transport diagnostics through the `transport` component (`--debug`, `--debug transport`, or `--debug '*'`; `--debug '*,-transport'` keeps everything else but silences HTTP). `flags::debug_component_enabled` parses the comma-separated pattern.
+The global `--debug` flag drives transport diagnostics through the `transport` component. Bare `--debug` enables every component; to select one, use the `=` form so the value is not mistaken for the command: `--debug=transport`, or `--debug='*,-transport'` to keep everything else but silence HTTP. (As an optional-value global flag, `--debug` only attaches a space-separated value when it appears after the leaf command; before the command, write `--debug=transport`.) `flags::debug_component_enabled` parses the comma-separated pattern.
 
 When `transport` is selected the engine publishes a process-wide `StderrTransportLogger` via `transport::set_default_transport_logger`. Every `HttpClient` built afterward inherits it as its default logger (mirroring `set_default_user_agent`), so command handlers get a curl-style request/response trace on stderr with **no per-command wiring**. A client that sets its own logger with `HttpClientBuilder::logger` still overrides the default. The logger is installed once, before the command handler runs, and shared by every client the handler builds, so all of a command's HTTP requests are logged.
 
