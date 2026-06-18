@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use reqwest::{Method, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -202,6 +203,16 @@ pub struct TransportLogEvent {
 pub trait TransportLogger: Send + Sync + std::fmt::Debug {
     /// Records one debug event.
     fn debug(&self, event: &TransportLogEvent);
+
+    /// Whether this logger records anything.
+    ///
+    /// Defaults to `true`. The transport checks this before capturing request
+    /// and response headers/bodies, so a logger that returns `false` (such as
+    /// [`NoopTransportLogger`]) keeps the common non-debug path free of those
+    /// clones.
+    fn enabled(&self) -> bool {
+        true
+    }
 }
 
 /// Logger that intentionally drops transport events.
@@ -210,6 +221,10 @@ pub struct NoopTransportLogger;
 
 impl TransportLogger for NoopTransportLogger {
     fn debug(&self, _event: &TransportLogEvent) {}
+
+    fn enabled(&self) -> bool {
+        false
+    }
 }
 
 /// Authenticated HTTP client for CLI command implementations.
@@ -454,7 +469,7 @@ impl HttpClient {
                 parse_error_body(status, &String::from_utf8_lossy(&bytes), "GET", path).into(),
             );
         }
-        Ok(bytes)
+        Ok(bytes.to_vec())
     }
 
     /// Sends POST and streams the raw response body into a writer.
@@ -1054,7 +1069,13 @@ impl HttpClient {
 
     /// Emits an `http request` event capturing the built request's headers and
     /// in-memory body. Streaming bodies (e.g. multipart) report no body.
+    ///
+    /// Skips capture entirely when the logger is disabled, so the non-debug path
+    /// does not clone headers or copy request bodies.
     fn log_request(&self, request: &reqwest::Request) {
+        if !self.logger.enabled() {
+            return;
+        }
         self.logger.debug(&TransportLogEvent {
             message: "http request",
             fields: BTreeMap::from([
@@ -1081,6 +1102,9 @@ impl HttpClient {
         body: Option<&[u8]>,
         body_bytes: Option<usize>,
     ) {
+        if !self.logger.enabled() {
+            return;
+        }
         let mut fields = BTreeMap::from([
             ("status".to_owned(), status.as_u16().to_string()),
             ("method".to_owned(), method.to_owned()),
@@ -1100,25 +1124,32 @@ impl HttpClient {
     /// Reads a response body once, emits the `http response` event, and returns
     /// the status and buffered bytes. `include_body` controls whether the body
     /// is attached to the log or only its size is reported.
+    ///
+    /// Returns the body as [`Bytes`] (a cheap clone of the buffer `reqwest`
+    /// already owns) so callers decode without an extra copy. When the logger is
+    /// disabled, response headers are not cloned and no event is built.
     async fn read_and_log_response(
         &self,
         response: reqwest::Response,
         method: &str,
         path: &str,
         include_body: bool,
-    ) -> Result<(StatusCode, Vec<u8>)> {
+    ) -> Result<(StatusCode, Bytes)> {
         let status = response.status();
-        let headers = response.headers().clone();
+        let logging = self.logger.enabled();
+        let headers = logging.then(|| response.headers().clone());
         let body = response
             .bytes()
             .await
             .map_err(|err| CliCoreError::message(format!("transport: decode response: {err}")))?;
-        if include_body {
-            self.log_response(method, path, status, &headers, Some(&body), None);
-        } else {
-            self.log_response(method, path, status, &headers, None, Some(body.len()));
+        if let Some(headers) = headers {
+            if include_body {
+                self.log_response(method, path, status, &headers, Some(&body), None);
+            } else {
+                self.log_response(method, path, status, &headers, None, Some(body.len()));
+            }
         }
-        Ok((status, body.to_vec()))
+        Ok((status, body))
     }
 
     async fn inject_auth(&self, request: &mut reqwest::Request) -> Result<()> {
@@ -1176,10 +1207,12 @@ impl HttpClient {
         path: &str,
     ) -> CliCoreError {
         let status = response.status();
-        let headers = response.headers().clone();
+        let headers = self.logger.enabled().then(|| response.headers().clone());
         match response.bytes().await {
             Ok(body) => {
-                self.log_response(method, path, status, &headers, Some(&body), None);
+                if let Some(headers) = &headers {
+                    self.log_response(method, path, status, headers, Some(&body), None);
+                }
                 CliCoreError::message(format!(
                     "transport: {method} {path}: status {}: {}",
                     status.as_u16(),
@@ -1187,7 +1220,9 @@ impl HttpClient {
                 ))
             }
             Err(err) => {
-                self.log_response(method, path, status, &headers, None, None);
+                if let Some(headers) = &headers {
+                    self.log_response(method, path, status, headers, None, None);
+                }
                 CliCoreError::message(format!(
                     "transport: {method} {path}: status {} (body read failed: {err})",
                     status.as_u16()
