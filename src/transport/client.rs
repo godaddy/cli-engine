@@ -1065,6 +1065,9 @@ impl HttpClient {
         message: &'static str,
         fields: impl IntoIterator<Item = (&'static str, String)>,
     ) {
+        if !self.logger.enabled() {
+            return;
+        }
         self.logger.debug(&TransportLogEvent {
             message,
             fields: fields
