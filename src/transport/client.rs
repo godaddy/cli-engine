@@ -114,10 +114,14 @@ pub fn default_transport_logger() -> Arc<dyn TransportLogger> {
 /// or progenitor-generated clients that cannot use [`HttpClient`] — so a single
 /// `--debug`-controlled trace can still cover them. Captures the request method,
 /// URL, headers, and in-memory body. Pairs with [`debug_log_reqwest_response`].
-/// It is a no-op unless a logger has been installed via
-/// [`set_default_transport_logger`].
+/// It is a no-op (no header clone or body copy) unless an enabled logger has
+/// been installed via [`set_default_transport_logger`].
 pub fn debug_log_reqwest_request(request: &reqwest::Request) {
-    default_transport_logger().debug(&TransportLogEvent {
+    let logger = default_transport_logger();
+    if !logger.enabled() {
+        return;
+    }
+    logger.debug(&TransportLogEvent {
         message: "http request",
         fields: BTreeMap::from([
             ("method".to_owned(), request.method().as_str().to_owned()),
@@ -135,10 +139,15 @@ pub fn debug_log_reqwest_request(request: &reqwest::Request) {
 /// transport logger.
 ///
 /// Companion to [`debug_log_reqwest_request`] for `reqwest`-direct call sites.
-/// The caller passes the already-read response body. It is a no-op unless a
-/// logger has been installed via [`set_default_transport_logger`].
+/// The caller passes the already-read response body. It is a no-op (no header
+/// clone or body copy) unless an enabled logger has been installed via
+/// [`set_default_transport_logger`].
 pub fn debug_log_reqwest_response(status: StatusCode, headers: &header::HeaderMap, body: &[u8]) {
-    default_transport_logger().debug(&TransportLogEvent {
+    let logger = default_transport_logger();
+    if !logger.enabled() {
+        return;
+    }
+    logger.debug(&TransportLogEvent {
         message: "http response",
         fields: BTreeMap::from([("status".to_owned(), status.as_u16().to_string())]),
         headers: Some(header_pairs(headers)),
