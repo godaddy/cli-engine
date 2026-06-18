@@ -1147,10 +1147,9 @@ impl HttpClient {
         let status = response.status();
         let logging = self.logger.enabled();
         let headers = logging.then(|| response.headers().clone());
-        let body = response
-            .bytes()
-            .await
-            .map_err(|err| CliCoreError::message(format!("transport: decode response: {err}")))?;
+        let body = response.bytes().await.map_err(|err| {
+            CliCoreError::message(format!("transport: read response body: {err}"))
+        })?;
         if let Some(headers) = headers {
             if include_body {
                 self.log_response(method, path, status, &headers, Some(&body), None);
@@ -1198,6 +1197,14 @@ impl HttpClient {
         method: &str,
         path: &str,
     ) -> Result<()> {
+        // A `*_without_response` call discards the body, so the body is only
+        // needed to build an error message or to feed the logger. When neither
+        // applies (non-error status, logging disabled), skip buffering it —
+        // matching the pre-logging behavior of not reading success bodies.
+        let is_error = response.status().is_client_error() || response.status().is_server_error();
+        if !is_error && !self.logger.enabled() {
+            return Ok(());
+        }
         let (status, body) = self
             .read_and_log_response(response, method, path, true)
             .await?;
