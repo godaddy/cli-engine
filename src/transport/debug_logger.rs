@@ -2,8 +2,9 @@
 //!
 //! [`StderrTransportLogger`] renders [`TransportLogEvent`]s as a curl-style
 //! request/response trace on stderr. It is the logger the CLI installs when
-//! `--debug` selects the `transport` component. Sensitive headers are redacted
-//! so the output is safe to paste into a ticket.
+//! `--debug` selects the `transport` component. Sensitive headers are redacted,
+//! but URLs and request/response bodies are printed in full and may still
+//! contain secrets — treat the output as sensitive before sharing it.
 
 use std::io::Write;
 
