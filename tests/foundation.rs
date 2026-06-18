@@ -150,6 +150,11 @@ impl RecordingTransportLogger {
 
 static USER_AGENT_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Serializes tests in this binary that mutate the process-wide default
+/// transport logger, so an install/assert/reset window in one test cannot be
+/// disturbed by another test resetting the global concurrently.
+static TRANSPORT_LOGGER_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
 /// Restores the process-wide default User-Agent to the builtin on drop, so a
 /// panicking assertion in a test that publishes a config-derived UA cannot leak
 /// it into later tests. Hold alongside (declared after) the `USER_AGENT_TEST_LOCK`
@@ -5460,6 +5465,10 @@ async fn http_client_picks_up_process_global_default_logger() {
     // The `--debug` feature works by publishing a process-global default logger
     // that every HttpClient built afterward inherits without per-command wiring.
     // This proves a client built WITHOUT `.logger(...)` records to that global.
+    //
+    // Hold the logger lock so the install/assert/reset window is isolated from
+    // any other test that mutates the same process-global.
+    let _logger_guard = TRANSPORT_LOGGER_TEST_LOCK.lock().await;
     struct ResetLogger;
     impl Drop for ResetLogger {
         fn drop(&mut self) {

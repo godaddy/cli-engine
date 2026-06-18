@@ -591,7 +591,7 @@ credentials, and no-op injectors.
 
 ### HTTP debug logging
 
-The global `--debug` flag drives transport diagnostics through the `transport` component (`--debug`, `--debug transport`, or `--debug '*'`; `--debug '*,-transport'` keeps everything else but silences HTTP).`flags::debug_component_enabled` parses the comma-separated pattern.
+The global `--debug` flag drives transport diagnostics through the `transport` component (`--debug`, `--debug transport`, or `--debug '*'`; `--debug '*,-transport'` keeps everything else but silences HTTP). `flags::debug_component_enabled` parses the comma-separated pattern.
 
 When `transport` is selected the engine publishes a process-wide `StderrTransportLogger` via `transport::set_default_transport_logger`. Every `HttpClient` built afterward inherits it as its default logger (mirroring `set_default_user_agent`), so command handlers get a curl-style request/response trace on stderr with **no per-command wiring**. A client that sets its own logger with `HttpClientBuilder::logger` still overrides the default. The logger is installed once, before the command handler runs, and shared by every client the handler builds, so all of a command's HTTP requests are logged.
 

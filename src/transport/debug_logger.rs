@@ -100,10 +100,16 @@ impl StderrTransportLogger {
                 out
             }
             "http response" => {
+                // Method/url are absent on responses logged via the
+                // reqwest-direct helper, so omit them rather than rendering
+                // trailing spaces (`< 200  `).
                 let status = field(event, "status").unwrap_or("?");
-                let method = field(event, "method").unwrap_or("");
-                let url = field(event, "url").unwrap_or("");
-                let mut out = format!("< {status} {method} {url}\n");
+                let suffix = match (field(event, "method"), field(event, "url")) {
+                    (Some(method), Some(url)) => format!(" {method} {url}"),
+                    (Some(value), None) | (None, Some(value)) => format!(" {value}"),
+                    (None, None) => String::new(),
+                };
+                let mut out = format!("< {status}{suffix}\n");
                 self.append_headers(&mut out, "<", event);
                 append_body(&mut out, "<", event);
                 out
@@ -146,10 +152,11 @@ impl TransportLogger for StderrTransportLogger {
         }
         // Write directly to a locked stderr handle (not `eprintln!`) so the
         // whole event lands as one contiguous block under concurrency.
-        // Diagnostics are best-effort, so a failed write is dropped rather than
-        // allowed to break the command.
+        // Diagnostics are best-effort: ignore write failures rather than break
+        // the command. (`let _ =` would trip the crate's `let_underscore_drop`
+        // lint, so use `.ok()` to discard the result.)
         let mut stderr = std::io::stderr().lock();
-        drop(stderr.write_all(rendered.as_bytes()));
+        stderr.write_all(rendered.as_bytes()).ok();
     }
 }
 
@@ -224,6 +231,23 @@ mod tests {
         assert!(rendered.contains(&format!("< set-cookie: {REDACTED}")));
         assert!(!rendered.contains("abc123"));
         assert!(rendered.contains("< [body: 2048 bytes not captured]"));
+    }
+
+    #[test]
+    fn status_only_response_has_no_trailing_space() {
+        // The reqwest-direct helper logs responses with only a status (no
+        // method/url); the line must not render as `< 200  `.
+        let event = TransportLogEvent {
+            message: "http response",
+            fields: fields(&[("status", "204")]),
+            headers: Some(vec![("content-length".to_owned(), "0".to_owned())]),
+            body: None,
+        };
+        let rendered = StderrTransportLogger::new().format_event(&event);
+        assert!(
+            rendered.starts_with("< 204\n"),
+            "status-only response should be `< 204` with no trailing space, got: {rendered:?}"
+        );
     }
 
     #[test]

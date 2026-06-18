@@ -87,9 +87,13 @@ fn default_transport_logger_lock() -> &'static RwLock<Arc<dyn TransportLogger>> 
 /// without any per-command wiring. A per-client logger still overrides it for
 /// that client.
 pub fn set_default_transport_logger(logger: Arc<dyn TransportLogger>) {
-    if let Ok(mut current) = default_transport_logger_lock().write() {
-        *current = logger;
-    }
+    // Recover from a poisoned lock (a panic while a writer held it) instead of
+    // silently doing nothing, which would leave a stale logger installed and
+    // make `--debug transport` appear ineffective.
+    let mut current = default_transport_logger_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *current = logger;
 }
 
 /// Returns the process-wide default transport logger set via
@@ -99,11 +103,8 @@ pub fn set_default_transport_logger(logger: Arc<dyn TransportLogger>) {
 pub fn default_transport_logger() -> Arc<dyn TransportLogger> {
     default_transport_logger_lock()
         .read()
-        .map_or_else(|_| no_op_logger(), |logger| logger.clone())
-}
-
-fn no_op_logger() -> Arc<dyn TransportLogger> {
-    Arc::new(NoopTransportLogger)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Logs a `reqwest::Request` to the process-wide default transport logger.
@@ -160,7 +161,7 @@ pub(crate) struct RestoreDefaultTransportLogger;
 #[cfg(test)]
 impl Drop for RestoreDefaultTransportLogger {
     fn drop(&mut self) {
-        set_default_transport_logger(no_op_logger());
+        set_default_transport_logger(Arc::new(NoopTransportLogger));
     }
 }
 
