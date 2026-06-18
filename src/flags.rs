@@ -482,6 +482,49 @@ fn collect_flag_names(command: &Command, visit: &mut impl FnMut(&Arg, String)) {
     }
 }
 
+/// Reports whether a `--debug` pattern enables a named component.
+///
+/// The pattern is a comma-separated list of tokens applied left to right, so
+/// later tokens override earlier ones:
+///
+/// - `*` enables every component; `-*` disables every component.
+/// - `name` enables that component; `-name` disables it.
+/// - whitespace around tokens is ignored and matching is case-insensitive.
+///
+/// An empty pattern enables nothing. Tokens that name other components are
+/// ignored for the queried `component`.
+///
+/// # Examples
+///
+/// ```
+/// use cli_engine::debug_component_enabled;
+///
+/// assert!(debug_component_enabled("*", "transport"));
+/// assert!(debug_component_enabled("transport", "transport"));
+/// assert!(!debug_component_enabled("*,-transport", "transport"));
+/// assert!(debug_component_enabled("*,-auth", "transport"));
+/// assert!(!debug_component_enabled("", "transport"));
+/// ```
+#[must_use]
+pub fn debug_component_enabled(pattern: &str, component: &str) -> bool {
+    let component = component.trim().to_ascii_lowercase();
+    let mut enabled = false;
+    for raw in pattern.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (negated, name) = token
+            .strip_prefix('-')
+            .map_or((false, token), |rest| (true, rest));
+        let name = name.trim().to_ascii_lowercase();
+        if name == "*" || name == component {
+            enabled = !negated;
+        }
+    }
+    enabled
+}
+
 fn arg_requires_value(arg: &Arg) -> bool {
     match arg.get_action() {
         ArgAction::Set | ArgAction::Append => arg
@@ -502,7 +545,27 @@ fn arg_requires_value(arg: &Arg) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{output_env_var, resolve_default_output_format};
+    use super::{debug_component_enabled, output_env_var, resolve_default_output_format};
+
+    #[test]
+    fn debug_component_matcher_handles_wildcards_and_negation() {
+        // Empty pattern enables nothing.
+        assert!(!debug_component_enabled("", "transport"));
+        // Wildcard enables everything.
+        assert!(debug_component_enabled("*", "transport"));
+        assert!(debug_component_enabled("*", "auth"));
+        // Bare name enables only that component.
+        assert!(debug_component_enabled("transport", "transport"));
+        assert!(!debug_component_enabled("transport", "auth"));
+        // Negation after a wildcard removes one component but keeps the rest.
+        assert!(!debug_component_enabled("*,-transport", "transport"));
+        assert!(debug_component_enabled("*,-auth", "transport"));
+        // `-*` disables everything; later tokens still win.
+        assert!(!debug_component_enabled("*,-*", "transport"));
+        assert!(debug_component_enabled("-*,transport", "transport"));
+        // Whitespace and case are ignored.
+        assert!(debug_component_enabled(" Transport , -auth ", "transport"));
+    }
 
     #[test]
     fn default_output_format_follows_env_override_then_tty() {

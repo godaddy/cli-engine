@@ -129,9 +129,10 @@ pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };
 pub use flags::{
-    GlobalFlags, app_id_env_prefix, default_output_format, derive_bool_flags, derive_value_flags,
-    extract_command_path, extract_output_format, extract_search_query, global_flags_from_matches,
-    has_true_schema_flag, output_env_var, register_global_flags, resolve_default_output_format,
+    GlobalFlags, app_id_env_prefix, debug_component_enabled, default_output_format,
+    derive_bool_flags, derive_value_flags, extract_command_path, extract_output_format,
+    extract_search_query, global_flags_from_matches, has_true_schema_flag, output_env_var,
+    register_global_flags, resolve_default_output_format,
 };
 pub use guide::{GuideEntry, parse_guides, parse_guides_from_markdown};
 pub use middleware::{

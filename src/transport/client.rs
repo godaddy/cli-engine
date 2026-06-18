@@ -69,6 +69,101 @@ impl Drop for RestoreDefaultUserAgent {
     }
 }
 
+static DEFAULT_TRANSPORT_LOGGER: OnceLock<RwLock<Arc<dyn TransportLogger>>> = OnceLock::new();
+
+fn default_transport_logger_lock() -> &'static RwLock<Arc<dyn TransportLogger>> {
+    DEFAULT_TRANSPORT_LOGGER.get_or_init(|| RwLock::new(Arc::new(NoopTransportLogger)))
+}
+
+/// Sets the process-wide default transport logger for outbound HTTP traffic.
+///
+/// Applies to subsequently created [`HttpClient`] values (those that do not set
+/// their own via [`HttpClientBuilder::logger`]) and to the free
+/// [`super::debug_log_reqwest_request`] / [`super::debug_log_reqwest_response`]
+/// helpers used by code that talks to `reqwest` directly.
+///
+/// The CLI installs a logger from this setter when `--debug` selects the
+/// `transport` component, so command handlers get request/response diagnostics
+/// without any per-command wiring. A per-client logger still overrides it for
+/// that client.
+pub fn set_default_transport_logger(logger: Arc<dyn TransportLogger>) {
+    if let Ok(mut current) = default_transport_logger_lock().write() {
+        *current = logger;
+    }
+}
+
+/// Returns the process-wide default transport logger set via
+/// [`set_default_transport_logger`], or a [`NoopTransportLogger`] when none was
+/// set.
+#[must_use]
+pub fn default_transport_logger() -> Arc<dyn TransportLogger> {
+    default_transport_logger_lock()
+        .read()
+        .map_or_else(|_| no_op_logger(), |logger| logger.clone())
+}
+
+fn no_op_logger() -> Arc<dyn TransportLogger> {
+    Arc::new(NoopTransportLogger)
+}
+
+/// Logs a `reqwest::Request` to the process-wide default transport logger.
+///
+/// This is the bridge for code that talks to `reqwest` directly — bare clients
+/// or progenitor-generated clients that cannot use [`HttpClient`] — so a single
+/// `--debug`-controlled trace can still cover them. Captures the request method,
+/// URL, headers, and in-memory body. Pairs with [`debug_log_reqwest_response`].
+/// It is a no-op unless a logger has been installed via
+/// [`set_default_transport_logger`].
+pub fn debug_log_reqwest_request(request: &reqwest::Request) {
+    default_transport_logger().debug(&TransportLogEvent {
+        message: "http request",
+        fields: BTreeMap::from([
+            ("method".to_owned(), request.method().as_str().to_owned()),
+            ("url".to_owned(), request.url().as_str().to_owned()),
+        ]),
+        headers: Some(header_pairs(request.headers())),
+        body: request
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .map(<[u8]>::to_vec),
+    });
+}
+
+/// Logs an HTTP response (status, headers, body) to the process-wide default
+/// transport logger.
+///
+/// Companion to [`debug_log_reqwest_request`] for `reqwest`-direct call sites.
+/// The caller passes the already-read response body. It is a no-op unless a
+/// logger has been installed via [`set_default_transport_logger`].
+pub fn debug_log_reqwest_response(status: StatusCode, headers: &header::HeaderMap, body: &[u8]) {
+    default_transport_logger().debug(&TransportLogEvent {
+        message: "http response",
+        fields: BTreeMap::from([("status".to_owned(), status.as_u16().to_string())]),
+        headers: Some(header_pairs(headers)),
+        body: Some(body.to_vec()),
+    });
+}
+
+/// Serializes unit tests that mutate the process-wide default transport logger
+/// so they cannot observe one another's writes. Integration tests in
+/// `tests/foundation.rs` run in a separate binary and use their own lock.
+#[cfg(test)]
+pub(crate) static TRANSPORT_LOGGER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restores the process-wide default transport logger to the noop on drop, so a
+/// panicking assertion in a test that installs a logger cannot leak it into
+/// later tests. Declare it after acquiring [`TRANSPORT_LOGGER_TEST_LOCK`] so the
+/// reset runs while the lock is still held.
+#[cfg(test)]
+pub(crate) struct RestoreDefaultTransportLogger;
+
+#[cfg(test)]
+impl Drop for RestoreDefaultTransportLogger {
+    fn drop(&mut self) {
+        set_default_transport_logger(no_op_logger());
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct GraphQlError {
     message: String,
@@ -82,12 +177,24 @@ struct GraphQlEnvelope {
 }
 
 /// Structured debug event emitted by [`TransportLogger`].
-#[derive(Clone, Debug)]
+///
+/// `message` and `fields` are the stable breadcrumb surface (method, url,
+/// status, retry attempt). `headers` and `body` carry the raw, un-redacted
+/// request or response payload when one is available; loggers that print these
+/// (such as [`StderrTransportLogger`](super::StderrTransportLogger)) are
+/// responsible for redacting sensitive headers.
+#[derive(Clone, Debug, Default)]
 pub struct TransportLogEvent {
     /// Event name such as `http request` or `retrying request`.
     pub message: &'static str,
     /// Stable event fields.
     pub fields: BTreeMap<String, String>,
+    /// Raw header name/value pairs for the request or response, when known.
+    pub headers: Option<Vec<(String, String)>>,
+    /// Raw request or response body bytes, when captured. Streaming and
+    /// byte-download responses omit this and report a `body_bytes` field
+    /// instead to avoid buffering large payloads into the log.
+    pub body: Option<Vec<u8>>,
 }
 
 /// Debug logger interface for transport events.
@@ -139,7 +246,7 @@ impl HttpClientBuilder {
             auth,
             user_agent: default_user_agent(),
             default_headers: BTreeMap::new(),
-            logger: Arc::new(NoopTransportLogger),
+            logger: default_transport_logger(),
         }
     }
 
@@ -281,7 +388,7 @@ impl HttpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        let value = decode_json_response(response, "GET", path).await?;
+        let value = self.decode_json_response(response, "GET", path).await?;
         Ok((value, etag))
     }
 
@@ -294,7 +401,7 @@ impl HttpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        ensure_success_response(response, "GET", path).await?;
+        self.ensure_success_response(response, "GET", path).await?;
         Ok(etag)
     }
 
@@ -306,7 +413,7 @@ impl HttpClient {
         etag: &str,
     ) -> Result<T> {
         let response = self.send_put_if_match(path, body, etag).await?;
-        decode_json_response(response, "PUT", path).await
+        self.decode_json_response(response, "PUT", path).await
     }
 
     /// Sends PUT with `If-Match` and checks only for success.
@@ -317,19 +424,20 @@ impl HttpClient {
         etag: &str,
     ) -> Result<()> {
         let response = self.send_put_if_match(path, body, etag).await?;
-        ensure_success_response(response, "PUT", path).await
+        self.ensure_success_response(response, "PUT", path).await
     }
 
     /// Streams a raw GET response body into a writer.
     pub async fn get_raw(&self, path: &str, writer: &mut dyn Write) -> Result<()> {
         let response = self.send_get_raw_status_only_retry(path).await?;
-        if response.status().is_client_error() || response.status().is_server_error() {
-            return Err(parse_error_response(response, "GET", path).await.into());
+        let (status, bytes) = self
+            .read_and_log_response(response, "GET", path, false)
+            .await?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(
+                parse_error_body(status, &String::from_utf8_lossy(&bytes), "GET", path).into(),
+            );
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| CliCoreError::message(format!("transport: stream response: {err}")))?;
         writer.write_all(&bytes)?;
         Ok(())
     }
@@ -337,14 +445,15 @@ impl HttpClient {
     /// Sends GET and returns the raw response body as bytes.
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let response = self.send_get_raw_status_only_retry(path).await?;
-        if response.status().is_client_error() || response.status().is_server_error() {
-            return Err(parse_error_response(response, "GET", path).await.into());
+        let (status, bytes) = self
+            .read_and_log_response(response, "GET", path, false)
+            .await?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(
+                parse_error_body(status, &String::from_utf8_lossy(&bytes), "GET", path).into(),
+            );
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| CliCoreError::message(format!("transport: stream response: {err}")))?;
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     /// Sends POST and streams the raw response body into a writer.
@@ -355,13 +464,14 @@ impl HttpClient {
         writer: &mut dyn Write,
     ) -> Result<()> {
         let response = self.send_post_raw_once(path, body).await?;
-        if response.status().is_client_error() || response.status().is_server_error() {
-            return Err(parse_error_response(response, "POST", path).await.into());
+        let (status, bytes) = self
+            .read_and_log_response(response, "POST", path, false)
+            .await?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(
+                parse_error_body(status, &String::from_utf8_lossy(&bytes), "POST", path).into(),
+            );
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|err| CliCoreError::message(format!("transport: stream response: {err}")))?;
         writer.write_all(&bytes)?;
         Ok(())
     }
@@ -388,7 +498,8 @@ impl HttpClient {
     ) -> Result<T> {
         let method_text = method.as_str().to_owned();
         let response = self.send_raw_once(method, path, content_type, body).await?;
-        decode_json_response(response, &method_text, path).await
+        self.decode_json_response(response, &method_text, path)
+            .await
     }
 
     /// Sends a raw-body request and checks only for success.
@@ -413,7 +524,8 @@ impl HttpClient {
     ) -> Result<()> {
         let method_text = method.as_str().to_owned();
         let response = self.send_raw_once(method, path, content_type, body).await?;
-        ensure_success_response(response, &method_text, path).await
+        self.ensure_success_response(response, &method_text, path)
+            .await
     }
 
     /// Sends a multipart file upload and decodes a JSON response.
@@ -604,7 +716,8 @@ impl HttpClient {
     ) -> Result<T> {
         let method_text = method.as_str().to_owned();
         let response = self.send_with_retry(method, path, body).await?;
-        decode_json_response(response, &method_text, path).await
+        self.decode_json_response(response, &method_text, path)
+            .await
     }
 
     async fn post_graphql_response_envelope(
@@ -644,25 +757,11 @@ impl HttpClient {
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
         self.inject_auth(&mut request).await?;
-        let url = format!("{}{}", self.base_url, path);
-        self.log_debug(
-            "http request",
-            [("method", "PUT".to_owned()), ("url", url.clone())],
-        );
-        let response = self
-            .base
+        self.log_request(&request);
+        self.base
             .execute(request)
             .await
-            .map_err(|err| CliCoreError::message(format!("transport: PUT {path}: {err}")))?;
-        self.log_debug(
-            "http response",
-            [
-                ("status", response.status().as_u16().to_string()),
-                ("method", "PUT".to_owned()),
-                ("url", url),
-            ],
-        );
-        Ok(response)
+            .map_err(|err| CliCoreError::message(format!("transport: PUT {path}: {err}")))
     }
 
     async fn send_multipart<T: Default + DeserializeOwned>(
@@ -671,7 +770,7 @@ impl HttpClient {
         form: reqwest::multipart::Form,
     ) -> Result<T> {
         let response = self.send_multipart_response(path, form).await?;
-        decode_json_response(response, "POST", path).await
+        self.decode_json_response(response, "POST", path).await
     }
 
     async fn send_multipart_without_response(
@@ -680,7 +779,7 @@ impl HttpClient {
         form: reqwest::multipart::Form,
     ) -> Result<()> {
         let response = self.send_multipart_response(path, form).await?;
-        ensure_success_response(response, "POST", path).await
+        self.ensure_success_response(response, "POST", path).await
     }
 
     async fn send_multipart_response(
@@ -691,7 +790,7 @@ impl HttpClient {
         let url = format!("{}{}", self.base_url, path);
         let mut builder = self
             .base
-            .post(url.clone())
+            .post(url)
             .header(header::USER_AGENT, self.user_agent.clone())
             .multipart(form);
         for (key, value) in &self.default_headers {
@@ -701,7 +800,7 @@ impl HttpClient {
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
         self.inject_auth(&mut request).await?;
-        self.log_debug("http multipart request", [("url", url)]);
+        self.log_request(&request);
         self.base
             .execute(request)
             .await
@@ -716,7 +815,8 @@ impl HttpClient {
     ) -> Result<()> {
         let method_text = method.as_str().to_owned();
         let response = self.send_with_retry(method, path, body).await?;
-        ensure_success_response(response, &method_text, path).await
+        self.ensure_success_response(response, &method_text, path)
+            .await
     }
 
     async fn send_raw_once(
@@ -745,13 +845,7 @@ impl HttpClient {
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
         self.inject_auth(&mut request).await?;
-        self.log_debug(
-            "http request",
-            [
-                ("method", method_text.clone()),
-                ("url", format!("{}{}", self.base_url, path)),
-            ],
-        );
+        self.log_request(&request);
         self.base
             .execute(request)
             .await
@@ -768,13 +862,13 @@ impl HttpClient {
 
             match self.send_get_raw_once(path).await {
                 Ok(response) => {
-                    if response.status() == StatusCode::TOO_MANY_REQUESTS
-                        || response.status().is_server_error()
-                    {
+                    let status = response.status();
+                    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                        self.log_response("GET", path, status, response.headers(), None, None);
                         last_err = Some(CliCoreError::message(format!(
                             "transport: GET {}: status {}",
                             path,
-                            response.status().as_u16()
+                            status.as_u16()
                         )));
                         continue;
                     }
@@ -790,7 +884,7 @@ impl HttpClient {
         let url = format!("{}{}", self.base_url, path);
         let mut builder = self
             .base
-            .get(url.clone())
+            .get(url)
             .header(header::USER_AGENT, self.user_agent.clone());
         for (key, value) in &self.default_headers {
             builder = builder.header(key, value);
@@ -799,7 +893,7 @@ impl HttpClient {
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
         self.inject_auth(&mut request).await?;
-        self.log_debug("http raw request", [("url", url)]);
+        self.log_request(&request);
         self.base
             .execute(request)
             .await
@@ -816,10 +910,7 @@ impl HttpClient {
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
         self.inject_auth(&mut request).await?;
-        self.log_debug(
-            "http post raw request",
-            [("url", format!("{}{}", self.base_url, path))],
-        );
+        self.log_request(&request);
         self.base
             .execute(request)
             .await
@@ -849,8 +940,10 @@ impl HttpClient {
             match self.send_once(method.clone(), path, body).await {
                 Ok(response) => {
                     if retryable_status(method.clone(), response.status()) {
-                        last_err =
-                            Some(retryable_status_error(response, method.as_str(), path).await);
+                        last_err = Some(
+                            self.retryable_status_error(response, method.as_str(), path)
+                                .await,
+                        );
                         continue;
                     }
                     return Ok(response);
@@ -881,13 +974,13 @@ impl HttpClient {
 
             match self.send_once(Method::GET, path, Option::<&()>::None).await {
                 Ok(response) => {
-                    if response.status() == StatusCode::TOO_MANY_REQUESTS
-                        || response.status().is_server_error()
-                    {
+                    let status = response.status();
+                    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                        self.log_response("GET", path, status, response.headers(), None, None);
                         last_err = Some(CliCoreError::message(format!(
                             "transport: GET {}: status {}",
                             path,
-                            response.status().as_u16()
+                            status.as_u16()
                         )));
                         continue;
                     }
@@ -911,25 +1004,11 @@ impl HttpClient {
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
         self.inject_auth(&mut request).await?;
         let method_text = method.as_str().to_owned();
-        self.log_debug(
-            "http request",
-            [
-                ("method", method_text.clone()),
-                ("url", format!("{}{}", self.base_url, path)),
-            ],
-        );
-        let response = self.base.execute(request).await.map_err(|err| {
-            CliCoreError::message(format!("transport: {method_text} {path}: {err}"))
-        })?;
-        self.log_debug(
-            "http response",
-            [
-                ("status", response.status().as_u16().to_string()),
-                ("method", method_text),
-                ("url", format!("{}{}", self.base_url, path)),
-            ],
-        );
-        Ok(response)
+        self.log_request(&request);
+        self.base
+            .execute(request)
+            .await
+            .map_err(|err| CliCoreError::message(format!("transport: {method_text} {path}: {err}")))
     }
 
     fn build_request<B: Serialize>(
@@ -967,7 +1046,78 @@ impl HttpClient {
                 .into_iter()
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect(),
+            headers: None,
+            body: None,
         });
+    }
+
+    /// Emits an `http request` event capturing the built request's headers and
+    /// in-memory body. Streaming bodies (e.g. multipart) report no body.
+    fn log_request(&self, request: &reqwest::Request) {
+        self.logger.debug(&TransportLogEvent {
+            message: "http request",
+            fields: BTreeMap::from([
+                ("method".to_owned(), request.method().as_str().to_owned()),
+                ("url".to_owned(), request.url().as_str().to_owned()),
+            ]),
+            headers: Some(header_pairs(request.headers())),
+            body: request
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .map(<[u8]>::to_vec),
+        });
+    }
+
+    /// Emits an `http response` event. When `body` is `None`, `body_bytes`
+    /// records the payload size instead (used for raw/byte-download paths so
+    /// large responses are not buffered into the log).
+    fn log_response(
+        &self,
+        method: &str,
+        path: &str,
+        status: StatusCode,
+        headers: &header::HeaderMap,
+        body: Option<&[u8]>,
+        body_bytes: Option<usize>,
+    ) {
+        let mut fields = BTreeMap::from([
+            ("status".to_owned(), status.as_u16().to_string()),
+            ("method".to_owned(), method.to_owned()),
+            ("url".to_owned(), format!("{}{}", self.base_url, path)),
+        ]);
+        if let Some(len) = body_bytes {
+            fields.insert("body_bytes".to_owned(), len.to_string());
+        }
+        self.logger.debug(&TransportLogEvent {
+            message: "http response",
+            fields,
+            headers: Some(header_pairs(headers)),
+            body: body.map(<[u8]>::to_vec),
+        });
+    }
+
+    /// Reads a response body once, emits the `http response` event, and returns
+    /// the status and buffered bytes. `include_body` controls whether the body
+    /// is attached to the log or only its size is reported.
+    async fn read_and_log_response(
+        &self,
+        response: reqwest::Response,
+        method: &str,
+        path: &str,
+        include_body: bool,
+    ) -> Result<(StatusCode, Vec<u8>)> {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| CliCoreError::message(format!("transport: decode response: {err}")))?;
+        if include_body {
+            self.log_response(method, path, status, &headers, Some(&body), None);
+        } else {
+            self.log_response(method, path, status, &headers, None, Some(body.len()));
+        }
+        Ok((status, body.to_vec()))
     }
 
     async fn inject_auth(&self, request: &mut reqwest::Request) -> Result<()> {
@@ -976,39 +1126,91 @@ impl HttpClient {
             .await
             .map_err(|err| CliCoreError::message(format!("transport: auth inject: {err}")))
     }
+
+    async fn decode_json_response<T: Default + DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+        method: &str,
+        path: &str,
+    ) -> Result<T> {
+        let (status, body) = self
+            .read_and_log_response(response, method, path, true)
+            .await?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(
+                parse_error_body(status, &String::from_utf8_lossy(&body), method, path).into(),
+            );
+        }
+        if status == StatusCode::NO_CONTENT {
+            return Ok(T::default());
+        }
+        if body.trim_ascii() == b"null" {
+            return Ok(T::default());
+        }
+        serde_json::from_slice::<T>(&body)
+            .map_err(|err| CliCoreError::message(format!("transport: decode response: {err}")))
+    }
+
+    async fn ensure_success_response(
+        &self,
+        response: reqwest::Response,
+        method: &str,
+        path: &str,
+    ) -> Result<()> {
+        let (status, body) = self
+            .read_and_log_response(response, method, path, true)
+            .await?;
+        if status.is_client_error() || status.is_server_error() {
+            return Err(
+                parse_error_body(status, &String::from_utf8_lossy(&body), method, path).into(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn retryable_status_error(
+        &self,
+        response: reqwest::Response,
+        method: &str,
+        path: &str,
+    ) -> CliCoreError {
+        let status = response.status();
+        let headers = response.headers().clone();
+        match response.bytes().await {
+            Ok(body) => {
+                self.log_response(method, path, status, &headers, Some(&body), None);
+                CliCoreError::message(format!(
+                    "transport: {method} {path}: status {}: {}",
+                    status.as_u16(),
+                    String::from_utf8_lossy(&body)
+                ))
+            }
+            Err(err) => {
+                self.log_response(method, path, status, &headers, None, None);
+                CliCoreError::message(format!(
+                    "transport: {method} {path}: status {} (body read failed: {err})",
+                    status.as_u16()
+                ))
+            }
+        }
+    }
 }
 
-async fn decode_json_response<T: Default + DeserializeOwned>(
-    response: reqwest::Response,
-    method: &str,
-    path: &str,
-) -> Result<T> {
-    if response.status().is_client_error() || response.status().is_server_error() {
-        return Err(parse_error_response(response, method, path).await.into());
-    }
-    if response.status() == StatusCode::NO_CONTENT {
-        return Ok(T::default());
-    }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|err| CliCoreError::message(format!("transport: decode response: {err}")))?;
-    if body.trim_ascii() == b"null" {
-        return Ok(T::default());
-    }
-    serde_json::from_slice::<T>(&body)
-        .map_err(|err| CliCoreError::message(format!("transport: decode response: {err}")))
-}
-
-async fn ensure_success_response(
-    response: reqwest::Response,
-    method: &str,
-    path: &str,
-) -> Result<()> {
-    if response.status().is_client_error() || response.status().is_server_error() {
-        return Err(parse_error_response(response, method, path).await.into());
-    }
-    Ok(())
+/// Converts a `reqwest` header map into owned name/value pairs for logging.
+///
+/// Header values that are not valid UTF-8 are rendered as a byte-count
+/// placeholder rather than dropped, so the trace still shows the header exists.
+fn header_pairs(headers: &header::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let value = value.to_str().map_or_else(
+                |_| format!("<{} non-utf8 bytes>", value.as_bytes().len()),
+                str::to_owned,
+            );
+            (name.as_str().to_owned(), value)
+        })
+        .collect()
 }
 
 /// Converts a non-success HTTP response into the shared transport error shape.
@@ -1040,22 +1242,6 @@ fn parse_error_body(status: StatusCode, body: &str, method: &str, path: &str) ->
 
 fn retryable_status(method: Method, status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || (status.is_server_error() && is_idempotent(&method))
-}
-
-async fn retryable_status_error(
-    response: reqwest::Response,
-    method: &str,
-    path: &str,
-) -> CliCoreError {
-    let status = response.status().as_u16();
-    match response.text().await {
-        Ok(body) => CliCoreError::message(format!(
-            "transport: {method} {path}: status {status}: {body}"
-        )),
-        Err(err) => CliCoreError::message(format!(
-            "transport: {method} {path}: status {status} (body read failed: {err})"
-        )),
-    }
 }
 
 fn is_idempotent(method: &Method) -> bool {

@@ -270,7 +270,7 @@ populate middleware:
 | `--schema` | `schema` | `false` | Renders command schema instead of running business logic. |
 | `--reason` | `reason` | empty | Reason passed to authorization. |
 | `--timeout` | `timeout` | `0s` | Command deadline (e.g. `60s`, `5m`); default `0s` = no timeout. |
-| `--debug` | `debug` | empty | Enables debug behavior for integrations that use it. |
+| `--debug` | `debug` | empty | Enables debug components (comma-separated patterns: `*`, `transport`, `*,-auth`). `transport` dumps HTTP requests/responses to stderr. See [HTTP debug logging](#http-debug-logging). |
 | `--search` | `search` | empty | Searches command and guide documentation before command execution. |
 
 Applications can add additional global flags through `CliConfig::register_flags` and copy parsed
@@ -588,6 +588,18 @@ The transport module provides a `reqwest`-based HTTP client with:
 
 Auth injectors include bearer token, provider bearer, cookie, basic auth, API key, client
 credentials, and no-op injectors.
+
+### HTTP debug logging
+
+The global `--debug` flag drives transport diagnostics through the `transport` component (`--debug`, `--debug transport`, or `--debug '*'`; `--debug '*,-transport'` keeps everything else but silences HTTP).`flags::debug_component_enabled` parses the comma-separated pattern.
+
+When `transport` is selected the engine publishes a process-wide `StderrTransportLogger` via `transport::set_default_transport_logger`. Every `HttpClient` built afterward inherits it as its default logger (mirroring `set_default_user_agent`), so command handlers get a curl-style request/response trace on stderr with **no per-command wiring**. A client that sets its own logger with `HttpClientBuilder::logger` still overrides the default. The logger is installed once, before the command handler runs, and shared by every client the handler builds, so all of a command's HTTP requests are logged.
+
+Sensitive headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`) are redacted by default. A CLI with its own secret-bearing headers — e.g. a custom API-key header an auth injector adds — registers them with `CliConfig::with_redacted_debug_headers`; matching is case-insensitive and additive (the built-in set is always redacted). Request and JSON/decode response bodies are printed in full; raw byte-download and streaming responses report only their size to avoid dumping large payloads.
+
+For code that talks to `reqwest` directly and cannot use `HttpClient` (bare clients, or progenitor-generated clients that wrap their own `reqwest::Client`), `transport::debug_log_reqwest_request` and `transport::debug_log_reqwest_response` emit to the same global logger, so a single `--debug`-controlled trace can still cover those call sites.
+
+Adopting `HttpClient` for a generated client is not always possible; a typed progenitor client should attach the helpers above through its own request/response hook instead. Other engine gaps that would let more bare-`reqwest` call sites migrate onto `HttpClient`: a per-request dynamic header hook (e.g. a generated `x-request-id`), an absolute-URL/no-auth request method (pre-signed uploads), an arbitrary-method escape hatch returning the raw response, and surfacing `x-request-id` from error responses into `transport::Error`.
 
 ## Contributor Model
 
