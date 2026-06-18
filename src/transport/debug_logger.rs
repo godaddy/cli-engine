@@ -62,17 +62,19 @@ impl StderrTransportLogger {
     /// auth headers — for example a custom API-key header an auth injector sets.
     /// Names are matched case-insensitively. Additive only: the built-in set
     /// (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`,
-    /// `x-api-key`) is always redacted.
+    /// `x-api-key`) is always redacted. Names are trimmed and empty entries are
+    /// dropped, so a stray-whitespace config value cannot silently fail to
+    /// match (which would leak the header).
     #[must_use]
     pub fn with_redacted_headers(
         mut self,
         names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        self.extra_redacted.extend(
-            names
-                .into_iter()
-                .map(|name| name.into().to_ascii_lowercase()),
-        );
+        self.extra_redacted
+            .extend(names.into_iter().filter_map(|name| {
+                let name = name.into().trim().to_ascii_lowercase();
+                (!name.is_empty()).then_some(name)
+            }));
         self
     }
 
@@ -262,8 +264,13 @@ mod tests {
             ]),
             body: None,
         };
-        // Configured with mixed case to prove matching ignores case.
-        let logger = StderrTransportLogger::new().with_redacted_headers(["X-LiteLLM-API-Key"]);
+        // Mixed case + stray whitespace + an empty entry, to prove names are
+        // trimmed (so they still match) and empties are dropped.
+        let logger = StderrTransportLogger::new().with_redacted_headers([
+            "  X-LiteLLM-API-Key  ",
+            "   ",
+            "",
+        ]);
         let rendered = logger.format_event(&event);
         assert!(rendered.contains(&format!("> x-litellm-api-key: {REDACTED}")));
         assert!(!rendered.contains("sk-leak-me"));

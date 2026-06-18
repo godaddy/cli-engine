@@ -364,14 +364,18 @@ impl CliConfig {
     /// auth headers — for example a custom API-key header that an
     /// [`AuthInjector`](crate::transport::AuthInjector) sets. Matching is
     /// case-insensitive and additive: the built-in set is always redacted.
-    /// Calls accumulate.
+    /// Calls accumulate. Names are trimmed and empty entries are dropped, so a
+    /// mistyped value with stray whitespace cannot silently disable redaction.
     #[must_use]
     pub fn with_redacted_debug_headers(
         mut self,
         names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.redacted_debug_headers
-            .extend(names.into_iter().map(Into::into));
+            .extend(names.into_iter().filter_map(|name| {
+                let name = name.into().trim().to_owned();
+                (!name.is_empty()).then_some(name)
+            }));
         self
     }
 
