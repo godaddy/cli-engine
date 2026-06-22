@@ -51,6 +51,25 @@ pub fn config_base_dir() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
+/// Returns the user's home directory.
+///
+/// On non-Windows platforms this reads `$HOME`. On Windows, `%USERPROFILE%` is
+/// tried first, then `$HOME` as a fallback (matching shell environments such as
+/// Git Bash that set `HOME`).
+///
+/// Only absolute paths are accepted; a relative value is rejected so files
+/// never land relative to the current working directory. Returns `None` when
+/// no suitable variable is set or the resolved path is relative.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env_path("USERPROFILE").or_else(|| env_path("HOME"))
+    } else {
+        env_path("HOME")
+    }
+    .filter(|p| p.is_absolute())
+}
+
 /// Returns true only when `s` is a single, non-traversal path component that is
 /// valid on all supported platforms.
 ///
@@ -166,7 +185,13 @@ fn write_tmp_file(tmp_path: &Path, contents: &str) -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_env::with_xdg_config_home;
+    use crate::config::test_env::{EnvVarGuard, lock, with_xdg_config_home};
+
+    fn with_home<F: FnOnce() -> R, R>(value: &Path, f: F) -> R {
+        let _lock = lock();
+        let _restore = EnvVarGuard::set("HOME", Some(value));
+        f()
+    }
 
     #[test]
     fn safe_path_component_basic() {
@@ -219,6 +244,21 @@ mod tests {
         let dir = std::env::temp_dir().join("cli-engine-fs-base-test");
         with_xdg_config_home(&dir, || {
             assert_eq!(config_base_dir(), Some(dir.clone()));
+        });
+    }
+
+    #[test]
+    fn home_dir_honors_home_env() {
+        let dir = std::env::temp_dir().join("cli-engine-fs-home-test");
+        with_home(&dir, || {
+            assert_eq!(home_dir(), Some(dir.clone()));
+        });
+    }
+
+    #[test]
+    fn home_dir_rejects_relative() {
+        with_home(Path::new("."), || {
+            assert!(home_dir().is_none(), "relative HOME should be rejected");
         });
     }
 

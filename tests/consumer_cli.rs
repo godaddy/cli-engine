@@ -601,3 +601,31 @@ async fn view_id_takes_precedence_over_inline_view() {
     assert!(human.rendered.contains("active"), "{}", human.rendered);
     assert!(!human.rendered.contains("ID"), "{}", human.rendered);
 }
+
+#[tokio::test]
+async fn completion_print_bash_exits_zero_with_script() {
+    let cli = consumer_cli();
+    let out = cli.run(["my-cli", "completion", "bash"]).await;
+    assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+    assert!(
+        out.rendered.contains("my-cli"),
+        "script should reference binary name; got: {}",
+        out.rendered
+    );
+    assert!(
+        !out.rendered.is_empty(),
+        "script should be non-empty; got empty string"
+    );
+}
+
+#[tokio::test]
+async fn completion_print_unknown_shell_exits_nonzero() {
+    let cli = consumer_cli();
+    let out = cli.run(["my-cli", "completion", "notashell"]).await;
+    assert_ne!(out.exit_code, 0, "should fail for unknown shell");
+    assert!(
+        out.rendered.contains("notashell") || out.rendered.contains("unsupported"),
+        "error should mention the bad shell; got: {}",
+        out.rendered
+    );
+}

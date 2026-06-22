@@ -9,6 +9,7 @@ use std::{
 };
 
 mod builtins;
+mod completion;
 mod help;
 mod tree_render;
 
@@ -38,7 +39,9 @@ use crate::{
     search::{SearchDocument, SearchIndex},
 };
 
-use builtins::{guide_args, guide_command, help_args, help_command};
+use builtins::{
+    completion_args, completion_command, guide_args, guide_command, help_args, help_command,
+};
 use help::{GROUP_HELP_TEMPLATE, ROOT_HELP_TEMPLATE};
 pub use help::{ModuleHelpEntry, build_root_long, render_next_actions_human};
 
@@ -764,7 +767,8 @@ impl Cli {
         root = register_global_flags(root)
             .subcommand(help_command())
             .subcommand(guide_command())
-            .subcommand(Command::new("tree").about("Display full command tree"));
+            .subcommand(Command::new("tree").about("Display full command tree"))
+            .subcommand(completion_command());
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
         }
@@ -1442,6 +1446,54 @@ impl Cli {
             }
             return self.finish_run(self.render_guide(&matches));
         }
+        if command_path == "completion" {
+            if let Err(err) =
+                self.run_pre_run(&mut middleware, &command_path, &completion_args(&matches))
+            {
+                return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+            }
+            let args = completion_args(&matches);
+            let install = args
+                .get("install")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let shell_opt = args
+                .get("shell")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if install {
+                use crate::cli::completion::{detect_shell, parse_shell};
+                let shell = match shell_opt {
+                    Some(ref s) => match parse_shell(s) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return self.finish_run(render_cli_error(
+                                &middleware,
+                                &e,
+                                &self.config.app_id,
+                            ));
+                        }
+                    },
+                    None => match detect_shell() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return self.finish_run(render_cli_error(
+                                &middleware,
+                                &e,
+                                &self.config.app_id,
+                            ));
+                        }
+                    },
+                };
+                // TODO: T6 — completion::install is a stub until T6 lands
+                return self.finish_run(
+                    completion::install(&self.root, &self.config.name, shell)
+                        .await
+                        .unwrap_or_else(|e| render_cli_error(&middleware, &e, &self.config.app_id)),
+                );
+            }
+            return self.finish_run(self.render_completion_print(shell_opt));
+        }
         let Some(command) = self.commands.get(&command_path) else {
             if !command_path.is_empty()
                 && let Some(group) = find_command_by_colon_path(&self.root, &command_path)
@@ -1791,6 +1843,24 @@ impl Cli {
             Err(err) => CliRunOutput {
                 exit_code: 1,
                 rendered: err,
+            },
+        }
+    }
+
+    fn render_completion_print(&self, shell_opt: Option<String>) -> CliRunOutput {
+        use crate::cli::completion::{detect_shell, generate_script, parse_shell};
+        let shell_result = match shell_opt {
+            Some(s) => parse_shell(&s),
+            None => detect_shell(),
+        };
+        match shell_result {
+            Ok(shell) => CliRunOutput {
+                exit_code: 0,
+                rendered: generate_script(&self.root, &self.config.name, shell),
+            },
+            Err(e) => CliRunOutput {
+                exit_code: 1,
+                rendered: format!("error: {e}"),
             },
         }
     }
