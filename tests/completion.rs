@@ -30,6 +30,36 @@ mod completion_integration {
         INSTALL_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// RAII guard that sets an env var and restores its prior value on drop,
+    /// so a panicking assertion cannot leak state into other tests.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        #[allow(unsafe_code)]
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: every caller holds INSTALL_MUTEX for the guard's lifetime.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: the INSTALL_MUTEX guard outlives every EnvVarGuard.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Minimal test CLI – no real commands needed; completion generates scripts
     // from the clap Command tree, which just needs the binary to exist.
@@ -146,27 +176,14 @@ mod completion_integration {
     // (b) Auto-detect: set $SHELL, call `completion` with no shell arg.
     // =========================================================================
 
-    #[allow(unsafe_code)]
     #[tokio::test]
     async fn completion_autodetect_picks_bash_from_shell_env() {
         let cli = demo_cli();
 
         let _lock = env_lock();
-        let prev = std::env::var("SHELL").ok();
-        // SAFETY: holding INSTALL_MUTEX serializes all env mutation.
-        unsafe {
-            std::env::set_var("SHELL", "/usr/bin/bash");
-        }
+        let _shell = EnvVarGuard::set("SHELL", "/usr/bin/bash");
 
         let out = cli.run(["demo", "completion"]).await;
-
-        // SAFETY: restoring prior value while still holding the lock.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("SHELL", v),
-                None => std::env::remove_var("SHELL"),
-            }
-        }
 
         assert_eq!(out.exit_code, 0, "autodetect bash: {}", out.rendered);
         assert!(
@@ -180,25 +197,14 @@ mod completion_integration {
         );
     }
 
-    #[allow(unsafe_code)]
     #[tokio::test]
     async fn completion_autodetect_picks_zsh_from_shell_env() {
         let cli = demo_cli();
 
         let _lock = env_lock();
-        let prev = std::env::var("SHELL").ok();
-        unsafe {
-            std::env::set_var("SHELL", "/bin/zsh");
-        }
+        let _shell = EnvVarGuard::set("SHELL", "/bin/zsh");
 
         let out = cli.run(["demo", "completion"]).await;
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("SHELL", v),
-                None => std::env::remove_var("SHELL"),
-            }
-        }
 
         assert_eq!(out.exit_code, 0, "autodetect zsh: {}", out.rendered);
         assert!(
@@ -231,15 +237,9 @@ mod completion_integration {
         std::fs::create_dir_all(&config_dir).unwrap();
 
         let _lock = env_lock();
-        let prev_home = std::env::var("HOME").ok();
-        let prev_data = std::env::var("XDG_DATA_HOME").ok();
-        let prev_config = std::env::var("XDG_CONFIG_HOME").ok();
-        // SAFETY: holding INSTALL_MUTEX serializes all env mutation.
-        unsafe {
-            std::env::set_var("HOME", home.to_str().unwrap());
-            std::env::set_var("XDG_DATA_HOME", data_dir.to_str().unwrap());
-            std::env::set_var("XDG_CONFIG_HOME", config_dir.to_str().unwrap());
-        }
+        let _home = EnvVarGuard::set("HOME", home.to_str().unwrap());
+        let _data = EnvVarGuard::set("XDG_DATA_HOME", data_dir.to_str().unwrap());
+        let _config = EnvVarGuard::set("XDG_CONFIG_HOME", config_dir.to_str().unwrap());
 
         // First install.
         let out = cli.run(["demo", "completion", "--install", "bash"]).await;
@@ -293,25 +293,8 @@ mod completion_integration {
             1,
             "re-install must not duplicate the managed block"
         );
-
-        // SAFETY: restoring prior values while still holding the lock.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_data {
-                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-            match prev_config {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
     }
 
-    #[allow(unsafe_code)]
     #[tokio::test]
     async fn completion_install_fish_writes_script_under_config_home() {
         let cli = demo_cli();
@@ -323,14 +306,9 @@ mod completion_integration {
         let config_dir = tmp.path().join("config");
 
         let _lock = env_lock();
-        let prev_home = std::env::var("HOME").ok();
-        let prev_data = std::env::var("XDG_DATA_HOME").ok();
-        let prev_config = std::env::var("XDG_CONFIG_HOME").ok();
-        unsafe {
-            std::env::set_var("HOME", home.to_str().unwrap());
-            std::env::set_var("XDG_DATA_HOME", data_dir.to_str().unwrap());
-            std::env::set_var("XDG_CONFIG_HOME", config_dir.to_str().unwrap());
-        }
+        let _home = EnvVarGuard::set("HOME", home.to_str().unwrap());
+        let _data = EnvVarGuard::set("XDG_DATA_HOME", data_dir.to_str().unwrap());
+        let _config = EnvVarGuard::set("XDG_CONFIG_HOME", config_dir.to_str().unwrap());
 
         let out = cli.run(["demo", "completion", "--install", "fish"]).await;
         assert_eq!(out.exit_code, 0, "install fish: {}", out.rendered);
@@ -345,21 +323,6 @@ mod completion_integration {
             fish_script.starts_with(tmp.path()),
             "fish script must be under tempdir, not real HOME"
         );
-
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_data {
-                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-            match prev_config {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-        }
     }
 
     // =========================================================================

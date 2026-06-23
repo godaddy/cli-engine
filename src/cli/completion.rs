@@ -249,8 +249,9 @@ pub(crate) async fn install(
             let (canonical_rc, existing) = read_rc(&profile_path);
             let dot_source = format!(". \"{}\"", script_path.display());
             let new_rc = apply_managed_block(&existing, &bin_name, &dot_source);
-            // PowerShell uses CRLF line endings.
-            let new_rc_crlf = new_rc.replace('\n', "\r\n");
+            // Normalize to LF first so an existing CRLF profile is not turned into
+            // `\r\r\n`, then emit CRLF as PowerShell expects.
+            let new_rc_crlf = new_rc.replace("\r\n", "\n").replace('\n', "\r\n");
             (script_path, Some((canonical_rc, new_rc_crlf)))
         }
     };
