@@ -30,12 +30,22 @@ pub(crate) fn parse_shell(s: &str) -> crate::Result<Shell> {
         "bash" => Ok(Shell::Bash),
         "zsh" => Ok(Shell::Zsh),
         "fish" => Ok(Shell::Fish),
-        "powershell" => Ok(Shell::PowerShell),
+        // `pwsh` is the PowerShell Core executable name seen in $SHELL/argv.
+        "powershell" | "pwsh" => Ok(Shell::PowerShell),
         "elvish" => Ok(Shell::Elvish),
         _ => Err(CliCoreError::Message(format!(
             "unsupported shell: {s}; supported: bash, zsh, fish, powershell, elvish"
         ))),
     }
+}
+
+/// Basename split on both Unix and Windows separators, with a trailing `.exe` stripped.
+fn shell_basename(path: &str) -> &str {
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    basename
+        .strip_suffix(".exe")
+        .or_else(|| basename.strip_suffix(".EXE"))
+        .unwrap_or(basename)
 }
 
 /// Detects the current shell by inspecting the `$SHELL` environment variable.
@@ -48,8 +58,7 @@ pub(crate) fn detect_shell() -> crate::Result<Shell> {
 
     match shell_var {
         Some(path) => {
-            // Take the basename: last component after '/'
-            let basename = path.rsplit('/').next().unwrap_or(path.as_str());
+            let basename = shell_basename(&path);
             parse_shell(basename).map_err(|_| {
                 CliCoreError::Message(format!(
                     "could not detect shell: $SHELL is set to {path:?} but that is not a recognized shell; supported: bash, zsh, fish, powershell, elvish"
@@ -105,32 +114,26 @@ fn xdg_data_dir() -> Option<PathBuf> {
 /// Inserts or replaces a managed block delimited by `bin_name`-specific markers
 /// inside `content`.
 ///
-/// If both begin and end markers are present the entire span (inclusive) is
+/// If a begin marker is followed by an end marker, that span (inclusive) is
 /// replaced. Otherwise the block is appended.
 fn apply_managed_block(content: &str, bin_name: &str, body: &str) -> String {
     let begin = format!("# >>> {bin_name} completion (managed) >>>");
     let end = format!("# <<< {bin_name} completion (managed) <<<");
+    let new_block = format!("{begin}\n{body}\n{end}");
 
-    if content.contains(&begin) && content.contains(&end) {
-        // Replace the entire span from begin marker to end marker (inclusive).
-        let start_idx = match content.find(&begin) {
-            Some(i) => i,
-            None => return content.to_owned(),
-        };
-        let end_idx = match content.find(&end) {
-            Some(i) => i + end.len(),
-            None => return content.to_owned(),
-        };
-        let new_block = format!("{begin}\n{body}\n{end}");
+    // Only treat the end marker that follows the begin marker as the span end,
+    // so a stray earlier end marker cannot delete unrelated content.
+    if let Some(start_idx) = content.find(&begin)
+        && let Some(rel_end) = content[start_idx..].find(&end)
+    {
+        let end_idx = start_idx + rel_end + end.len();
         format!(
             "{}{new_block}{}",
             &content[..start_idx],
             &content[end_idx..]
         )
     } else {
-        // Append block to the end.
-        let new_block = format!("\n\n{begin}\n{body}\n{end}\n");
-        format!("{content}{new_block}")
+        format!("{content}\n\n{new_block}\n")
     }
 }
 
@@ -304,6 +307,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_shell_accepts_pwsh_alias() {
+        assert_eq!(parse_shell("pwsh").unwrap(), Shell::PowerShell);
+        assert_eq!(parse_shell("PWSH").unwrap(), Shell::PowerShell);
+        assert_eq!(parse_shell("powershell").unwrap(), Shell::PowerShell);
+    }
+
+    #[test]
+    fn shell_basename_handles_windows_paths_and_exe() {
+        assert_eq!(shell_basename("/usr/bin/bash"), "bash");
+        assert_eq!(
+            shell_basename("C:\\Program Files\\PowerShell\\pwsh.exe"),
+            "pwsh"
+        );
+        assert_eq!(shell_basename("pwsh.EXE"), "pwsh");
+        assert_eq!(shell_basename("zsh"), "zsh");
+    }
+
+    #[test]
     fn generate_script_returns_nonempty() {
         let cmd = Command::new("demo").subcommand(Command::new("list"));
         let script = generate_script(&cmd, "demo", Shell::Bash);
@@ -334,6 +355,18 @@ mod tests {
         assert!(result.contains("new body"), "new body should appear");
         assert!(result.contains("prefix"), "prefix should be preserved");
         assert!(result.contains("suffix"), "suffix should be preserved");
+    }
+
+    #[test]
+    fn managed_block_ignores_stray_end_marker_before_begin() {
+        let initial = "# <<< mybin completion (managed) <<<\nimportant user content\n# >>> mybin completion (managed) >>>\nold body\n# <<< mybin completion (managed) <<<";
+        let result = apply_managed_block(initial, "mybin", "new body");
+        assert!(
+            result.contains("important user content"),
+            "content between a stray end marker and the real begin marker must be preserved"
+        );
+        assert!(result.contains("new body"), "new body should appear");
+        assert!(!result.contains("old body"), "old body should be replaced");
     }
 
     #[allow(unsafe_code, clippy::await_holding_lock)]

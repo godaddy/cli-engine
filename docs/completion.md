@@ -44,6 +44,6 @@ The completion command manages the installation by appending a block to your she
 ### Notes
 
 - **bash**: Ensures `bash-completion` is sourced in your shell profile.
-- **zsh**: Adds the script directory to your `fpath` and calls `autoload -U compinit; compinit`.
+- **zsh**: Adds the script directory to your `fpath` and calls `autoload -Uz compinit && compinit`.
 - **fish**: Files placed in the completions directory are auto-loaded by fish; no shell configuration edit is required.
 - **powershell**: Adds the dot-source command to your PowerShell profile.

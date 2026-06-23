@@ -1485,7 +1485,6 @@ impl Cli {
                         }
                     },
                 };
-                // TODO: T6 — completion::install is a stub until T6 lands
                 return self.finish_run(
                     completion::install(&self.root, &self.config.name, shell)
                         .await
