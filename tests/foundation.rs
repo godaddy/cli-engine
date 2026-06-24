@@ -150,6 +150,11 @@ impl RecordingTransportLogger {
 
 static USER_AGENT_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Serializes tests in this binary that mutate the process-wide default
+/// transport logger, so an install/assert/reset window in one test cannot be
+/// disturbed by another test resetting the global concurrently.
+static TRANSPORT_LOGGER_TEST_LOCK: Mutex<()> = Mutex::const_new(());
+
 /// Restores the process-wide default User-Agent to the builtin on drop, so a
 /// panicking assertion in a test that publishes a config-derived UA cannot leak
 /// it into later tests. Hold alongside (declared after) the `USER_AGENT_TEST_LOCK`
@@ -5319,6 +5324,22 @@ async fn http_client_custom_logger_observes_request_response_and_retry_preserves
     assert_eq!(events[1].fields["status"], "429");
     assert_eq!(events[2].fields["attempt"], "2");
     assert_eq!(events[4].fields["status"], "200");
+    // Response events now carry the buffered body bytes.
+    assert_eq!(events[1].body.as_deref(), Some(b"slow down".as_slice()));
+    assert_eq!(
+        events[4].body.as_deref(),
+        Some(br#"{"ok":true}"#.as_slice())
+    );
+    // The successful response captures its headers (content-type from the server).
+    assert!(
+        events[4]
+            .headers
+            .as_ref()
+            .expect("response event should capture headers")
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                && value.contains("application/json"))
+    );
 }
 
 #[tokio::test]
@@ -5396,26 +5417,112 @@ async fn http_client_custom_logger_observes_raw_if_match_and_multipart_events_pr
         .await
         .expect("multipart without response should skip decode");
 
+    // Raw, if-match, and multipart paths now emit unified `http request` /
+    // `http response` events, and the raw/download/post-raw paths log the
+    // response too (size only, never the body bytes).
     assert_eq!(
         logger.messages(),
         vec![
-            "http request",
-            "http raw request",
-            "http raw request",
-            "http post raw request",
-            "http request",
-            "http response",
-            "http multipart request",
+            "http request",  // OPTIONS /raw
+            "http response", // 200 /raw
+            "http request",  // GET /download (429)
+            "http response", // 429
+            "http request",  // GET /download (200)
+            "http response", // 200 download (size only)
+            "http request",  // POST /post-raw
+            "http response", // 200 post raw (size only)
+            "http request",  // PUT /match
+            "http response", // 200 /match
+            "http request",  // POST /upload (multipart)
+            "http response", // 200 /upload
         ]
     );
     let events = logger.events();
     assert_eq!(events[0].fields["method"], "OPTIONS");
     assert!(events[0].fields["url"].ends_with("/raw"));
-    assert!(events[1].fields["url"].ends_with("/download"));
-    assert!(events[3].fields["url"].ends_with("/post-raw"));
-    assert_eq!(events[4].fields["method"], "PUT");
-    assert_eq!(events[5].fields["status"], "200");
-    assert!(events[6].fields["url"].ends_with("/upload"));
+    assert!(events[2].fields["url"].ends_with("/download"));
+    assert_eq!(events[3].fields["status"], "429");
+    // Download response logs its size, not the body bytes.
+    assert_eq!(events[5].fields["body_bytes"], "download".len().to_string());
+    assert!(events[5].body.is_none());
+    assert!(events[6].fields["url"].ends_with("/post-raw"));
+    assert_eq!(events[8].fields["method"], "PUT");
+    assert_eq!(events[9].fields["status"], "200");
+    assert!(events[10].fields["url"].ends_with("/upload"));
+    // Request events carry captured headers (e.g. the user-agent).
+    assert!(
+        events[0]
+            .headers
+            .as_ref()
+            .expect("request event should capture headers")
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+    );
+}
+
+#[tokio::test]
+async fn http_client_picks_up_process_global_default_logger() {
+    // The `--debug` feature works by publishing a process-global default logger
+    // that every HttpClient built afterward inherits without per-command wiring.
+    // This proves a client built WITHOUT `.logger(...)` records to that global.
+    //
+    // Hold the logger lock so the install/assert/reset window is isolated from
+    // any other test that mutates the same process-global.
+    let _logger_guard = TRANSPORT_LOGGER_TEST_LOCK.lock().await;
+    struct ResetLogger;
+    impl Drop for ResetLogger {
+        fn drop(&mut self) {
+            transport::set_default_transport_logger(Arc::new(transport::NoopTransportLogger));
+        }
+    }
+    let _reset = ResetLogger;
+
+    let logger = Arc::new(RecordingTransportLogger::default());
+    transport::set_default_transport_logger(logger.clone());
+
+    let server = TestServer::new(|request| {
+        assert!(request.contains("GET /global-logger-probe HTTP/1.1"));
+        http_response(
+            200,
+            &[("Content-Type", "application/json")],
+            r#"{"ok":true}"#,
+        )
+    });
+    // Built with the default logger (no `.logger(...)`): it must inherit the
+    // process-global default installed above.
+    let client = HttpClient::new(server.base_url(), Arc::new(NoopInjector));
+    let value: serde_json::Value = client
+        .get("/global-logger-probe")
+        .await
+        .expect("request should succeed");
+    assert_eq!(value, json!({"ok": true}));
+
+    // Filter by our unique path so concurrent tests sharing the global logger
+    // during this window cannot perturb the assertions.
+    let events = logger.events();
+    let probe: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event
+                .fields
+                .get("url")
+                .is_some_and(|url| url.ends_with("/global-logger-probe"))
+        })
+        .collect();
+    assert!(
+        probe.iter().any(|event| event.message == "http request"),
+        "global logger should record the request"
+    );
+    let response = probe
+        .iter()
+        .find(|event| event.message == "http response")
+        .expect("global logger should record the response");
+    assert_eq!(response.fields["status"], "200");
+    assert_eq!(
+        response.body.as_deref(),
+        Some(br#"{"ok":true}"#.as_slice()),
+        "response event should carry the buffered body"
+    );
 }
 
 #[tokio::test]
