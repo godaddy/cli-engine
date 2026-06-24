@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.1...cli-engine-v0.3.2) (2026-06-24)
+
+
+### Features
+
+* global --debug HTTP request/response logging ([#29](https://github.com/godaddy/cli-engine/issues/29)) ([7f4dbb2](https://github.com/godaddy/cli-engine/commit/7f4dbb2098d65da9dec73b0b190d544786498c99))
+
 ## [0.3.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.0...cli-engine-v0.3.1) (2026-06-17)
 
 
