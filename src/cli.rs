@@ -184,6 +184,11 @@ pub enum Argv0LinkMethod {
     Script,
 }
 
+/// Top-level subcommand names that are reserved by the engine and must not be
+/// used as module group names.  A consumer module group with a reserved name
+/// will be silently excluded from search results and built-in help output.
+pub(crate) const BUILTIN_COMMAND_NAMES: [&str; 4] = ["help", "guide", "tree", "completion"];
+
 /// Declarative configuration for a CLI application.
 ///
 /// Use [`CliConfig::new`] for the common path and chain `with_*` methods for
@@ -373,6 +378,13 @@ impl CliConfig {
     }
 
     /// Adds one domain module.
+    ///
+    /// # Reserved group names
+    ///
+    /// The top-level group names `help`, `guide`, `tree`, and `completion` are
+    /// reserved by the engine.  A module whose root group uses one of these
+    /// names will be silently excluded from search results and built-in help
+    /// output because the engine's own built-in takes precedence.
     #[must_use]
     pub fn with_module(mut self, module: Module) -> Self {
         self.modules.push(module);
@@ -380,6 +392,8 @@ impl CliConfig {
     }
 
     /// Adds several domain modules.
+    ///
+    /// See [`with_module`](Self::with_module) for the list of reserved group names.
     #[must_use]
     pub fn with_modules(mut self, modules: impl IntoIterator<Item = Module>) -> Self {
         self.modules.extend(modules);
@@ -1491,7 +1505,7 @@ impl Cli {
                         .unwrap_or_else(|e| render_cli_error(&middleware, &e, &self.config.app_id)),
                 );
             }
-            return self.finish_run(self.render_completion_print(shell_opt));
+            return self.finish_run(self.render_completion_print(shell_opt, &middleware));
         }
         let Some(command) = self.commands.get(&command_path) else {
             if !command_path.is_empty()
@@ -1846,21 +1860,28 @@ impl Cli {
         }
     }
 
-    fn render_completion_print(&self, shell_opt: Option<String>) -> CliRunOutput {
+    fn render_completion_print(
+        &self,
+        shell_opt: Option<String>,
+        middleware: &Middleware,
+    ) -> CliRunOutput {
         use crate::cli::completion::{detect_shell, generate_script, parse_shell};
-        let shell_result = match shell_opt {
-            Some(s) => parse_shell(&s),
-            None => detect_shell(),
+        let shell = match shell_opt {
+            Some(s) => match parse_shell(&s) {
+                Ok(s) => s,
+                Err(e) => return render_cli_error(middleware, &e, &self.config.app_id),
+            },
+            None => match detect_shell() {
+                Ok(s) => s,
+                Err(e) => return render_cli_error(middleware, &e, &self.config.app_id),
+            },
         };
-        match shell_result {
-            Ok(shell) => CliRunOutput {
+        match generate_script(&self.root, &self.config.name, shell) {
+            Ok(script) => CliRunOutput {
                 exit_code: 0,
-                rendered: generate_script(&self.root, &self.config.name, shell),
+                rendered: script,
             },
-            Err(e) => CliRunOutput {
-                exit_code: 1,
-                rendered: format!("error: {e}"),
-            },
+            Err(e) => render_cli_error(middleware, &e, &self.config.app_id),
         }
     }
 
@@ -1907,7 +1928,7 @@ impl Cli {
         // neither categorized nor an engine built-in, listed under a generic
         // "Commands" section. This keeps every command discoverable once clap's
         // auto subcommand list is suppressed by the root help template.
-        const BUILTINS: [&str; 4] = ["help", "guide", "tree", "completion"];
+        let builtins = BUILTIN_COMMAND_NAMES;
         let categorized: BTreeSet<&str> = self
             .module_entries
             .iter()
@@ -1917,7 +1938,7 @@ impl Cli {
             .root
             .get_subcommands()
             .filter(|command| !command.is_hide_set())
-            .filter(|command| !BUILTINS.contains(&command.get_name()))
+            .filter(|command| !builtins.contains(&command.get_name()))
             .filter(|command| !categorized.contains(command.get_name()))
             .map(|command| ModuleHelpEntry {
                 category: "Commands".to_owned(),
@@ -2347,7 +2368,7 @@ fn collect_command_search_documents(
     aliases: &mut Vec<String>,
     docs: &mut Vec<SearchDocument>,
 ) {
-    if command.is_hide_set() || command.get_name() == "completion" {
+    if command.is_hide_set() || BUILTIN_COMMAND_NAMES.contains(&command.get_name()) {
         return;
     }
     if command.get_subcommands().next().is_some() {

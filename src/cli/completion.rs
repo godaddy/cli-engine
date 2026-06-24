@@ -8,6 +8,7 @@ use crate::error::CliCoreError;
 
 /// The shells supported by the completion built-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `PowerShell` ends with the enum name `Shell`; the name is intentional.
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum Shell {
     /// Bourne-Again Shell.
@@ -39,13 +40,21 @@ pub(crate) fn parse_shell(s: &str) -> crate::Result<Shell> {
     }
 }
 
-/// Basename split on both Unix and Windows separators, with a trailing `.exe` stripped.
+/// Basename split on both Unix and Windows separators, with a trailing `.exe` stripped
+/// and a version suffix like `-5.9` removed (e.g. `"zsh-5.9"` → `"zsh"`).
 fn shell_basename(path: &str) -> &str {
     let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    basename
+    let name = basename
         .strip_suffix(".exe")
         .or_else(|| basename.strip_suffix(".EXE"))
-        .unwrap_or(basename)
+        .unwrap_or(basename);
+    // Strip version suffix like "-5.9" so versioned shell paths (e.g. "/usr/bin/zsh-5.9") work.
+    if let Some(idx) = name.find('-')
+        && name[idx + 1..].starts_with(|c: char| c.is_ascii_digit())
+    {
+        return &name[..idx];
+    }
+    name
 }
 
 /// Detects the current shell by inspecting the `$SHELL` environment variable.
@@ -91,12 +100,22 @@ fn to_clap_shell(shell: Shell) -> ClapShell {
 /// Generates a shell completion script for the given root [`Command`].
 ///
 /// Clones the command internally so the caller's instance is not mutated.
-/// Returns the generated script as a [`String`].
-pub(crate) fn generate_script(root: &Command, bin_name: &str, shell: Shell) -> String {
+///
+/// # Errors
+///
+/// Returns an error if `clap_complete` produces non-UTF-8 output (this is a
+/// bug in the upstream crate, but surfacing it is safer than silently writing
+/// a corrupted script).
+pub(crate) fn generate_script(
+    root: &Command,
+    bin_name: &str,
+    shell: Shell,
+) -> crate::Result<String> {
     let clap_shell = to_clap_shell(shell);
     let mut buf: Vec<u8> = Vec::new();
     generate(clap_shell, &mut root.clone(), bin_name, &mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
+    String::from_utf8(buf)
+        .map_err(|e| CliCoreError::message(format!("completion script is not valid UTF-8: {e}")))
 }
 
 /// Resolves `$XDG_DATA_HOME` with fallback to `$HOME/.local/share`.
@@ -114,8 +133,11 @@ fn xdg_data_dir() -> Option<PathBuf> {
 /// Inserts or replaces a managed block delimited by `bin_name`-specific markers
 /// inside `content`.
 ///
-/// If a begin marker is followed by an end marker, that span (inclusive) is
-/// replaced. Otherwise the block is appended.
+/// - If a complete begin+end pair is found, the span (inclusive) is replaced.
+/// - If only the begin marker is found (end was deleted), the orphaned begin
+///   line is removed before the new complete block is appended, preventing
+///   duplicate markers on re-runs.
+/// - If neither marker is present, the block is appended.
 fn apply_managed_block(content: &str, bin_name: &str, body: &str) -> String {
     let begin = format!("# >>> {bin_name} completion (managed) >>>");
     let end = format!("# <<< {bin_name} completion (managed) <<<");
@@ -131,6 +153,20 @@ fn apply_managed_block(content: &str, bin_name: &str, body: &str) -> String {
             "{}{new_block}{}",
             &content[..start_idx],
             &content[end_idx..]
+        )
+    } else if let Some(start_idx) = content.find(&begin) {
+        // Begin marker present but end marker missing; remove the orphaned begin
+        // line so repeated installs don't accumulate stray markers.
+        let after_begin = start_idx + begin.len();
+        let after_line = if content[after_begin..].starts_with('\n') {
+            after_begin + 1
+        } else {
+            after_begin
+        };
+        format!(
+            "{}{}\n\n{new_block}\n",
+            &content[..start_idx],
+            &content[after_line..]
         )
     } else {
         format!("{content}\n\n{new_block}\n")
@@ -167,7 +203,7 @@ pub(crate) async fn install(
     bin_name: &str,
     shell: Shell,
 ) -> crate::Result<CliRunOutput> {
-    let script = generate_script(root, bin_name, shell);
+    let script = generate_script(root, bin_name, shell)?;
     let bin_name = bin_name.to_owned();
 
     // Compute per-shell paths. All resolution happens on the calling thread
@@ -192,7 +228,16 @@ pub(crate) async fn install(
                 CliCoreError::message("could not resolve HOME for zsh completion")
             })?;
             let script_path = home.join(".zfunc").join(format!("_{bin_name}"));
-            let rc_path = home.join(".zshrc");
+            // When $ZDOTDIR is set, zsh reads its dotfiles from that directory
+            // instead of $HOME.  Write to $ZDOTDIR/.zshrc so the sourced block
+            // actually takes effect.
+            let zshrc_dir = std::env::var("ZDOTDIR")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.clone());
+            let rc_path = zshrc_dir.join(".zshrc");
             let (canonical_rc, existing) = read_rc(&rc_path);
             let fpath_line = format!(
                 "fpath=(\"{home}/.zfunc\" $fpath)\nautoload -Uz compinit && compinit",
@@ -326,9 +371,17 @@ mod tests {
     }
 
     #[test]
+    fn shell_basename_strips_version_suffix() {
+        assert_eq!(shell_basename("/usr/bin/zsh-5.9"), "zsh");
+        assert_eq!(shell_basename("bash-5.1"), "bash");
+        // Non-version hyphens (no digit after) are left intact.
+        assert_eq!(shell_basename("my-shell"), "my-shell");
+    }
+
+    #[test]
     fn generate_script_returns_nonempty() {
         let cmd = Command::new("demo").subcommand(Command::new("list"));
-        let script = generate_script(&cmd, "demo", Shell::Bash);
+        let script = generate_script(&cmd, "demo", Shell::Bash).unwrap();
         assert!(!script.is_empty(), "script should be non-empty");
         assert!(script.contains("demo"), "script should mention bin name");
     }
@@ -368,6 +421,27 @@ mod tests {
         );
         assert!(result.contains("new body"), "new body should appear");
         assert!(!result.contains("old body"), "old body should be replaced");
+    }
+
+    #[test]
+    fn managed_block_replaces_orphaned_begin_marker() {
+        // User deleted the end marker; re-running install must not accumulate
+        // a second begin marker.  Only the begin line is removed (not any
+        // content after it) because without the end marker the block extent
+        // is unknown.
+        let initial = "prefix\n# >>> mybin completion (managed) >>>\nsuffix";
+        let result = apply_managed_block(initial, "mybin", "new body");
+        assert_eq!(
+            result
+                .matches("# >>> mybin completion (managed) >>>")
+                .count(),
+            1,
+            "exactly one begin marker after replacing orphaned block"
+        );
+        assert!(result.contains("# <<< mybin completion (managed) <<<"));
+        assert!(result.contains("new body"), "new body should appear");
+        assert!(result.contains("prefix"), "prefix should be preserved");
+        assert!(result.contains("suffix"), "suffix should be preserved");
     }
 
     #[allow(unsafe_code, clippy::await_holding_lock)]
@@ -540,6 +614,72 @@ mod tests {
             match prev_data {
                 Some(v) => std::env::set_var("XDG_DATA_HOME", v),
                 None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    #[allow(unsafe_code, clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn install_zsh_respects_zdotdir() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let zdotdir = tmp.path().join("zdotdir");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&zdotdir).unwrap();
+
+        let _lock = crate::config::test_env::lock();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_zdotdir = std::env::var("ZDOTDIR").ok();
+        let prev_data = std::env::var("XDG_DATA_HOME").ok();
+        let prev_config = std::env::var("XDG_CONFIG_HOME").ok();
+        // SAFETY: caller holds XDG_TEST_MUTEX, serializing all mutation.
+        unsafe {
+            std::env::set_var("HOME", home.to_str().unwrap());
+            std::env::set_var("ZDOTDIR", zdotdir.to_str().unwrap());
+            std::env::set_var("XDG_DATA_HOME", tmp.path().join("data").to_str().unwrap());
+            std::env::set_var(
+                "XDG_CONFIG_HOME",
+                tmp.path().join("config").to_str().unwrap(),
+            );
+        }
+
+        let cmd = Command::new("testbin");
+        let result = install(&cmd, "testbin", Shell::Zsh).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        // rc should be in ZDOTDIR, not HOME
+        let zshrc_in_zdotdir = zdotdir.join(".zshrc");
+        assert!(
+            zshrc_in_zdotdir.exists(),
+            "zshrc should be written to $ZDOTDIR, not $HOME"
+        );
+        let zshrc_in_home = home.join(".zshrc");
+        assert!(
+            !zshrc_in_home.exists(),
+            "zshrc must NOT be written to $HOME when $ZDOTDIR is set"
+        );
+
+        let content = std::fs::read_to_string(&zshrc_in_zdotdir).unwrap();
+        assert!(content.contains("# >>> testbin completion (managed) >>>"));
+
+        // SAFETY: restoring state while still holding the lock.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_zdotdir {
+                Some(v) => std::env::set_var("ZDOTDIR", v),
+                None => std::env::remove_var("ZDOTDIR"),
+            }
+            match prev_data {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match prev_config {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
         }
     }

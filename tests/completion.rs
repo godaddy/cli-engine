@@ -19,10 +19,11 @@ mod completion_integration {
     use tempfile::TempDir;
 
     // ---------------------------------------------------------------------------
-    // Env mutation lock – integration tests cannot reach the crate-internal
-    // `config::test_env::lock()`, so we define our own equivalent mutex here.
-    // All tests that mutate HOME / XDG_* must hold this guard for their entire
-    // duration (including across `.await` points).
+    // Env mutation lock – integration tests are compiled into a separate crate
+    // and cannot access `pub(crate) config::test_env` from the library.  We
+    // re-implement the minimal env-var isolation helpers here.  If the pattern
+    // changes (e.g. Rust makes set_var safe), update both this file and
+    // src/config.rs where the canonical version lives.
     // ---------------------------------------------------------------------------
     static INSTALL_MUTEX: Mutex<()> = Mutex::new(());
 
