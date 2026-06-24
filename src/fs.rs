@@ -116,9 +116,12 @@ pub fn is_safe_path_component(s: &str) -> bool {
 }
 
 /// Writes `contents` to `path` via a uniquely-named temp file then renames it
-/// into place. On Unix the rename is atomic, the file is created `0600`, and the
-/// parent directory is best-effort restricted to `0700`. On Windows the rename
-/// replaces an existing destination but is not crash-atomic.
+/// into place. On Unix the rename is atomic, the file is created `0600`, and
+/// **newly-created** parent directories are best-effort restricted to `0700`.
+/// Pre-existing parent directories are left unchanged so callers that write
+/// into established locations (e.g. `$HOME`) do not alter their permissions.
+/// On Windows the rename replaces an existing destination but is not
+/// crash-atomic.
 ///
 /// **Blocking**: this function uses synchronous filesystem I/O. Call it from
 /// within [`tokio::task::spawn_blocking`] when used in an async context to
@@ -129,10 +132,14 @@ pub fn is_safe_path_component(s: &str) -> bool {
 /// fails.
 pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
     if let Some(parent) = path.parent() {
+        // Record whether the parent already existed so we only restrict
+        // permissions on directories we create, not on pre-existing ones
+        // such as $HOME (which other users need to traverse).
+        let parent_existed = parent.is_dir();
         std::fs::create_dir_all(parent)
             .map_err(|e| CliCoreError::message(format!("failed to create directory: {e}")))?;
         #[cfg(unix)]
-        {
+        if !parent_existed {
             use std::os::unix::fs::PermissionsExt as _;
             if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
             {

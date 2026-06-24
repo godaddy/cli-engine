@@ -49,7 +49,9 @@ fn shell_basename(path: &str) -> &str {
         .or_else(|| basename.strip_suffix(".EXE"))
         .unwrap_or(basename);
     // Strip version suffix like "-5.9" so versioned shell paths (e.g. "/usr/bin/zsh-5.9") work.
-    if let Some(idx) = name.find('-')
+    // Use rfind so a name like "fish-shell-3.7" strips only the trailing "-3.7", yielding
+    // "fish-shell" rather than "fish".
+    if let Some(idx) = name.rfind('-')
         && name[idx + 1..].starts_with(|c: char| c.is_ascii_digit())
     {
         return &name[..idx];
@@ -156,9 +158,12 @@ fn apply_managed_block(content: &str, bin_name: &str, body: &str) -> String {
         )
     } else if let Some(start_idx) = content.find(&begin) {
         // Begin marker present but end marker missing; remove the orphaned begin
-        // line so repeated installs don't accumulate stray markers.
+        // line so repeated installs don't accumulate stray markers.  Handle
+        // both LF and CRLF line endings after the marker.
         let after_begin = start_idx + begin.len();
-        let after_line = if content[after_begin..].starts_with('\n') {
+        let after_line = if content[after_begin..].starts_with("\r\n") {
+            after_begin + 2
+        } else if content[after_begin..].starts_with('\n') {
             after_begin + 1
         } else {
             after_begin
@@ -175,13 +180,42 @@ fn apply_managed_block(content: &str, bin_name: &str, body: &str) -> String {
 
 /// Reads existing rc file content, resolving symlinks.
 ///
-/// Returns `(canonical_path, content)`. If the file does not exist, returns the
-/// original path and an empty string.
-fn read_rc(rc_path: &Path) -> (PathBuf, String) {
-    // Resolve symlinks so writes go to the real file.
-    let canonical = std::fs::canonicalize(rc_path).unwrap_or_else(|_| rc_path.to_owned());
-    let content = std::fs::read_to_string(&canonical).unwrap_or_default();
-    (canonical, content)
+/// Returns `(canonical_path, content)`. If the file does not exist, returns
+/// the original path with empty content. If the file exists but cannot be
+/// read (e.g. permission denied), returns an error so the caller does not
+/// accidentally overwrite the file with only the managed block.
+fn read_rc(rc_path: &Path) -> crate::Result<(PathBuf, String)> {
+    match std::fs::canonicalize(rc_path) {
+        Ok(canonical) => {
+            // File exists; a read failure here (e.g. permission denied) must
+            // not be silently treated as "empty" — that would destroy the
+            // user's config when write_string_atomic overwrites it.
+            let content = std::fs::read_to_string(&canonical).map_err(|e| {
+                CliCoreError::message(format!("cannot read {}: {e}", canonical.display()))
+            })?;
+            Ok((canonical, content))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File genuinely does not exist; start with empty content.
+            Ok((rc_path.to_owned(), String::new()))
+        }
+        Err(e) => Err(CliCoreError::message(format!(
+            "cannot resolve {}: {e}",
+            rc_path.display()
+        ))),
+    }
+}
+
+/// Per-shell rc-file specification, computed on the async thread (env var reads
+/// only) and consumed inside `spawn_blocking` where the actual file I/O occurs.
+struct RcSpec {
+    /// Destination rc file path (not yet canonicalized).
+    path: PathBuf,
+    /// Body to wrap inside the managed-block markers.
+    body: String,
+    /// Normalize the full rc file content to CRLF after applying the block
+    /// (required by PowerShell).
+    crlf: bool,
 }
 
 /// Installs shell completions for `bin_name` into the appropriate per-shell
@@ -191,13 +225,14 @@ fn read_rc(rc_path: &Path) -> (PathBuf, String) {
 /// managed block is inserted or updated in the rc file. Fish auto-loads
 /// completions from its completions directory so no rc edit is needed.
 ///
-/// All file writes use [`crate::fs::write_string_atomic`] inside
-/// [`tokio::task::spawn_blocking`] to avoid blocking the async executor.
+/// Path resolution (env var reads) happens on the calling async thread; all
+/// file I/O is offloaded to a single [`tokio::task::spawn_blocking`] closure so
+/// the executor thread is never blocked.
 ///
 /// # Errors
 ///
-/// Returns an error if required home/config directories cannot be resolved or
-/// if any file write fails.
+/// Returns an error if required home/config directories cannot be resolved, if
+/// an existing rc file cannot be read, or if any file write fails.
 pub(crate) async fn install(
     root: &Command,
     bin_name: &str,
@@ -206,9 +241,8 @@ pub(crate) async fn install(
     let script = generate_script(root, bin_name, shell)?;
     let bin_name = bin_name.to_owned();
 
-    // Compute per-shell paths. All resolution happens on the calling thread
-    // (path resolution is fast) and the I/O is offloaded to spawn_blocking.
-    let (script_path, rc_info): (PathBuf, Option<(PathBuf, String)>) = match shell {
+    // Compute per-shell paths (env var reads only — no blocking I/O here).
+    let (script_path, rc_spec): (PathBuf, Option<RcSpec>) = match shell {
         Shell::Bash => {
             let data = xdg_data_dir().ok_or_else(|| {
                 CliCoreError::message("could not resolve XDG_DATA_HOME or HOME for bash completion")
@@ -217,10 +251,15 @@ pub(crate) async fn install(
             let rc_path = crate::fs::home_dir()
                 .ok_or_else(|| CliCoreError::message("could not resolve HOME for .bashrc"))?
                 .join(".bashrc");
-            let (canonical_rc, existing) = read_rc(&rc_path);
-            let source_line = format!("source \"{}\"", script_path.display());
-            let new_rc = apply_managed_block(&existing, &bin_name, &source_line);
-            (script_path, Some((canonical_rc, new_rc)))
+            let body = format!("source \"{}\"", script_path.display());
+            (
+                script_path,
+                Some(RcSpec {
+                    path: rc_path,
+                    body,
+                    crlf: false,
+                }),
+            )
         }
 
         Shell::Zsh => {
@@ -238,13 +277,18 @@ pub(crate) async fn install(
                 .filter(|p| p.is_absolute())
                 .unwrap_or_else(|| home.clone());
             let rc_path = zshrc_dir.join(".zshrc");
-            let (canonical_rc, existing) = read_rc(&rc_path);
-            let fpath_line = format!(
+            let body = format!(
                 "fpath=(\"{home}/.zfunc\" $fpath)\nautoload -Uz compinit && compinit",
                 home = home.display()
             );
-            let new_rc = apply_managed_block(&existing, &bin_name, &fpath_line);
-            (script_path, Some((canonical_rc, new_rc)))
+            (
+                script_path,
+                Some(RcSpec {
+                    path: rc_path,
+                    body,
+                    crlf: false,
+                }),
+            )
         }
 
         Shell::Fish => {
@@ -270,10 +314,15 @@ pub(crate) async fn install(
                 .join("elvish/lib")
                 .join(format!("{bin_name}-completion.elv"));
             let rc_path = config.join("elvish/rc.elv");
-            let (canonical_rc, existing) = read_rc(&rc_path);
-            let use_line = format!("use {bin_name}-completion");
-            let new_rc = apply_managed_block(&existing, &bin_name, &use_line);
-            (script_path, Some((canonical_rc, new_rc)))
+            let body = format!("use {bin_name}-completion");
+            (
+                script_path,
+                Some(RcSpec {
+                    path: rc_path,
+                    body,
+                    crlf: false,
+                }),
+            )
         }
 
         Shell::PowerShell => {
@@ -291,38 +340,46 @@ pub(crate) async fn install(
                 })?
                 .to_owned();
             let script_path = profile_dir.join(format!("{bin_name}-completion.ps1"));
-            let (canonical_rc, existing) = read_rc(&profile_path);
-            let dot_source = format!(". \"{}\"", script_path.display());
-            let new_rc = apply_managed_block(&existing, &bin_name, &dot_source);
+            let body = format!(". \"{}\"", script_path.display());
             // Normalize to LF first so an existing CRLF profile is not turned into
             // `\r\r\n`, then emit CRLF as PowerShell expects.
-            let new_rc_crlf = new_rc.replace("\r\n", "\n").replace('\n', "\r\n");
-            (script_path, Some((canonical_rc, new_rc_crlf)))
+            (
+                script_path,
+                Some(RcSpec {
+                    path: profile_path,
+                    body,
+                    crlf: true,
+                }),
+            )
         }
     };
 
-    // Write the completion script.
+    // All file I/O in one spawn_blocking: write script, read rc, apply block, write rc.
     let script_path_clone = script_path.clone();
-    let script_clone = script.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::fs::write_string_atomic(&script_path_clone, &script_clone)
+    let bin_name_for_block = bin_name.clone();
+    let written = tokio::task::spawn_blocking(move || -> crate::Result<Vec<String>> {
+        crate::fs::write_string_atomic(&script_path_clone, &script).map_err(|e| {
+            CliCoreError::message(format!("failed to write completion script: {e}"))
+        })?;
+        let mut written = vec![script_path_clone.display().to_string()];
+
+        if let Some(rc) = rc_spec {
+            let (canonical_rc, existing) = read_rc(&rc.path)?;
+            let new_content = apply_managed_block(&existing, &bin_name_for_block, &rc.body);
+            let final_content = if rc.crlf {
+                new_content.replace("\r\n", "\n").replace('\n', "\r\n")
+            } else {
+                new_content
+            };
+            crate::fs::write_string_atomic(&canonical_rc, &final_content)
+                .map_err(|e| CliCoreError::message(format!("failed to write rc file: {e}")))?;
+            written.push(canonical_rc.display().to_string());
+        }
+
+        Ok(written)
     })
     .await
-    .map_err(|e| CliCoreError::message(format!("spawn_blocking join error: {e}")))?
-    .map_err(|e| CliCoreError::message(format!("failed to write completion script: {e}")))?;
-
-    // Write the rc file if applicable.
-    let mut written = vec![script_path.display().to_string()];
-    if let Some((rc_path, rc_content)) = rc_info {
-        let rc_path_clone = rc_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::fs::write_string_atomic(&rc_path_clone, &rc_content)
-        })
-        .await
-        .map_err(|e| CliCoreError::message(format!("spawn_blocking join error: {e}")))?
-        .map_err(|e| CliCoreError::message(format!("failed to write rc file: {e}")))?;
-        written.push(rc_path.display().to_string());
-    }
+    .map_err(|e| CliCoreError::message(format!("spawn_blocking join error: {e}")))??;
 
     Ok(CliRunOutput {
         exit_code: 0,
@@ -376,6 +433,9 @@ mod tests {
         assert_eq!(shell_basename("bash-5.1"), "bash");
         // Non-version hyphens (no digit after) are left intact.
         assert_eq!(shell_basename("my-shell"), "my-shell");
+        // A hyphen in the base name before the version suffix is preserved
+        // because rfind picks the last hyphen, not the first.
+        assert_eq!(shell_basename("fish-shell-3.7"), "fish-shell");
     }
 
     #[test]
@@ -664,6 +724,7 @@ mod tests {
         assert!(content.contains("# >>> testbin completion (managed) >>>"));
 
         // SAFETY: restoring state while still holding the lock.
+        #[allow(clippy::items_after_statements)]
         unsafe {
             match prev_home {
                 Some(v) => std::env::set_var("HOME", v),
@@ -672,6 +733,144 @@ mod tests {
             match prev_zdotdir {
                 Some(v) => std::env::set_var("ZDOTDIR", v),
                 None => std::env::remove_var("ZDOTDIR"),
+            }
+            match prev_data {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match prev_config {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    #[allow(unsafe_code, clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn install_elvish_writes_script_and_rc() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+
+        let _lock = crate::config::test_env::lock();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_config = std::env::var("XDG_CONFIG_HOME").ok();
+        let prev_data = std::env::var("XDG_DATA_HOME").ok();
+        // SAFETY: caller holds XDG_TEST_MUTEX, serializing all mutation.
+        unsafe {
+            std::env::set_var("HOME", tmp.path().to_str().unwrap());
+            std::env::set_var("XDG_CONFIG_HOME", config_dir.to_str().unwrap());
+            std::env::set_var("XDG_DATA_HOME", tmp.path().join("data").to_str().unwrap());
+        }
+
+        let cmd = Command::new("testbin");
+        let result = install(&cmd, "testbin", Shell::Elvish).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let script = config_dir.join("elvish/lib/testbin-completion.elv");
+        assert!(
+            script.exists(),
+            "elvish script should exist at {}",
+            script.display()
+        );
+
+        let rc = config_dir.join("elvish/rc.elv");
+        let content = std::fs::read_to_string(&rc).unwrap();
+        assert!(content.contains("# >>> testbin completion (managed) >>>"));
+        assert!(
+            content.contains("use testbin-completion"),
+            "rc must contain the use line; got:\n{content}"
+        );
+
+        // SAFETY: restoring state while still holding the lock.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_config {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match prev_data {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+
+    #[allow(unsafe_code, clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn install_powershell_writes_script_and_profile_with_crlf() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let _lock = crate::config::test_env::lock();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_data = std::env::var("XDG_DATA_HOME").ok();
+        let prev_config = std::env::var("XDG_CONFIG_HOME").ok();
+        // SAFETY: caller holds XDG_TEST_MUTEX, serializing all mutation.
+        unsafe {
+            std::env::set_var("HOME", home.to_str().unwrap());
+            std::env::set_var("XDG_DATA_HOME", tmp.path().join("data").to_str().unwrap());
+            std::env::set_var(
+                "XDG_CONFIG_HOME",
+                tmp.path().join("config").to_str().unwrap(),
+            );
+        }
+
+        let cmd = Command::new("testbin");
+        let result = install(&cmd, "testbin", Shell::PowerShell).await.unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let script = home.join("Documents/PowerShell/testbin-completion.ps1");
+        assert!(
+            script.exists(),
+            "powershell script should exist at {}",
+            script.display()
+        );
+
+        let profile = home.join("Documents/PowerShell/Microsoft.PowerShell_profile.ps1");
+        let content = std::fs::read_to_string(&profile).unwrap();
+
+        // Profile must use CRLF line endings.
+        assert!(
+            content.contains("\r\n"),
+            "profile must use CRLF line endings; got:\n{content:?}"
+        );
+        assert!(
+            !content.contains("\r\r\n"),
+            "profile must not contain double-CR (CRLF normalization bug)"
+        );
+        assert!(content.contains("# >>> testbin completion (managed) >>>"));
+        assert!(
+            content.contains(". \""),
+            "profile must contain dot-source line"
+        );
+
+        // Second install must be idempotent.
+        install(&cmd, "testbin", Shell::PowerShell).await.unwrap();
+        let content2 = std::fs::read_to_string(&profile).unwrap();
+        assert_eq!(
+            content2
+                .matches("# >>> testbin completion (managed) >>>")
+                .count(),
+            1,
+            "re-install must not duplicate the managed block"
+        );
+        // Must still use CRLF after re-run on a CRLF file.
+        assert!(
+            !content2.contains("\r\r\n"),
+            "re-install must not produce double-CR"
+        );
+
+        // SAFETY: restoring state while still holding the lock.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
             }
             match prev_data {
                 Some(v) => std::env::set_var("XDG_DATA_HOME", v),

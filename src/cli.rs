@@ -185,8 +185,8 @@ pub enum Argv0LinkMethod {
 }
 
 /// Top-level subcommand names that are reserved by the engine and must not be
-/// used as module group names.  A consumer module group with a reserved name
-/// will be silently excluded from search results and built-in help output.
+/// used as module group names.  [`Cli::add_module_group`] rejects a group whose
+/// name matches a reserved name so the engine's built-in command always wins.
 pub(crate) const BUILTIN_COMMAND_NAMES: [&str; 4] = ["help", "guide", "tree", "completion"];
 
 /// Declarative configuration for a CLI application.
@@ -383,8 +383,8 @@ impl CliConfig {
     ///
     /// The top-level group names `help`, `guide`, `tree`, and `completion` are
     /// reserved by the engine.  A module whose root group uses one of these
-    /// names will be silently excluded from search results and built-in help
-    /// output because the engine's own built-in takes precedence.
+    /// names will be rejected at registration time (logged as a warning) so
+    /// the engine's own built-in always takes precedence in the command tree.
     #[must_use]
     pub fn with_module(mut self, module: Module) -> Self {
         self.modules.push(module);
@@ -1010,6 +1010,16 @@ impl Cli {
         category: impl Into<String>,
         group: RuntimeGroupSpec,
     ) -> &mut Self {
+        // Prevent consumer modules from shadowing engine built-ins in the clap
+        // command tree.  A reserved group name would override the engine's own
+        // subcommand (last-writer-wins in clap) and corrupt the dispatch path.
+        if BUILTIN_COMMAND_NAMES.contains(&group.group.name.as_str()) {
+            tracing::warn!(
+                name = %group.group.name,
+                "module group name is reserved by cli-engine built-ins; the group will not be registered"
+            );
+            return self;
+        }
         let category = category.into();
         if !group.group.hidden {
             self.module_entries.push(ModuleHelpEntry {
@@ -1461,12 +1471,10 @@ impl Cli {
             return self.finish_run(self.render_guide(&matches));
         }
         if command_path == "completion" {
-            if let Err(err) =
-                self.run_pre_run(&mut middleware, &command_path, &completion_args(&matches))
-            {
+            let args = completion_args(&matches);
+            if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
                 return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
             }
-            let args = completion_args(&matches);
             let install = args
                 .get("install")
                 .and_then(|v| v.as_bool())
