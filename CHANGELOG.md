@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.2...cli-engine-v0.3.3) (2026-06-25)
+
+
+### Features
+
+* add shell completion built-in (generate + install) ([#30](https://github.com/godaddy/cli-engine/issues/30)) ([021a45e](https://github.com/godaddy/cli-engine/commit/021a45e714237c6794038670dad79bd7e38952ce))
+
 ## [0.3.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.1...cli-engine-v0.3.2) (2026-06-24)
 
 
