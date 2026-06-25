@@ -1,4 +1,4 @@
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::Value;
 
 use crate::{
@@ -37,4 +37,63 @@ pub(crate) fn guide_args(matches: &ArgMatches) -> ValueMap {
         .map_or_else(ValueMap::new, |topic| {
             value_map([("topic", Value::String(topic.clone()))])
         })
+}
+
+pub(crate) fn completion_command() -> Command {
+    Command::new("completion")
+        .about("Generate or install shell completion scripts")
+        .arg(Arg::new("shell").value_name("shell").num_args(0..=1))
+        .arg(
+            Arg::new("install")
+                .long("install")
+                .action(ArgAction::SetTrue)
+                .help("Install completion script into shell config"),
+        )
+}
+
+pub(crate) fn completion_args(matches: &ArgMatches) -> ValueMap {
+    let leaf = leaf_matches(matches);
+    let shell = leaf.get_one::<String>("shell").cloned();
+    let install = leaf.get_flag("install");
+    let mut map = value_map([("install", Value::Bool(install))]);
+    if let Some(s) = shell {
+        map.insert("shell".to_owned(), Value::String(s));
+    }
+    map
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_command_parses_shell() {
+        let m = completion_command()
+            .try_get_matches_from(["completion", "zsh"])
+            .unwrap();
+        let leaf = leaf_matches(&m);
+        assert_eq!(
+            leaf.get_one::<String>("shell").map(String::as_str),
+            Some("zsh")
+        );
+    }
+
+    #[test]
+    fn completion_command_parses_install() {
+        let m = completion_command()
+            .try_get_matches_from(["completion", "--install"])
+            .unwrap();
+        let leaf = leaf_matches(&m);
+        assert!(leaf.get_flag("install"));
+    }
+
+    #[test]
+    fn completion_command_rejects_unknown_flag() {
+        assert!(
+            completion_command()
+                .try_get_matches_from(["completion", "--bogusflag"])
+                .is_err()
+        );
+    }
 }

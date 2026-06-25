@@ -9,6 +9,7 @@ use std::{
 };
 
 mod builtins;
+mod completion;
 mod help;
 mod tree_render;
 
@@ -38,7 +39,9 @@ use crate::{
     search::{SearchDocument, SearchIndex},
 };
 
-use builtins::{guide_args, guide_command, help_args, help_command};
+use builtins::{
+    completion_args, completion_command, guide_args, guide_command, help_args, help_command,
+};
 use help::{GROUP_HELP_TEMPLATE, ROOT_HELP_TEMPLATE};
 pub use help::{ModuleHelpEntry, build_root_long, render_next_actions_human};
 
@@ -180,6 +183,11 @@ pub enum Argv0LinkMethod {
     /// script on Unix. Useful when links are unavailable or inconvenient.
     Script,
 }
+
+/// Top-level subcommand names that are reserved by the engine and must not be
+/// used as module group names.  [`Cli::add_module_group`] rejects a group whose
+/// name matches a reserved name so the engine's built-in command always wins.
+pub(crate) const BUILTIN_COMMAND_NAMES: [&str; 4] = ["help", "guide", "tree", "completion"];
 
 /// Declarative configuration for a CLI application.
 ///
@@ -398,6 +406,13 @@ impl CliConfig {
     }
 
     /// Adds one domain module.
+    ///
+    /// # Reserved group names
+    ///
+    /// The top-level group names `help`, `guide`, `tree`, and `completion` are
+    /// reserved by the engine.  A module whose root group uses one of these
+    /// names will be rejected at registration time (logged as a warning) so
+    /// the engine's own built-in always takes precedence in the command tree.
     #[must_use]
     pub fn with_module(mut self, module: Module) -> Self {
         self.modules.push(module);
@@ -405,6 +420,8 @@ impl CliConfig {
     }
 
     /// Adds several domain modules.
+    ///
+    /// See [`with_module`](Self::with_module) for the list of reserved group names.
     #[must_use]
     pub fn with_modules(mut self, modules: impl IntoIterator<Item = Module>) -> Self {
         self.modules.extend(modules);
@@ -792,7 +809,8 @@ impl Cli {
         root = register_global_flags(root)
             .subcommand(help_command())
             .subcommand(guide_command())
-            .subcommand(Command::new("tree").about("Display full command tree"));
+            .subcommand(Command::new("tree").about("Display full command tree"))
+            .subcommand(completion_command());
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
         }
@@ -1020,6 +1038,16 @@ impl Cli {
         category: impl Into<String>,
         group: RuntimeGroupSpec,
     ) -> &mut Self {
+        // Prevent consumer modules from shadowing engine built-ins in the clap
+        // command tree.  A reserved group name would override the engine's own
+        // subcommand (last-writer-wins in clap) and corrupt the dispatch path.
+        if BUILTIN_COMMAND_NAMES.contains(&group.group.name.as_str()) {
+            tracing::warn!(
+                name = %group.group.name,
+                "module group name is reserved by cli-engine built-ins; the group will not be registered"
+            );
+            return self;
+        }
         let category = category.into();
         if !group.group.hidden {
             self.module_entries.push(ModuleHelpEntry {
@@ -1471,6 +1499,51 @@ impl Cli {
             }
             return self.finish_run(self.render_guide(&matches));
         }
+        if command_path == "completion" {
+            let args = completion_args(&matches);
+            if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
+                return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+            }
+            let install = args
+                .get("install")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let shell_opt = args
+                .get("shell")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if install {
+                use crate::cli::completion::{detect_shell, parse_shell};
+                let shell = match shell_opt {
+                    Some(ref s) => match parse_shell(s) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return self.finish_run(render_cli_error(
+                                &middleware,
+                                &e,
+                                &self.config.app_id,
+                            ));
+                        }
+                    },
+                    None => match detect_shell() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return self.finish_run(render_cli_error(
+                                &middleware,
+                                &e,
+                                &self.config.app_id,
+                            ));
+                        }
+                    },
+                };
+                return self.finish_run(
+                    completion::install(&self.root, &self.config.name, shell)
+                        .await
+                        .unwrap_or_else(|e| render_cli_error(&middleware, &e, &self.config.app_id)),
+                );
+            }
+            return self.finish_run(self.render_completion_print(shell_opt, &middleware));
+        }
         let Some(command) = self.commands.get(&command_path) else {
             if !command_path.is_empty()
                 && let Some(group) = find_command_by_colon_path(&self.root, &command_path)
@@ -1825,6 +1898,31 @@ impl Cli {
         }
     }
 
+    fn render_completion_print(
+        &self,
+        shell_opt: Option<String>,
+        middleware: &Middleware,
+    ) -> CliRunOutput {
+        use crate::cli::completion::{detect_shell, generate_script, parse_shell};
+        let shell = match shell_opt {
+            Some(s) => match parse_shell(&s) {
+                Ok(s) => s,
+                Err(e) => return render_cli_error(middleware, &e, &self.config.app_id),
+            },
+            None => match detect_shell() {
+                Ok(s) => s,
+                Err(e) => return render_cli_error(middleware, &e, &self.config.app_id),
+            },
+        };
+        match generate_script(&self.root, &self.config.name, shell) {
+            Ok(script) => CliRunOutput {
+                exit_code: 0,
+                rendered: script,
+            },
+            Err(e) => render_cli_error(middleware, &e, &self.config.app_id),
+        }
+    }
+
     fn render_help_command(&self, matches: &ArgMatches) -> CliRunOutput {
         let leaf = leaf_matches(matches);
         let parts = leaf
@@ -1868,7 +1966,7 @@ impl Cli {
         // neither categorized nor an engine built-in, listed under a generic
         // "Commands" section. This keeps every command discoverable once clap's
         // auto subcommand list is suppressed by the root help template.
-        const BUILTINS: [&str; 4] = ["help", "guide", "tree", "completion"];
+        let builtins = BUILTIN_COMMAND_NAMES;
         let categorized: BTreeSet<&str> = self
             .module_entries
             .iter()
@@ -1878,7 +1976,7 @@ impl Cli {
             .root
             .get_subcommands()
             .filter(|command| !command.is_hide_set())
-            .filter(|command| !BUILTINS.contains(&command.get_name()))
+            .filter(|command| !builtins.contains(&command.get_name()))
             .filter(|command| !categorized.contains(command.get_name()))
             .map(|command| ModuleHelpEntry {
                 category: "Commands".to_owned(),
@@ -2331,7 +2429,7 @@ fn collect_command_search_documents(
     aliases: &mut Vec<String>,
     docs: &mut Vec<SearchDocument>,
 ) {
-    if command.is_hide_set() || command.get_name() == "completion" {
+    if command.is_hide_set() || BUILTIN_COMMAND_NAMES.contains(&command.get_name()) {
         return;
     }
     if command.get_subcommands().next().is_some() {

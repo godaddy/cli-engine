@@ -51,6 +51,25 @@ pub fn config_base_dir() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
+/// Returns the user's home directory.
+///
+/// On non-Windows platforms this reads `$HOME`. On Windows, `%USERPROFILE%` is
+/// tried first, then `$HOME` as a fallback (matching shell environments such as
+/// Git Bash that set `HOME`).
+///
+/// Only absolute paths are accepted; a relative value is rejected so files
+/// never land relative to the current working directory. Returns `None` when
+/// no suitable variable is set or the resolved path is relative.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env_path("USERPROFILE").or_else(|| env_path("HOME"))
+    } else {
+        env_path("HOME")
+    }
+    .filter(|p| p.is_absolute())
+}
+
 /// Returns true only when `s` is a single, non-traversal path component that is
 /// valid on all supported platforms.
 ///
@@ -97,9 +116,12 @@ pub fn is_safe_path_component(s: &str) -> bool {
 }
 
 /// Writes `contents` to `path` via a uniquely-named temp file then renames it
-/// into place. On Unix the rename is atomic, the file is created `0600`, and the
-/// parent directory is best-effort restricted to `0700`. On Windows the rename
-/// replaces an existing destination but is not crash-atomic.
+/// into place. On Unix the rename is atomic, the file is created `0600`, and
+/// **newly-created** parent directories are best-effort restricted to `0700`.
+/// Pre-existing parent directories are left unchanged so callers that write
+/// into established locations (e.g. `$HOME`) do not alter their permissions.
+/// On Windows the rename replaces an existing destination but is not
+/// crash-atomic.
 ///
 /// **Blocking**: this function uses synchronous filesystem I/O. Call it from
 /// within [`tokio::task::spawn_blocking`] when used in an async context to
@@ -110,10 +132,14 @@ pub fn is_safe_path_component(s: &str) -> bool {
 /// fails.
 pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
     if let Some(parent) = path.parent() {
+        // Record whether the parent already existed so we only restrict
+        // permissions on directories we create, not on pre-existing ones
+        // such as $HOME (which other users need to traverse).
+        let parent_existed = parent.is_dir();
         std::fs::create_dir_all(parent)
             .map_err(|e| CliCoreError::message(format!("failed to create directory: {e}")))?;
         #[cfg(unix)]
-        {
+        if !parent_existed {
             use std::os::unix::fs::PermissionsExt as _;
             if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
             {
@@ -166,7 +192,13 @@ fn write_tmp_file(tmp_path: &Path, contents: &str) -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_env::with_xdg_config_home;
+    use crate::config::test_env::{EnvVarGuard, lock, with_xdg_config_home};
+
+    fn with_home<F: FnOnce() -> R, R>(value: &Path, f: F) -> R {
+        let _lock = lock();
+        let _restore = EnvVarGuard::set("HOME", Some(value));
+        f()
+    }
 
     #[test]
     fn safe_path_component_basic() {
@@ -219,6 +251,21 @@ mod tests {
         let dir = std::env::temp_dir().join("cli-engine-fs-base-test");
         with_xdg_config_home(&dir, || {
             assert_eq!(config_base_dir(), Some(dir.clone()));
+        });
+    }
+
+    #[test]
+    fn home_dir_honors_home_env() {
+        let dir = std::env::temp_dir().join("cli-engine-fs-home-test");
+        with_home(&dir, || {
+            assert_eq!(home_dir(), Some(dir.clone()));
+        });
+    }
+
+    #[test]
+    fn home_dir_rejects_relative() {
+        with_home(Path::new("."), || {
+            assert!(home_dir().is_none(), "relative HOME should be rejected");
         });
     }
 
