@@ -14,13 +14,16 @@ use crate::DetailedError;
 
 /// HTTP client implementation.
 pub mod client;
+mod debug_logger;
 /// Request auth injectors.
 pub mod injector;
 
 pub use client::{
     HttpClient, HttpClientBuilder, NoopTransportLogger, TransportLogEvent, TransportLogger,
-    set_default_user_agent,
+    debug_log_reqwest_request, debug_log_reqwest_response, default_transport_logger,
+    set_default_transport_logger, set_default_user_agent,
 };
+pub use debug_logger::StderrTransportLogger;
 pub use injector::{
     ApiKeyInjector, AuthInjector, BasicAuthInjector, BearerTokenInjector,
     ClientCredentialsInjector, CookieInjector, NoopInjector, ProviderBearerInjector, TokenFunc,

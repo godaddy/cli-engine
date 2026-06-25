@@ -222,6 +222,12 @@ pub struct CliConfig {
     /// the engine derives `name/version` from this config. See
     /// [`CliConfig::user_agent_string`].
     pub user_agent: Option<String>,
+    /// Extra HTTP header names to redact in `--debug transport` output, on top
+    /// of the built-in sensitive set (`authorization`, `proxy-authorization`,
+    /// `cookie`, `set-cookie`, `x-api-key`). Set CLI-specific secret-bearing
+    /// headers here — e.g. a custom API-key header an auth injector adds.
+    /// Populate via [`CliConfig::with_redacted_debug_headers`].
+    pub redacted_debug_headers: Vec<String>,
     /// Optional authorization gatekeeper injected into middleware.
     pub authz: Option<Arc<dyn Authorizer>>,
     /// Optional audit recorder injected into middleware.
@@ -356,6 +362,28 @@ impl CliConfig {
     #[must_use]
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Adds HTTP header names to redact in `--debug transport` output, on top of
+    /// the built-in sensitive set.
+    ///
+    /// Use this for CLI-specific secret-bearing headers that are not standard
+    /// auth headers — for example a custom API-key header that an
+    /// [`AuthInjector`](crate::transport::AuthInjector) sets. Matching is
+    /// case-insensitive and additive: the built-in set is always redacted.
+    /// Calls accumulate. Names are trimmed and empty entries are dropped, so a
+    /// mistyped value with stray whitespace cannot silently disable redaction.
+    #[must_use]
+    pub fn with_redacted_debug_headers(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.redacted_debug_headers
+            .extend(names.into_iter().filter_map(|name| {
+                let name = name.into().trim().to_owned();
+                (!name.is_empty()).then_some(name)
+            }));
         self
     }
 
@@ -1431,6 +1459,7 @@ impl Cli {
         };
         let mut middleware = self.middleware.clone();
         apply_global_flags(&mut middleware, &flags, command_timeout);
+        install_debug_transport_logger(&flags.debug, &self.config.redacted_debug_headers);
         if let Err(err) = self.apply_config_flags(&matches, &mut middleware) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
@@ -1563,6 +1592,7 @@ impl Cli {
             }
         };
         apply_global_flags(&mut middleware, &flags, command_timeout);
+        install_debug_transport_logger(&flags.debug, &self.config.redacted_debug_headers);
         if let Err(err) = self.apply_config_flags(&matches, &mut middleware) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
@@ -2177,6 +2207,29 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
     middleware.timeout = timeout;
     middleware.debug = flags.debug.clone();
     middleware.search = flags.search.clone();
+}
+
+/// Installs (or clears) the process-wide transport debug logger from the parsed
+/// `--debug` pattern.
+///
+/// When `--debug` selects the `transport` component the engine publishes a
+/// [`StderrTransportLogger`](crate::transport::StderrTransportLogger) — extended
+/// with any [`CliConfig::with_redacted_debug_headers`] entries — which every
+/// [`HttpClient`](crate::transport::HttpClient) built afterward picks up
+/// automatically, with no per-command wiring. The logger is reset to a noop when
+/// `transport` is not selected so the explicit setting always reflects the
+/// current invocation rather than a stale process-global from an earlier one.
+fn install_debug_transport_logger(debug: &str, extra_redacted: &[String]) {
+    let logger: Arc<dyn crate::transport::TransportLogger> =
+        if crate::debug_component_enabled(debug, "transport") {
+            Arc::new(
+                crate::transport::StderrTransportLogger::new()
+                    .with_redacted_headers(extra_redacted.iter().cloned()),
+            )
+        } else {
+            Arc::new(crate::transport::NoopTransportLogger)
+        };
+    crate::transport::set_default_transport_logger(logger);
 }
 
 async fn run_with_timeout<F, T>(
@@ -3099,6 +3152,27 @@ mod user_agent_tests {
             crate::transport::client::default_user_agent(),
             "uatest/4.5.6"
         );
+    }
+
+    #[test]
+    fn install_debug_transport_logger_tracks_the_debug_pattern() {
+        let _guard = crate::transport::client::TRANSPORT_LOGGER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultTransportLogger;
+
+        // `transport` selected -> an active (enabled) logger is published.
+        install_debug_transport_logger("transport", &[]);
+        assert!(crate::transport::default_transport_logger().enabled());
+
+        // Wildcard with transport excluded -> back to a disabled (noop) logger.
+        install_debug_transport_logger("*,-transport", &[]);
+        assert!(!crate::transport::default_transport_logger().enabled());
+
+        // Empty pattern -> disabled (noop).
+        install_debug_transport_logger("transport", &[]);
+        install_debug_transport_logger("", &[]);
+        assert!(!crate::transport::default_transport_logger().enabled());
     }
 }
 
