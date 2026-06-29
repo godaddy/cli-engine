@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.3...cli-engine-v0.3.4) (2026-06-29)
+
+
+### Bug Fixes
+
+* change default credential store from Keyring to Auto ([#31](https://github.com/godaddy/cli-engine/issues/31)) ([ccca021](https://github.com/godaddy/cli-engine/commit/ccca0218772501e87922dcf3058817c89b9eb539))
+* step up OAuth scopes for under-scoped tokens in non-interactive sessions ([#34](https://github.com/godaddy/cli-engine/issues/34)) ([9b82ee0](https://github.com/godaddy/cli-engine/commit/9b82ee09c4b15a2c4477737b1450c622c5d98c32))
+
 ## [0.3.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.2...cli-engine-v0.3.3) (2026-06-25)
 
 
