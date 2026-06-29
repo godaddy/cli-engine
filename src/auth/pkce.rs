@@ -58,7 +58,7 @@
 
 use std::{
     collections::HashMap,
-    io::{IsTerminal, Write},
+    io::Write,
     net::{SocketAddr, TcpListener},
     sync::Arc,
     time::Duration,
@@ -771,18 +771,17 @@ impl AuthProvider for PkceAuthProvider {
         // stepping up would open the browser twice).
         if let Some(token) = self.existing_token(env).await? {
             // Decide based on what the token grants (JWT claim plus the scopes it
-            // was obtained with). Step-up means re-consent: the authorization
-            // server has no silent scope-expansion grant, so in non-interactive
-            // contexts we fail fast rather than hang on the callback timeout.
+            // was obtained with).
             let granted = granted_scopes(&token);
-            match plan_step_up(&granted, required, session_is_interactive()) {
+            match plan_step_up(&granted, required) {
                 StepUp::Covered => return Ok(self.build_credential(env, &token)),
-                StepUp::MissingNonInteractive(missing) => {
-                    return Err(missing_scope_error(env, &missing));
-                }
-                // Re-consent: resolve per-env defaults only now (off the
-                // cached-token hot path) and request defaults ∪ already-granted ∪
-                // required so step-up never drops previously-acquired scopes.
+                // Step-up is re-consent: the authorization server has no silent
+                // scope-expansion grant, so acquire the missing scopes with a
+                // fresh login — the same browser flow the no-token path runs
+                // below, rather than failing when stdio is not a TTY. Resolve
+                // per-env defaults only now (off the cached-token hot path) and
+                // request defaults ∪ already-granted ∪ required so step-up never
+                // drops previously-acquired scopes.
                 StepUp::Reauthenticate => {
                     let union = union_scopes(&self.effective_scopes(env), &granted, required);
                     let token = self.reauthenticate(env, &union).await?;
@@ -1045,14 +1044,10 @@ fn granted_scopes(token: &StoredToken) -> Vec<String> {
 enum StepUp {
     /// The token already covers every required scope.
     Covered,
-    /// Re-authenticate (interactively) to acquire the missing scopes. The caller
-    /// builds the requested set (defaults ∪ granted ∪ required) only on this
-    /// path, so resolving per-env default scopes stays off the cached-token hot
-    /// path.
+    /// Re-authenticate to acquire the missing scopes. The caller builds the
+    /// requested set (defaults ∪ granted ∪ required) only on this path, so
+    /// resolving per-env default scopes stays off the cached-token hot path.
     Reauthenticate,
-    /// Scopes are missing but the session is non-interactive, so step-up cannot
-    /// prompt; carries the missing scopes for the error message.
-    MissingNonInteractive(Vec<String>),
 }
 
 /// Decides the step-up action from what the token grants versus what the command
@@ -1060,28 +1055,15 @@ enum StepUp {
 /// decision needs only `granted`/`required`, so the caller can avoid resolving
 /// defaults (potential `environments.toml` I/O) when a cached token already
 /// covers the requirement.
-fn plan_step_up(granted: &[String], required: &[String], interactive: bool) -> StepUp {
-    let missing: Vec<String> = required
+fn plan_step_up(granted: &[String], required: &[String]) -> StepUp {
+    let covered = required
         .iter()
-        .filter(|scope| !granted.iter().any(|have| have == *scope))
-        .cloned()
-        .collect();
-    if missing.is_empty() {
+        .all(|scope| granted.iter().any(|have| have == scope));
+    if covered {
         StepUp::Covered
-    } else if interactive {
-        StepUp::Reauthenticate
     } else {
-        StepUp::MissingNonInteractive(missing)
+        StepUp::Reauthenticate
     }
-}
-
-/// Treats the session as interactive if any stdio stream is a TTY, so
-/// redirecting one (e.g. capturing stderr) does not block a user who can still
-/// complete the browser flow.
-fn session_is_interactive() -> bool {
-    std::io::stdin().is_terminal()
-        || std::io::stdout().is_terminal()
-        || std::io::stderr().is_terminal()
 }
 
 /// Confirms a freshly (re)authenticated token actually grants `required`.
@@ -1109,20 +1091,6 @@ fn ensure_granted(env: &str, token: &StoredToken, required: &[String]) -> Result
             missing.join(", ")
         )))
     }
-}
-
-/// Error returned when required scopes are missing and step-up cannot prompt.
-fn missing_scope_error(env: &str, missing: &[String]) -> CliCoreError {
-    let display = missing.join(", ");
-    let hint = missing
-        .iter()
-        .map(|scope| format!("--scope {scope}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    CliCoreError::message(format!(
-        "access token for {env:?} is missing required scope(s): {display}; \
-         run `auth login --env {env} {hint}` in an interactive terminal"
-    ))
 }
 
 /// Returns the first claim value that is a non-empty string, in priority order.
@@ -1386,21 +1354,18 @@ mod tests {
     }
 
     #[test]
-    fn plan_step_up_covers_reauths_and_fails_non_interactive() {
+    fn plan_step_up_covers_or_reauthenticates() {
         let granted = vec!["base".to_owned(), "read".to_owned()];
         let read = vec!["read".to_owned()];
         let write = vec!["write".to_owned()];
 
         // Already covered (decision needs only granted vs required).
-        assert_eq!(plan_step_up(&granted, &read, true), StepUp::Covered);
-        // Missing + interactive → reauth (the caller builds the union with
-        // per-env defaults only on this path).
-        assert_eq!(plan_step_up(&granted, &write, true), StepUp::Reauthenticate);
-        // Missing + non-interactive → fail fast, carrying the missing scopes.
-        assert_eq!(
-            plan_step_up(&granted, &write, false),
-            StepUp::MissingNonInteractive(vec!["write".to_owned()])
-        );
+        assert_eq!(plan_step_up(&granted, &read), StepUp::Covered);
+        // Missing → reauthenticate, with no interactivity gate: step-up now
+        // mirrors the no-token path and acquires the scope via a fresh login
+        // rather than failing when stdio is not a TTY. The caller builds the
+        // union (defaults ∪ granted ∪ required) only on this path.
+        assert_eq!(plan_step_up(&granted, &write), StepUp::Reauthenticate);
         // The union itself (defaults ∪ granted ∪ required) is covered by
         // union_scopes' own test.
     }
