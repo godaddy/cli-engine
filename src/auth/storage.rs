@@ -18,7 +18,7 @@
 //!
 //! [`default_storage`] picks a backend from the resolved
 //! [`CredentialStore`](crate::config::CredentialStore) mode (CLI flag, env var,
-//! config file, or the `Keyring` default); see [`crate::config`].
+//! config file, or the `Auto` default); see [`crate::config`].
 
 use std::sync::Arc;
 

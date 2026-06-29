@@ -5,8 +5,8 @@
 //! These tests mutate process-global state (`XDG_CONFIG_HOME`, the
 //! `ITEST_CREDENTIAL_STORE` env var, and the `--credential-store` flag latch),
 //! so they serialize on a shared lock. The file-storage backend is the seam we
-//! assert against: a credential file is read only in `file`/`auto` modes, never
-//! in the default `keyring` mode — so "status shows logged in" cleanly
+//! assert against: a credential file is read in `file`/`auto` modes but never
+//! in explicit `keyring` mode — so "status shows logged in" cleanly
 //! distinguishes which backend the engine selected without needing a keychain
 //! daemon or a browser login.
 #![cfg(feature = "pkce-auth")]
@@ -138,17 +138,25 @@ async fn config_file_selects_file_store() {
 }
 
 #[tokio::test]
-async fn default_keyring_mode_ignores_credential_file() {
+async fn explicit_keyring_mode_ignores_credential_file() {
     let _guard = lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let _xdg = EnvGuard::set("XDG_CONFIG_HOME", Some(&dir.path().to_string_lossy()));
     let _env = EnvGuard::set(ENV_VAR, None);
-    // No config file => default Keyring mode. A credential file exists but must
-    // be ignored (keyring-only never reads the file).
+    // Explicit keyring mode: a credential file exists but must be ignored
+    // (keyring-only never reads the file).
     seed_credential_file(dir.path());
 
     let out = build_cli()
-        .run(["itest", "auth", "status", "--env", "dev"])
+        .run([
+            "itest",
+            "--credential-store",
+            "keyring",
+            "auth",
+            "status",
+            "--env",
+            "dev",
+        ])
         .await;
 
     assert_ne!(out.exit_code, 0, "expected not-logged-in: {}", out.rendered);
@@ -157,6 +165,11 @@ async fn default_keyring_mode_ignores_credential_file() {
         "keyring mode must not read the credential file: {}",
         out.rendered
     );
+
+    // Reset the flag latch for subsequent tests.
+    let _reset = build_cli()
+        .run(["itest", "auth", "status", "--env", "dev"])
+        .await;
 }
 
 #[tokio::test]

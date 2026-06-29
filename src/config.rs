@@ -11,7 +11,7 @@
 //! [`CredentialStore`]. The effective mode is resolved with the precedence
 //!
 //! ```text
-//! --credential-store flag  >  ${PREFIX}_CREDENTIAL_STORE env  >  config file  >  default (Keyring)
+//! --credential-store flag  >  ${PREFIX}_CREDENTIAL_STORE env  >  config file  >  default (Auto)
 //! ```
 //!
 //! where `${PREFIX}` is the app id sanitized by
@@ -31,19 +31,18 @@ use crate::error::CliCoreError;
 /// Where an auth provider stores credentials.
 ///
 /// The variant selects a concrete storage backend
-/// (see [`crate::auth::storage`]). `Keyring` is the default and preserves the
-/// historical behavior (system keychain only, hard error when unavailable);
-/// `File` is the escape hatch for environments without a working keychain
-/// (headless Linux, WSL).
+/// (see [`crate::auth::storage`]). `Auto` is the default and tries the system
+/// keychain first, falling back to an unencrypted file when the keychain is
+/// unavailable (headless Linux, WSL).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CredentialStore {
     /// Try the system keychain; transparently fall back to an unencrypted file
-    /// when the keychain backend is unavailable.
+    /// when the keychain backend is unavailable. This is the default.
+    #[default]
     Auto,
     /// System keychain only. A keychain failure is a hard error and no file is
-    /// ever written. This is the default.
-    #[default]
+    /// ever written.
     Keyring,
     /// File only: never contact the system keychain. Credentials are written as
     /// unencrypted JSON under the config base directory.
@@ -656,10 +655,10 @@ mod tests {
     }
 
     #[test]
-    fn resolution_defaults_to_keyring() {
+    fn resolution_defaults_to_auto() {
         assert_eq!(
             resolve_credential_store_with(None, None, &EngineConfig::default()),
-            CredentialStore::Keyring
+            CredentialStore::Auto
         );
     }
 
@@ -678,7 +677,7 @@ mod tests {
         // invalid env with no file falls through to the default
         assert_eq!(
             resolve_credential_store_with(None, Some("garbage"), &EngineConfig::default()),
-            CredentialStore::Keyring
+            CredentialStore::Auto
         );
     }
 
