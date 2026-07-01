@@ -283,11 +283,15 @@ pub fn render_human_with_view(envelope: &Envelope, columns: Option<&[TableColumn
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
     }
-    let body = match &envelope.data {
+    let mut body = match &envelope.data {
         None => "(no data)\n".to_owned(),
         Some(data) => render_data_body(data, columns),
     };
-    format!("{body}{}", render_next_actions(&envelope.next_actions))
+    // Append the footer in place: the common no-footer path leaves `body`
+    // untouched (no realloc/copy), and non-empty actions are written directly
+    // into it (no per-action temporaries).
+    append_next_actions(&mut body, &envelope.next_actions);
+    body
 }
 
 /// Render just the data portion of a success envelope (no next-steps footer).
@@ -320,21 +324,22 @@ fn render_data_body(data: &Value, columns: Option<&[TableColumn]>) -> String {
     }
 }
 
-/// Build the "Next steps:" footer listing suggested follow-up commands, or an
-/// empty string when there are none. Each action shows its command template
+/// Append a "Next steps:" footer listing suggested follow-up commands to `out`
+/// (a no-op when there are none). Each action shows its command template
 /// (placeholders like `<domain>` shown as-is) with the description beneath it.
-fn render_next_actions(actions: &[NextAction]) -> String {
+/// Writes directly into `out` to avoid per-action temporaries.
+fn append_next_actions(out: &mut String, actions: &[NextAction]) {
     if actions.is_empty() {
-        return String::new();
+        return;
     }
-    let mut out = String::from("\nNext steps:\n");
+    out.push_str("\nNext steps:\n");
     for action in actions {
-        out.push_str(&format!(
-            "  {}\n      {}\n",
-            action.command, action.description
-        ));
+        out.push_str("  ");
+        out.push_str(&action.command);
+        out.push_str("\n      ");
+        out.push_str(&action.description);
+        out.push('\n');
     }
-    out
 }
 
 fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String {
