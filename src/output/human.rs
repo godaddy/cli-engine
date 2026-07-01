@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::Value;
 
-use super::Envelope;
+use super::{Envelope, NextAction};
 
 /// Column definition for registered human table views.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,12 +277,25 @@ fn select_columns(columns: &[TableColumn], fields: &str) -> Vec<TableColumn> {
 /// Renders an envelope using explicit table columns.
 #[must_use]
 pub fn render_human_with_view(envelope: &Envelope, columns: Option<&[TableColumn]>) -> String {
+    // Errors render on their own; success output gets the data body plus, when
+    // present, a "Next steps:" footer built from the envelope's next_actions
+    // (these otherwise appear only in JSON/TOON).
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
     }
-    let Some(data) = &envelope.data else {
-        return "(no data)\n".to_owned();
+    let mut body = match &envelope.data {
+        None => "(no data)\n".to_owned(),
+        Some(data) => render_data_body(data, columns),
     };
+    // Append the footer in place: the common no-footer path leaves `body`
+    // untouched (no realloc/copy), and non-empty actions are written directly
+    // into it (no per-action temporaries).
+    append_next_actions(&mut body, &envelope.next_actions);
+    body
+}
+
+/// Render just the data portion of a success envelope (no next-steps footer).
+fn render_data_body(data: &Value, columns: Option<&[TableColumn]>) -> String {
     if let Some(columns) = columns {
         return match data {
             Value::Array(items) => render_array_with_columns(items, columns),
@@ -308,6 +321,24 @@ pub fn render_human_with_view(envelope: &Envelope, columns: Option<&[TableColumn
             }
         }
         other => format!("{}\n", format_plain_value(other)),
+    }
+}
+
+/// Append a "Next steps:" footer listing suggested follow-up commands to `out`
+/// (a no-op when there are none). Each action shows its command template
+/// (placeholders like `<domain>` shown as-is) with the description beneath it.
+/// Writes directly into `out` to avoid per-action temporaries.
+fn append_next_actions(out: &mut String, actions: &[NextAction]) {
+    if actions.is_empty() {
+        return;
+    }
+    out.push_str("\nNext steps:\n");
+    for action in actions {
+        out.push_str("  ");
+        out.push_str(&action.command);
+        out.push_str("\n      ");
+        out.push_str(&action.description);
+        out.push('\n');
     }
 }
 
@@ -508,4 +539,49 @@ fn truncate(value: &str, width: usize) -> String {
 
 fn format_number(number: &serde_json::Number) -> String {
     number.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn human_output_appends_next_steps_footer() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+            .with_next_actions(vec![NextAction::new(
+                "domain purchase --quote-token <token> --agree --confirm",
+                "Register at the quoted price",
+            )]);
+        let out = render_human(&envelope);
+        // Data still renders as before…
+        assert!(out.contains("domain: example.com"), "{out}");
+        // …followed by a Next steps footer with the command and its description.
+        assert!(out.contains("\nNext steps:\n"), "{out}");
+        assert!(
+            out.contains("domain purchase --quote-token <token> --agree --confirm"),
+            "{out}"
+        );
+        assert!(out.contains("Register at the quoted price"), "{out}");
+    }
+
+    #[test]
+    fn human_output_has_no_footer_without_next_actions() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain");
+        let out = render_human(&envelope);
+        assert!(out.contains("domain: example.com"), "{out}");
+        assert!(
+            !out.contains("Next steps"),
+            "no footer when there are no actions: {out}"
+        );
+    }
+
+    #[test]
+    fn error_output_has_no_next_steps_footer() {
+        // An error envelope carries no next_actions and must render only the error.
+        let envelope = Envelope::error("ERROR", "boom", "domain");
+        let out = render_human(&envelope);
+        assert!(out.starts_with("Error:"), "{out}");
+        assert!(!out.contains("Next steps"), "{out}");
+    }
 }
