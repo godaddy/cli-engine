@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::Value;
 
-use super::Envelope;
+use super::{Envelope, NextAction};
 
 /// Column definition for registered human table views.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -277,12 +277,21 @@ fn select_columns(columns: &[TableColumn], fields: &str) -> Vec<TableColumn> {
 /// Renders an envelope using explicit table columns.
 #[must_use]
 pub fn render_human_with_view(envelope: &Envelope, columns: Option<&[TableColumn]>) -> String {
+    // Errors render on their own; success output gets the data body plus, when
+    // present, a "Next steps:" footer built from the envelope's next_actions
+    // (these otherwise appear only in JSON/TOON).
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
     }
-    let Some(data) = &envelope.data else {
-        return "(no data)\n".to_owned();
+    let body = match &envelope.data {
+        None => "(no data)\n".to_owned(),
+        Some(data) => render_data_body(data, columns),
     };
+    format!("{body}{}", render_next_actions(&envelope.next_actions))
+}
+
+/// Render just the data portion of a success envelope (no next-steps footer).
+fn render_data_body(data: &Value, columns: Option<&[TableColumn]>) -> String {
     if let Some(columns) = columns {
         return match data {
             Value::Array(items) => render_array_with_columns(items, columns),
@@ -309,6 +318,23 @@ pub fn render_human_with_view(envelope: &Envelope, columns: Option<&[TableColumn
         }
         other => format!("{}\n", format_plain_value(other)),
     }
+}
+
+/// Build the "Next steps:" footer listing suggested follow-up commands, or an
+/// empty string when there are none. Each action shows its command template
+/// (placeholders like `<domain>` shown as-is) with the description beneath it.
+fn render_next_actions(actions: &[NextAction]) -> String {
+    if actions.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nNext steps:\n");
+    for action in actions {
+        out.push_str(&format!(
+            "  {}\n      {}\n",
+            action.command, action.description
+        ));
+    }
+    out
 }
 
 fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String {
@@ -508,4 +534,49 @@ fn truncate(value: &str, width: usize) -> String {
 
 fn format_number(number: &serde_json::Number) -> String {
     number.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn human_output_appends_next_steps_footer() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+            .with_next_actions(vec![NextAction::new(
+                "domain purchase --quote-token <token> --agree --confirm",
+                "Register at the quoted price",
+            )]);
+        let out = render_human(&envelope);
+        // Data still renders as before…
+        assert!(out.contains("domain: example.com"), "{out}");
+        // …followed by a Next steps footer with the command and its description.
+        assert!(out.contains("\nNext steps:\n"), "{out}");
+        assert!(
+            out.contains("domain purchase --quote-token <token> --agree --confirm"),
+            "{out}"
+        );
+        assert!(out.contains("Register at the quoted price"), "{out}");
+    }
+
+    #[test]
+    fn human_output_has_no_footer_without_next_actions() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain");
+        let out = render_human(&envelope);
+        assert!(out.contains("domain: example.com"), "{out}");
+        assert!(
+            !out.contains("Next steps"),
+            "no footer when there are no actions: {out}"
+        );
+    }
+
+    #[test]
+    fn error_output_has_no_next_steps_footer() {
+        // An error envelope carries no next_actions and must render only the error.
+        let envelope = Envelope::error("ERROR", "boom", "domain");
+        let out = render_human(&envelope);
+        assert!(out.starts_with("Error:"), "{out}");
+        assert!(!out.contains("Next steps"), "{out}");
+    }
 }
