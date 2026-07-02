@@ -574,7 +574,7 @@ The markdown renderer is line-oriented: it preserves every newline in the source
 
 - Write each paragraph as a single physical line. Do not hard-wrap prose at a fixed column (~80/100) — a hard-wrapped paragraph keeps its authored breaks on wide terminals and only re-wraps the leftover fragments on narrow ones. A one-line paragraph fills whatever width the reader's terminal has.
 - Separate blocks (paragraphs, lists, headings) with a blank line.
-- Put code inside fenced ``` blocks. Code is laid out verbatim, never reflowed, so it is the right place for the only line breaks that must survive as authored.
+- Put code inside fenced code blocks. Code is laid out verbatim, never reflowed, so it is the right place for the only line breaks that must survive as authored.
 - Use `* ` for bullet lists and keep each item on a single line. A `* ` item that wraps keeps a hanging indent under its text, which is what you want.
 
 #### Known issues

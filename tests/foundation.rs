@@ -1035,6 +1035,8 @@ async fn cli_runtime_guide_command_lists_topics_and_renders_content() {
 
 #[tokio::test]
 async fn cli_runtime_guide_human_reflows_long_lines_but_other_formats_stay_raw() {
+    use std::io::IsTerminal;
+
     let long_line = "This is a deliberately long single line of guide prose that should be \
         reflowed by the renderer instead of wrapping mid-word inside a narrow terminal window.";
     let content = format!("# Deploy\n\n{long_line}\n");
@@ -1057,10 +1059,29 @@ async fn cli_runtime_guide_human_reflows_long_lines_but_other_formats_stay_raw()
     assert_eq!(raw.exit_code, 0);
     assert_eq!(raw.rendered, content);
 
-    // human reflows the long line. Tests run on a non-TTY, so this uses the
-    // deterministic no-color, width-80 path.
+    // An invalid explicit --output is rejected, matching normal commands
+    // rather than silently emitting raw content.
+    let invalid = cli
+        .run(["my-cli", "guide", "deploy", "--output", "yaml"])
+        .await;
+    assert_ne!(invalid.exit_code, 0);
+    assert!(
+        invalid.rendered.contains("invalid output format"),
+        "expected invalid-output-format error, got: {:?}",
+        invalid.rendered,
+    );
+
     let human = cli.run(["my-cli", "guide", "deploy", "--human"]).await;
     assert_eq!(human.exit_code, 0);
+
+    // The remaining checks describe the deterministic non-TTY path (no color,
+    // fixed width 80). If the test runs attached to a real terminal (e.g. with
+    // `-- --nocapture`), `stdout().is_terminal()` is true and the renderer uses
+    // ANSI color and the live width instead, so skip the strict assertions.
+    if std::io::stdout().is_terminal() {
+        return;
+    }
+
     assert_ne!(human.rendered, content, "human output should be reflowed");
     assert!(
         !human.rendered.contains('\u{1b}'),

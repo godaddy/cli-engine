@@ -1886,6 +1886,17 @@ impl Cli {
     fn render_guide(&self, matches: &ArgMatches, output_format: &str) -> CliRunOutput {
         use std::io::IsTerminal;
 
+        // Reject an invalid explicit `--output` here too, matching the normal
+        // command path and `render_root`; otherwise an unrecognized value (e.g.
+        // `--output yaml`) would silently fall through and emit raw content.
+        if !crate::output::is_valid_output_format(output_format) {
+            let err = CliCoreError::InvalidOutputFormat(output_format.to_owned());
+            return CliRunOutput {
+                exit_code: exit_code_for_error(&err),
+                rendered: err.to_string(),
+            };
+        }
+
         let leaf = leaf_matches(matches);
         let topic = leaf.get_one::<String>("topic").map(String::as_str);
         match guide_content(&self.guide_entries, topic) {

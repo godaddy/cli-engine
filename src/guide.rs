@@ -125,8 +125,10 @@ pub fn parse_front_matter(content: &str) -> (String, String) {
 
 /// Renders guide markdown into a terminal-friendly string.
 ///
-/// Each source line is individually wrapped to `width` columns at word
-/// boundaries, so no line breaks mid-word regardless of terminal width. The
+/// Each source line is individually wrapped to `width` columns, breaking
+/// between words rather than mid-word. (A single token longer than `width` —
+/// a long URL, say — can still overflow, since it has no interior break
+/// point.) The
 /// underlying parser is line-oriented and **preserves every source newline**:
 /// it does not join soft-wrapped lines into flowing paragraphs. Author guide
 /// markdown with each paragraph on a single physical line so it reflows to the
