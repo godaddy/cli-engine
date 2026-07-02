@@ -566,6 +566,21 @@ bytes)` pairs for embedded guides from `include_bytes!`, `include_str!`, or a bu
 manifest. Modules can also call `Module::with_guides_from_markdown` or
 `ModuleContext::add_guides_from_markdown`.
 
+### Rendering and authoring
+
+For human output (the default when stdout is a terminal) `guide <topic>` renders the markdown body with `termimad`, wrapping text to the current terminal width at word boundaries. For `--output json` and `--output toon` the raw markdown body is returned unchanged, so machine-readable output stays byte-for-byte identical to the source file.
+
+The markdown renderer is line-oriented: it preserves every newline in the source and does not join hard-wrapped lines back into a flowing paragraph. Follow these rules so guides reflow cleanly at any width:
+
+- Write each paragraph as a single physical line. Do not hard-wrap prose at a fixed column (~80/100) — a hard-wrapped paragraph keeps its authored breaks on wide terminals and only re-wraps the leftover fragments on narrow ones. A one-line paragraph fills whatever width the reader's terminal has.
+- Separate blocks (paragraphs, lists, headings) with a blank line.
+- Put code inside fenced ``` blocks. Code is laid out verbatim, never reflowed, so it is the right place for the only line breaks that must survive as authored.
+- Use `* ` for bullet lists and keep each item on a single line. A `* ` item that wraps keeps a hanging indent under its text, which is what you want.
+
+#### Known issues
+
+The renderer only recognizes `* `-prefixed bullets (with 0–3 leading spaces for nesting) as list items. Ordered/numbered lists (`1.`) and `-`/`+` bullets are treated as ordinary paragraphs, so when one of their items wraps, the continuation lines fall back to the left margin instead of indenting under the item text. Prefer `* ` bullets where wrapping matters; for a numbered sequence, either accept the flush-left wrap or hard-wrap the egregious items by hand. Tracked upstream at [Canop/termimad#75](https://github.com/Canop/termimad/issues/75).
+
 ## Search
 
 `--search` searches command metadata, aliases, guides, and extra registered search documents. Search

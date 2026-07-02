@@ -30,7 +30,7 @@ use crate::{
         extract_command_path, extract_output_format, extract_search_query,
         global_flags_from_matches, has_true_schema_flag, register_global_flags,
     },
-    guide::guide_content,
+    guide::{guide_content, render_guide_human},
     module::{Module, ModuleContext},
     output::{
         HumanViewDef, HumanViewRegistry, NextAction, SchemaRegistry, format_help_section,
@@ -1497,7 +1497,7 @@ impl Cli {
             {
                 return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
             }
-            return self.finish_run(self.render_guide(&matches));
+            return self.finish_run(self.render_guide(&matches, &flags.output_format));
         }
         if command_path == "completion" {
             let args = completion_args(&matches);
@@ -1883,14 +1883,34 @@ impl Cli {
         )
     }
 
-    fn render_guide(&self, matches: &ArgMatches) -> CliRunOutput {
+    fn render_guide(&self, matches: &ArgMatches, output_format: &str) -> CliRunOutput {
+        use std::io::IsTerminal;
+
         let leaf = leaf_matches(matches);
         let topic = leaf.get_one::<String>("topic").map(String::as_str);
         match guide_content(&self.guide_entries, topic) {
-            Ok(rendered) => CliRunOutput {
-                exit_code: 0,
-                rendered,
-            },
+            Ok(rendered) => {
+                // Only reflow an actual guide topic body, and only for human output.
+                // The topic list is plain text (not markdown) and json/toon keep the
+                // raw markdown so their output stays deterministic.
+                let rendered = if topic.is_some() && output_format == "human" {
+                    let is_tty = std::io::stdout().is_terminal();
+                    // Use the live terminal width when interactive; otherwise a fixed
+                    // width with no color so a piped `--human` remains deterministic.
+                    let width = if is_tty {
+                        usize::from(termimad::terminal_size().0)
+                    } else {
+                        80
+                    };
+                    render_guide_human(&rendered, width, is_tty)
+                } else {
+                    rendered
+                };
+                CliRunOutput {
+                    exit_code: 0,
+                    rendered,
+                }
+            }
             Err(err) => CliRunOutput {
                 exit_code: 1,
                 rendered: err,

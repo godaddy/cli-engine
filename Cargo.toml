@@ -39,6 +39,7 @@ thiserror = "2.0.17"
 toml_edit = { version = "0.22", features = ["serde"] }
 tokio = { version = "1.48.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.43"
+termimad = "0.34.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.1", optional = true, default-features = false, features = ["async-secret-service", "tokio", "crypto-rust"] }
