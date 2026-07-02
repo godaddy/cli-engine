@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.4...cli-engine-v0.3.5) (2026-07-01)
+
+
+### Features
+
+* surface next_actions as a "Next steps" footer in human output ([#36](https://github.com/godaddy/cli-engine/issues/36)) ([2408910](https://github.com/godaddy/cli-engine/commit/2408910385d61ad3806b28ff065df49c968ddf79))
+
 ## [0.3.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.3...cli-engine-v0.3.4) (2026-06-29)
 
 
