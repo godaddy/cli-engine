@@ -15,7 +15,9 @@ pub struct TableColumn {
     pub field: String,
     /// Display header.
     pub header: String,
-    /// When true, this column's values are never truncated in table output.
+    /// When true, this column's values skip the default 40-char width cap in
+    /// table output (still capped at `NO_TRUNCATE_MAX_WIDTH` to bound
+    /// pathologically long values).
     pub no_truncate: bool,
 }
 
@@ -30,7 +32,8 @@ impl TableColumn {
         }
     }
 
-    /// Opts this column out of the table renderer's column-width truncation.
+    /// Opts this column out of the table renderer's default 40-char
+    /// column-width cap. Values are still capped at `NO_TRUNCATE_MAX_WIDTH`.
     #[must_use]
     pub fn no_truncate(mut self, value: bool) -> Self {
         self.no_truncate = value;
