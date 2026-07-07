@@ -384,9 +384,15 @@ fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String
                         .and_then(|map| map.get(&column.field))
                         .map_or_else(String::new, format_value);
                     widths[index] = if column.no_truncate {
-                        widths[index].max(value.len()).min(NO_TRUNCATE_MAX_WIDTH)
+                        widths[index]
+                            .max(value.len())
+                            .min(NO_TRUNCATE_MAX_WIDTH)
+                            .max(column.header.len())
                     } else {
-                        widths[index].max(value.len()).min(40)
+                        widths[index]
+                            .max(value.len())
+                            .min(40)
+                            .max(column.header.len())
                     };
                     value
                 })
@@ -449,7 +455,7 @@ fn render_array(items: &[Value]) -> String {
                         .as_object()
                         .and_then(|map| map.get(col))
                         .map_or_else(String::new, format_value);
-                    widths[index] = widths[index].max(value.len()).min(40);
+                    widths[index] = widths[index].max(value.len()).min(40).max(col.len());
                     value
                 })
                 .collect::<Vec<_>>()
@@ -645,6 +651,27 @@ mod tests {
         assert!(
             !out.contains(&huge_value),
             "the full pathological value should not be rendered verbatim: {out}"
+        );
+    }
+
+    #[test]
+    fn column_width_never_shrinks_below_a_long_header() {
+        let long_header = "A Very Long Header That Exceeds The Default Width Cap";
+        assert!(
+            long_header.len() > 40,
+            "fixture must exceed the default cap"
+        );
+        let items = vec![json!({ "field": "short" })];
+        let columns = vec![TableColumn::new("field", long_header)];
+
+        let out = render_array_with_columns(&items, &columns);
+        let header_line = out.lines().next().expect("header line");
+        let separator_line = out.lines().nth(1).expect("separator line");
+
+        assert_eq!(
+            header_line.len(),
+            separator_line.len(),
+            "header and separator must stay aligned when the header exceeds the cap: {out}"
         );
     }
 }
