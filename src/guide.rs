@@ -123,6 +123,35 @@ pub fn parse_front_matter(content: &str) -> (String, String) {
     (summary, body.to_owned())
 }
 
+/// Renders guide markdown into a terminal-friendly string.
+///
+/// Each source line is individually wrapped to `width` columns, breaking
+/// between words rather than mid-word. (A single token longer than `width` —
+/// a long URL, say — can still overflow, since it has no interior break
+/// point.) The
+/// underlying parser is line-oriented and **preserves every source newline**:
+/// it does not join soft-wrapped lines into flowing paragraphs. Author guide
+/// markdown with each paragraph on a single physical line so it reflows to the
+/// terminal width; a paragraph that is hard-wrapped in the source stays wrapped
+/// at its authored breaks. See `docs/concepts.md` ("Guides") for authoring
+/// guidance.
+///
+/// `color` selects a styled skin (`true`, for an interactive terminal) or a
+/// plain, unstyled skin (`false`) whose output contains no ANSI escapes and is
+/// therefore deterministic for pipes and tests. Fenced code blocks and tables
+/// are laid out by the renderer rather than reflowed as prose, so their
+/// structure is preserved.
+#[must_use]
+pub fn render_guide_human(content: &str, width: usize, color: bool) -> String {
+    let skin = if color {
+        termimad::MadSkin::default()
+    } else {
+        // no_style emits no ANSI escapes — deterministic for pipes and tests.
+        termimad::MadSkin::no_style()
+    };
+    skin.text(content, Some(width)).to_string()
+}
+
 /// Renders the guide topic list.
 #[must_use]
 pub fn list_guides(entries: &[GuideEntry]) -> String {
@@ -152,4 +181,45 @@ pub fn guide_content(entries: &[GuideEntry], topic: Option<&str>) -> Result<Stri
                 .join(", ");
             format!("unknown guide topic {topic:?} — valid topics: {names}")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_guide_human;
+
+    #[test]
+    fn render_guide_human_wraps_long_prose_at_word_boundaries() {
+        // A single physical line, as produced by soft-wrapped guide sources.
+        let source =
+            "The quick brown fox jumps over the lazy dog and then keeps running along the fence.";
+
+        let rendered = render_guide_human(source, 20, false);
+
+        // no_style output carries no ANSI escapes, so char count is the visible
+        // width; ignore any trailing padding the renderer may add.
+        for line in rendered.lines() {
+            assert!(
+                line.trim_end().chars().count() <= 20,
+                "line exceeds wrap width: {line:?}",
+            );
+        }
+
+        // One source line must reflow into several visible lines...
+        assert!(
+            rendered
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+                > 1,
+            "expected long line to wrap into multiple lines: {rendered:?}",
+        );
+
+        // ...without splitting any word across a line boundary.
+        for word in source.split_whitespace() {
+            assert!(
+                rendered.lines().any(|line| line.contains(word)),
+                "word was split across lines: {word:?}",
+            );
+        }
+    }
 }
