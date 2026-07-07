@@ -359,6 +359,13 @@ fn append_next_actions(out: &mut String, actions: &[NextAction]) {
 /// skips the normal 40-char cap. Prevents a pathologically long field value
 /// (not expected in practice, but not guaranteed by any schema) from padding
 /// every row and the separator line out to an unusable or memory-heavy width.
+///
+/// This bounds runtime *values*, not the column *header*: width is always
+/// widened back up to `column.header.len()` after the cap is applied, so a
+/// header can never be truncated or misaligned even in the (unrealistic)
+/// case where it exceeds `NO_TRUNCATE_MAX_WIDTH` itself. Headers are static,
+/// developer-authored labels, not the pathological runtime data this cap
+/// guards against.
 const NO_TRUNCATE_MAX_WIDTH: usize = 4096;
 
 fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String {
