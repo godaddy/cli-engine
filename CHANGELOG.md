@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.5...cli-engine-v0.4.0) (2026-07-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* add no_truncate opt-out for table columns in human output ([#40](https://github.com/godaddy/cli-engine/issues/40))
+
+### Features
+
+* add no_truncate opt-out for table columns in human output ([#40](https://github.com/godaddy/cli-engine/issues/40)) ([4adb998](https://github.com/godaddy/cli-engine/commit/4adb998bca8cca2fc2b2b82a022e0b064f33d0c2))
+* render guide markdown for human output with termimad ([#38](https://github.com/godaddy/cli-engine/issues/38)) ([d4d8383](https://github.com/godaddy/cli-engine/commit/d4d838357429132343a64f92c23c733253cae5c7))
+
 ## [0.3.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.4...cli-engine-v0.3.5) (2026-07-01)
 
 
