@@ -1140,10 +1140,12 @@ async fn cli_config_registers_modules_guides_views_and_init_once() {
                 TableColumn {
                     field: "name".to_owned(),
                     header: "Name".to_owned(),
+                    no_truncate: false,
                 },
                 TableColumn {
                     field: "enabled".to_owned(),
                     header: "Enabled".to_owned(),
+                    no_truncate: false,
                 },
             ],
         });
@@ -1271,6 +1273,7 @@ async fn cli_config_accepts_trait_based_command_modules() {
                 columns: vec![TableColumn {
                     field: "name".to_owned(),
                     header: "Name".to_owned(),
+                    no_truncate: false,
                 }],
             }]
         }
@@ -1544,10 +1547,12 @@ async fn cli_seeds_schema_and_human_views_from_global_registries() {
             TableColumn {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
+                no_truncate: false,
             },
             TableColumn {
                 field: "enabled".to_owned(),
                 header: "Enabled".to_owned(),
+                no_truncate: false,
             },
         ],
     });
@@ -7150,10 +7155,12 @@ async fn middleware_human_output_default_fields_narrows_view_columns() {
             TableColumn {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
+                no_truncate: false,
             },
             TableColumn {
                 field: "status".to_owned(),
                 header: "Status".to_owned(),
+                no_truncate: false,
             },
         ],
     });
@@ -7203,10 +7210,12 @@ async fn middleware_human_output_resolves_declared_view_id() {
             TableColumn {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
+                no_truncate: false,
             },
             TableColumn {
                 field: "status".to_owned(),
                 header: "Status".to_owned(),
+                no_truncate: false,
             },
         ],
     });
@@ -7248,6 +7257,7 @@ async fn middleware_human_output_uses_custom_view_function_before_columns() {
         columns: vec![TableColumn {
             field: "name".to_owned(),
             header: "Name".to_owned(),
+            no_truncate: false,
         }],
     });
     middleware.human_views.register_func("things:list", |data| {
@@ -8348,6 +8358,7 @@ fn human_renderer_column_mixed_object_scalar_array_falls_back_to_lines() {
     let columns = vec![TableColumn {
         field: "name".to_owned(),
         header: "Name".to_owned(),
+        no_truncate: false,
     }];
     let envelope = Envelope::success(
         json!([
@@ -8372,10 +8383,12 @@ fn human_view_registry_renders_registered_columns_for_lists() {
             TableColumn {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
+                no_truncate: false,
             },
             TableColumn {
                 field: "enabled".to_owned(),
                 header: "Enabled".to_owned(),
+                no_truncate: false,
             },
         ],
     });
@@ -8401,10 +8414,12 @@ fn human_view_registry_renders_registered_columns_for_objects() {
         TableColumn {
             field: "name".to_owned(),
             header: "Name".to_owned(),
+            no_truncate: false,
         },
         TableColumn {
             field: "missing".to_owned(),
             header: "Missing".to_owned(),
+            no_truncate: false,
         },
     ];
     let envelope = Envelope::success(json!({"name": "alpha", "ignored": "x"}), "things");
@@ -8422,6 +8437,7 @@ fn human_view_registry_custom_renderer_wins_over_columns_preserves_legacy_view_f
         columns: vec![TableColumn {
             field: "name".to_owned(),
             header: "Name".to_owned(),
+            no_truncate: false,
         }],
     });
     registry.register_func("things", |data| {

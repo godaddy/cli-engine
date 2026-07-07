@@ -15,6 +15,8 @@ pub struct TableColumn {
     pub field: String,
     /// Display header.
     pub header: String,
+    /// When true, this column's values are never truncated in table output.
+    pub no_truncate: bool,
 }
 
 impl TableColumn {
@@ -24,7 +26,15 @@ impl TableColumn {
         Self {
             field: field.into(),
             header: header.into(),
+            no_truncate: false,
         }
+    }
+
+    /// Opts this column out of the table renderer's column-width truncation.
+    #[must_use]
+    pub fn no_truncate(mut self, value: bool) -> Self {
+        self.no_truncate = value;
+        self
     }
 }
 
@@ -342,6 +352,12 @@ fn append_next_actions(out: &mut String, actions: &[NextAction]) {
     }
 }
 
+/// Upper bound on a `no_truncate` column's width, even though it otherwise
+/// skips the normal 40-char cap. Prevents a pathologically long field value
+/// (not expected in practice, but not guaranteed by any schema) from padding
+/// every row and the separator line out to an unusable or memory-heavy width.
+const NO_TRUNCATE_MAX_WIDTH: usize = 4096;
+
 fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String {
     if items.is_empty() {
         return "(no results)\n".to_owned();
@@ -364,7 +380,11 @@ fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String
                         .as_object()
                         .and_then(|map| map.get(&column.field))
                         .map_or_else(String::new, format_value);
-                    widths[index] = widths[index].max(value.len()).min(40);
+                    widths[index] = if column.no_truncate {
+                        widths[index].max(value.len()).min(NO_TRUNCATE_MAX_WIDTH)
+                    } else {
+                        widths[index].max(value.len()).min(40)
+                    };
                     value
                 })
                 .collect::<Vec<_>>()
@@ -583,5 +603,45 @@ mod tests {
         let out = render_human(&envelope);
         assert!(out.starts_with("Error:"), "{out}");
         assert!(!out.contains("Next steps"), "{out}");
+    }
+
+    #[test]
+    fn no_truncate_column_keeps_long_values_intact() {
+        let long_url = "https://example.com/legal/agreements/registration-agreement-v2";
+        assert!(long_url.len() > 40, "fixture must exceed the default cap");
+        let items = vec![json!({ "title": long_url, "url": long_url })];
+        let columns = vec![
+            TableColumn::new("title", "Title"),
+            TableColumn::new("url", "URL").no_truncate(true),
+        ];
+
+        let out = render_array_with_columns(&items, &columns);
+
+        assert!(
+            out.contains("..."),
+            "default column should still truncate: {out}"
+        );
+        assert!(
+            out.contains(long_url),
+            "no_truncate column must keep the full value: {out}"
+        );
+    }
+
+    #[test]
+    fn no_truncate_column_still_caps_pathologically_long_values() {
+        let huge_value = "x".repeat(NO_TRUNCATE_MAX_WIDTH * 2);
+        let items = vec![json!({ "url": huge_value })];
+        let columns = vec![TableColumn::new("url", "URL").no_truncate(true)];
+
+        let out = render_array_with_columns(&items, &columns);
+
+        assert!(
+            out.contains("..."),
+            "values far beyond the no_truncate cap should still be truncated: {out}"
+        );
+        assert!(
+            !out.contains(&huge_value),
+            "the full pathological value should not be rendered verbatim: {out}"
+        );
     }
 }

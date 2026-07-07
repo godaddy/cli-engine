@@ -212,6 +212,31 @@ fn human_view_columns_preserve_shape_for_empty_missing_and_nested_values() {
 }
 
 #[test]
+fn human_view_no_truncate_column_preserves_long_values_in_table_output() {
+    let long_url = "https://certs.godaddy.com/repository/registration-agreement.pdf";
+    assert!(long_url.len() > 40, "fixture must exceed the default cap");
+    let columns = vec![
+        TableColumn::new("title", "Title"),
+        TableColumn::new("url", "URL").no_truncate(true),
+    ];
+    let envelope = Envelope::success(
+        json!([{"title": "Registration Agreement", "url": long_url}]),
+        "agreements:list",
+    );
+
+    let rendered = render_human_with_view(&envelope, Some(&columns));
+
+    assert!(
+        rendered.contains(long_url),
+        "no_truncate column must render the full URL untruncated: {rendered}"
+    );
+    assert!(
+        !rendered.contains("..."),
+        "no column in this fixture should be truncated: {rendered}"
+    );
+}
+
+#[test]
 fn global_registries_tolerate_repeated_and_concurrent_registration() {
     let prefix = format!(
         "concurrent:{}:{:?}",
