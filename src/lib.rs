@@ -130,7 +130,7 @@ pub use environments::{Environment, EnvironmentDef, Environments, OAuthConfig};
 pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };
-pub use feature_flags::{FeatureFlag, FlagPolicy, Stage};
+pub use feature_flags::{FeatureFlag, FlagEntry, FlagPolicy, FlagRegistry, Stage};
 pub use flags::{
     GlobalFlags, app_id_env_prefix, debug_component_enabled, default_output_format,
     derive_bool_flags, derive_value_flags, extract_command_path, extract_output_format,

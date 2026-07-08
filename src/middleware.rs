@@ -11,7 +11,8 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
-    CommandResult, Credential, CredentialRequest, Dispatcher, Result, SchemaRegistry, Tier,
+    CommandResult, Credential, CredentialRequest, Dispatcher, FlagPolicy, FlagRegistry, Result,
+    SchemaRegistry, Tier,
     error::{CliCoreError, exit_code_for_error},
     output::{
         Envelope, HumanViewRegistry, OutputFormat, PipelineOpts, apply_pipeline,
@@ -521,6 +522,19 @@ pub struct Middleware {
     /// active environment through
     /// [`CommandContext::environment`](crate::command::CommandContext::environment).
     pub environments: Option<Arc<crate::environments::Environments>>,
+    /// Merged feature-flag visibility policy for this run.
+    ///
+    /// Set by [`CliConfig`](crate::CliConfig)'s `min_stage`/`feature_overrides`
+    /// (via its private `flag_policy()` helper) when [`Cli::new`](crate::Cli::new)
+    /// builds middleware, before any module or group is registered. Command-tree
+    /// pruning consults this to decide which flagged commands, groups, and
+    /// modules remain mounted.
+    pub flag_policy: FlagPolicy,
+    /// Every flagged module/group/command path discovered while pruning the
+    /// command tree, populated as modules and groups are registered.
+    ///
+    /// Powers `flags list`/`flags info` introspection (a later addition).
+    pub flag_registry: FlagRegistry,
 }
 
 /// Rendered result produced by middleware.

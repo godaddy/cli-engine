@@ -152,6 +152,72 @@ impl FlagPolicy {
     }
 }
 
+/// One flagged node discovered while pruning a command tree.
+///
+/// `path` is the colon-separated command path of the node (module/group/
+/// command name chain), matching the same convention used elsewhere in this
+/// crate for command paths — e.g. a `list` command nested under a `project`
+/// group records `"project:list"`. `key` and `stage` are the flag that
+/// resolved for this node (its own declaration, or the nearest ancestor's,
+/// per cascading resolution). `visible` is whether the policy that produced
+/// this entry judged the node visible.
+///
+/// Only nodes that resolve to a *named* flag are recorded; a node with no
+/// flag anywhere in its ancestor chain implicitly resolves to [`Stage::Ga`]
+/// with no key and is not recorded (nothing to introspect).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlagEntry {
+    /// Colon-separated command path of the flagged node.
+    pub path: String,
+    /// Flag key that resolved for this node (own declaration or inherited).
+    pub key: String,
+    /// Stage the resolved flag key declared.
+    pub stage: Stage,
+    /// Whether the node was judged visible under the policy that produced it.
+    pub visible: bool,
+}
+
+/// Every flagged module/group/command path discovered while pruning a
+/// command tree, in registration order.
+///
+/// Populated once, when a [`Cli`](crate::Cli) mounts a module or group and
+/// resolves cascading feature flags across its tree. Powers `flags
+/// list`/`flags info` introspection (a later addition); for now this is
+/// stored on [`Middleware`](crate::Middleware) and populated as a side effect
+/// of pruning.
+#[derive(Debug, Clone, Default)]
+pub struct FlagRegistry {
+    entries: Vec<FlagEntry>,
+}
+
+impl FlagRegistry {
+    /// Creates an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one flagged node.
+    pub fn record(&mut self, entry: FlagEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Returns every recorded entry, in the order they were recorded.
+    #[must_use]
+    pub fn entries(&self) -> &[FlagEntry] {
+        &self.entries
+    }
+
+    /// Returns every recorded entry whose flag key matches `key`.
+    #[must_use]
+    pub fn by_key(&self, key: &str) -> Vec<&FlagEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.key == key)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -220,5 +286,63 @@ mod tests {
         assert!(!policy.visible(Some("other-flag"), Stage::Experimental));
         assert!(policy.visible(Some("other-flag"), Stage::Beta));
         assert!(policy.visible(None, Stage::Ga));
+    }
+
+    #[test]
+    fn flag_registry_starts_empty() {
+        let registry = FlagRegistry::new();
+        assert!(registry.entries().is_empty());
+        assert!(registry.by_key("anything").is_empty());
+    }
+
+    #[test]
+    fn flag_registry_records_entries_in_order() {
+        let mut registry = FlagRegistry::new();
+        registry.record(FlagEntry {
+            path: "project".to_owned(),
+            key: "flag-a".to_owned(),
+            stage: Stage::Beta,
+            visible: true,
+        });
+        registry.record(FlagEntry {
+            path: "project:list".to_owned(),
+            key: "flag-b".to_owned(),
+            stage: Stage::Experimental,
+            visible: false,
+        });
+
+        let entries = registry.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "project");
+        assert_eq!(entries[1].path, "project:list");
+    }
+
+    #[test]
+    fn flag_registry_by_key_filters() {
+        let mut registry = FlagRegistry::new();
+        registry.record(FlagEntry {
+            path: "project".to_owned(),
+            key: "flag-a".to_owned(),
+            stage: Stage::Beta,
+            visible: true,
+        });
+        registry.record(FlagEntry {
+            path: "project:list".to_owned(),
+            key: "flag-a".to_owned(),
+            stage: Stage::Beta,
+            visible: true,
+        });
+        registry.record(FlagEntry {
+            path: "domain".to_owned(),
+            key: "flag-b".to_owned(),
+            stage: Stage::Experimental,
+            visible: false,
+        });
+
+        let matches = registry.by_key("flag-a");
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|entry| entry.key == "flag-a"));
+
+        assert!(registry.by_key("no-such-flag").is_empty());
     }
 }

@@ -274,16 +274,16 @@ pub struct CommandSpec {
     pub view_id: Option<String>,
     /// This command's own feature-flag declaration, if any.
     ///
-    /// `None` means the command has no explicit stage declaration of its own.
-    /// Once ancestor-chain resolution is implemented, such a command will inherit
-    /// its effective stage from its nearest ancestor (nested group, then
-    /// enclosing group, then module — nearest declaration wins), implicitly
-    /// resolving to [`Stage::Ga`] if nothing in the ancestor chain declares a flag
-    /// either; see [`Stage`]'s documentation for why that is its default. Set
-    /// with [`with_feature_flag`](CommandSpec::with_feature_flag). Resolving the
-    /// effective stage across the ancestor chain is not yet implemented; it will
-    /// land in a later change. This field only records the command's own
-    /// declaration.
+    /// `None` means the command has no explicit stage declaration of its own,
+    /// in which case it inherits its effective stage from its nearest ancestor
+    /// (nested group, then enclosing group, then module — nearest declaration
+    /// wins), implicitly resolving to [`Stage::Ga`] if nothing in the ancestor
+    /// chain declares a flag either; see [`Stage`]'s documentation for why
+    /// that is its default. Set with
+    /// [`with_feature_flag`](CommandSpec::with_feature_flag). This field only
+    /// records the command's own declaration; cascading resolution against the
+    /// ancestor chain happens when a [`Cli`](crate::Cli) mounts the enclosing
+    /// module or group.
     pub feature_flag: Option<FeatureFlag>,
 }
 
@@ -581,16 +581,15 @@ pub struct GroupSpec {
     pub groups: Vec<GroupSpec>,
     /// This group's own feature-flag declaration, if any.
     ///
-    /// `None` means the group has no explicit stage declaration of its own. Once
-    /// ancestor-chain resolution is implemented, such a group will inherit its
-    /// effective stage from its nearest ancestor (enclosing group, then module —
-    /// nearest declaration wins), implicitly resolving to [`Stage::Ga`] if nothing
-    /// in the ancestor chain declares a flag either; see [`Stage`]'s documentation
-    /// for why that is its default. Set with
-    /// [`with_feature_flag`](GroupSpec::with_feature_flag). Resolving the
-    /// effective stage across the ancestor chain is not yet implemented; it will
-    /// land in a later change. This field only records the group's own
-    /// declaration.
+    /// `None` means the group has no explicit stage declaration of its own, in
+    /// which case it inherits its effective stage from its nearest ancestor
+    /// (enclosing group, then module — nearest declaration wins), implicitly
+    /// resolving to [`Stage::Ga`] if nothing in the ancestor chain declares a
+    /// flag either; see [`Stage`]'s documentation for why that is its default.
+    /// Set with [`with_feature_flag`](GroupSpec::with_feature_flag). This field
+    /// only records the group's own declaration; cascading resolution against
+    /// the ancestor chain happens when a [`Cli`](crate::Cli) mounts the
+    /// enclosing module or parent group.
     pub feature_flag: Option<FeatureFlag>,
 }
 

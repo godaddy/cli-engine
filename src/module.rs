@@ -47,18 +47,18 @@ pub struct Module {
     pub views: Vec<HumanViewDef>,
     /// This module's own feature-flag declaration, if any.
     ///
-    /// `None` means the module has no explicit stage declaration of its own.
-    /// Once ancestor-chain resolution is implemented, a module's own group and
-    /// its descendants will inherit their effective stage from their nearest
-    /// ancestor (nested group, then enclosing group, then module — nearest
-    /// declaration wins), implicitly resolving to [`Stage::Ga`] if nothing in
-    /// the ancestor chain declares a flag either; see [`Stage`]'s documentation
-    /// for why that is its default. A module is the top-level ancestor in that
-    /// chain: nothing sits above it. Set with
-    /// [`with_feature_flag`](Module::with_feature_flag). Resolving the
-    /// effective stage across the ancestor chain is not yet implemented; it
-    /// will land in a later change. This field only records the module's own
-    /// declaration.
+    /// `None` means the module has no explicit stage declaration of its own,
+    /// in which case its group and descendants inherit their effective stage
+    /// from their nearest ancestor (nested group, then enclosing group, then
+    /// module — nearest declaration wins), implicitly resolving to
+    /// [`Stage::Ga`] if nothing in the ancestor chain declares a flag either;
+    /// see [`Stage`]'s documentation for why that is its default. A module is
+    /// the top-level ancestor in that chain: nothing sits above it. Set with
+    /// [`with_feature_flag`](Module::with_feature_flag). This field only
+    /// records the module's own declaration; cascading resolution (and
+    /// pruning of nodes the active [`FlagPolicy`](crate::FlagPolicy) hides)
+    /// happens when a [`Cli`](crate::Cli) mounts this module via
+    /// [`Cli::add_module`](crate::Cli::add_module).
     pub feature_flag: Option<FeatureFlag>,
     /// Registration function that returns the module's runtime group.
     pub register: ModuleRegister,
