@@ -141,16 +141,24 @@ async fn permissive_min_stage_reveals_previously_pruned_subtree() {
 
 #[tokio::test]
 async fn environment_min_stage_loosens_consumer_policy_end_to_end() {
-    // The `CliConfig` itself stays at its Ga default; only the active ("prod")
-    // environment's compiled `min_stage` loosens visibility. Proves the
-    // environment layer reaches pruning through the full `Cli::new` + `Cli::run`
-    // pipeline, not just `Environments::resolve` in isolation.
+    // The `CliConfig` itself stays at its Ga default; only the active
+    // ("flagtest-envmin") environment's compiled `min_stage` loosens visibility.
+    // Proves the environment layer reaches pruning through the full `Cli::new` +
+    // `Cli::run` pipeline, not just `Environments::resolve` in isolation.
+    //
+    // The environment name is deliberately test-scoped (not a real name like
+    // "prod") so its derived `FLAGTEST_ENVMIN_MIN_STAGE` env var cannot collide
+    // with an `<ENV>_MIN_STAGE` a developer/CI might have set for a real
+    // environment, which would otherwise silently override the compiled
+    // `min_stage` this test asserts on. This test therefore needs no `ENV_LOCK`.
     let cli = Cli::new(
         CliConfig::new("flagenv", "Flag environment test", "flagenv-app")
-            .with_environments(Arc::new(Environments::new("prod").with_environment(
-                "prod",
-                EnvironmentDef::new().with_min_stage(Stage::Experimental),
-            )))
+            .with_environments(Arc::new(
+                Environments::new("flagtest-envmin").with_environment(
+                    "flagtest-envmin",
+                    EnvironmentDef::new().with_min_stage(Stage::Experimental),
+                ),
+            ))
             .with_module(gated_module()),
     );
 
@@ -160,6 +168,51 @@ async fn environment_min_stage_loosens_consumer_policy_end_to_end() {
 
     let dispatch = cli
         .run(["flagenv", "devkit", "sandbox", "peek", "--output", "json"])
+        .await;
+    assert_eq!(dispatch.exit_code, 0, "{}", dispatch.rendered);
+}
+
+#[tokio::test]
+async fn environment_feature_override_reveals_pruned_subtree_end_to_end() {
+    // Distinct from the environment `min_stage` layer above: here both the
+    // `CliConfig` and the environment leave `min_stage` at Ga, and it is the
+    // environment's compiled per-key `feature_overrides` entry (forcing
+    // `sandbox-flag` to Ga) that lifts the otherwise-Experimental subgroup into
+    // visibility. Proves the environment feature-override layer (not just
+    // `min_stage`) reaches pruning through the full `Cli::new` + `Cli::run`
+    // pipeline.
+    //
+    // The environment name is test-scoped for the same collision reason as the
+    // `min_stage` test above: its derived `FLAGTEST_FEATOVERRIDE_*` env vars
+    // cannot clash with a real environment's, so no `ENV_LOCK` is needed.
+    let cli = Cli::new(
+        CliConfig::new(
+            "flagenvoverride",
+            "Flag environment override test",
+            "flagenvoverride-app",
+        )
+        .with_environments(Arc::new(
+            Environments::new("flagtest-featoverride").with_environment(
+                "flagtest-featoverride",
+                EnvironmentDef::new().with_feature_override("sandbox-flag", Stage::Ga),
+            ),
+        ))
+        .with_module(gated_module()),
+    );
+
+    let help = cli.run(["flagenvoverride", "devkit"]).await;
+    assert_eq!(help.exit_code, 0, "{}", help.rendered);
+    assert!(help.rendered.contains("sandbox"), "{}", help.rendered);
+
+    let dispatch = cli
+        .run([
+            "flagenvoverride",
+            "devkit",
+            "sandbox",
+            "peek",
+            "--output",
+            "json",
+        ])
         .await;
     assert_eq!(dispatch.exit_code, 0, "{}", dispatch.rendered);
 }
