@@ -913,8 +913,26 @@ impl Cli {
             middleware.environments = Some(Arc::clone(environments));
         }
         // Seed the merged flag policy before any module/group is registered so
-        // pruning during `add_module`/`add_module_group` below sees it.
-        middleware.flag_policy = config.flag_policy();
+        // pruning during `add_module`/`add_module_group` below sees it. The active
+        // environment's fully-resolved (compiled + file + env-var) min_stage/
+        // feature_overrides, when present, take precedence over the consumer-level
+        // CliConfig policy — an environment can loosen or tighten visibility beyond
+        // what the binary set in code. Environment resolution failure (e.g. an
+        // unknown active environment name) is tolerated here and falls back to the
+        // consumer-level policy only: this is just flag-policy computation, not full
+        // environment validation, and must not make `Cli::new` fail in a new way.
+        // The normal lazy paths (`env get`/`env info`, `ctx.environment()?`) still
+        // surface a real resolution error to the user when a command needs it.
+        let mut flag_policy = config.flag_policy();
+        if let Some(environments) = &middleware.environments
+            && let Ok(env) = environments.resolve(&middleware.env)
+        {
+            if let Some(min_stage) = env.min_stage {
+                flag_policy.min_stage = min_stage;
+            }
+            flag_policy.overrides.extend(env.feature_overrides);
+        }
+        middleware.flag_policy = flag_policy;
 
         let mut cli = Self {
             config,
@@ -3722,5 +3740,31 @@ mod feature_flag_pruning_tests {
 
         assert!(cli.commands.contains_key("gated-mod-2:list"));
         assert!(has_subcommand(&cli.root, "gated-mod-2"));
+    }
+
+    #[test]
+    fn active_environment_min_stage_loosens_consumer_level_policy() {
+        // The CliConfig itself leaves min_stage at its Ga default, which would
+        // normally prune this Experimental-flagged group. The active ("prod")
+        // environment's compiled min_stage override should reach
+        // `middleware.flag_policy` before pruning runs and keep it instead.
+        let module = Module::new("Test Category", |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new("gated-mod-3", "short"))
+                .with_command(trivial_command("list"))
+        })
+        .with_feature_flag("module-flag-3", Stage::Experimental);
+
+        let mut cli = Cli::new(
+            CliConfig::new("modtest3", "Module test", "modtest3").with_environments(Arc::new(
+                crate::environments::Environments::new("prod").with_environment(
+                    "prod",
+                    crate::environments::EnvironmentDef::new().with_min_stage(Stage::Experimental),
+                ),
+            )),
+        );
+        cli.add_module(module);
+
+        assert!(cli.commands.contains_key("gated-mod-3:list"));
+        assert!(has_subcommand(&cli.root, "gated-mod-3"));
     }
 }
