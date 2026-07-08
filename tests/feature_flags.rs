@@ -278,14 +278,14 @@ fn lock() -> MutexGuard<'static, ()> {
 /// RAII guard that restores (or removes) an env var on drop, even on panic.
 struct EnvGuard {
     key: &'static str,
-    prev: Option<String>,
+    prev: Option<std::ffi::OsString>,
 }
 
 impl EnvGuard {
     /// Sets `key` to `value`. Caller must hold [`ENV_LOCK`] for the guard's
     /// entire lifetime.
     fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
+        let prev = std::env::var_os(key);
         // SAFETY: serialized by ENV_LOCK; guard restores/removes on any exit
         // incl. panic.
         unsafe { std::env::set_var(key, value) };
