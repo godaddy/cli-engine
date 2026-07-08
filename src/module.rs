@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc};
 use schemars::JsonSchema;
 
 use crate::{
-    GuideEntry, HumanViewDef, Middleware, OutputSchema, RuntimeGroupSpec, SchemaRegistry,
-    parse_guides_from_markdown,
+    FeatureFlag, GuideEntry, HumanViewDef, Middleware, OutputSchema, RuntimeGroupSpec,
+    SchemaRegistry, Stage, parse_guides_from_markdown,
 };
 
 /// Function used by closure-based modules to register a runtime command group.
@@ -45,6 +45,21 @@ pub struct Module {
     pub guides: Vec<GuideEntry>,
     /// Human output views registered before command execution.
     pub views: Vec<HumanViewDef>,
+    /// This module's own feature-flag declaration, if any.
+    ///
+    /// `None` means the module has no explicit stage declaration of its own.
+    /// Once ancestor-chain resolution is implemented, a module's own group and
+    /// its descendants will inherit their effective stage from their nearest
+    /// ancestor (nested group, then enclosing group, then module — nearest
+    /// declaration wins), implicitly resolving to [`Stage::Ga`] if nothing in
+    /// the ancestor chain declares a flag either; see [`Stage`]'s documentation
+    /// for why that is its default. A module is the top-level ancestor in that
+    /// chain: nothing sits above it. Set with
+    /// [`with_feature_flag`](Module::with_feature_flag). Resolving the
+    /// effective stage across the ancestor chain is not yet implemented; it
+    /// will land in a later change. This field only records the module's own
+    /// declaration.
+    pub feature_flag: Option<FeatureFlag>,
     /// Registration function that returns the module's runtime group.
     pub register: ModuleRegister,
 }
@@ -60,6 +75,7 @@ impl Module {
             category: category.into(),
             guides: Vec::new(),
             views: Vec::new(),
+            feature_flag: None,
             register: Arc::new(register),
         }
     }
@@ -78,6 +94,7 @@ impl Module {
             category,
             guides,
             views,
+            feature_flag: None,
             register: Arc::new(move |context| module.register(context)),
         }
     }
@@ -111,6 +128,14 @@ impl Module {
         self.views.push(view);
         self
     }
+
+    /// Declares this module's own feature flag: the key used for policy
+    /// overrides and introspection, and the stage at which it becomes visible.
+    #[must_use]
+    pub fn with_feature_flag(mut self, key: impl Into<String>, stage: Stage) -> Self {
+        self.feature_flag = Some(FeatureFlag::new(key, stage));
+        self
+    }
 }
 
 impl std::fmt::Debug for Module {
@@ -120,6 +145,7 @@ impl std::fmt::Debug for Module {
             .field("category", &self.category)
             .field("guides", &self.guides)
             .field("views", &self.views)
+            .field("feature_flag", &self.feature_flag)
             .finish_non_exhaustive()
     }
 }
@@ -211,5 +237,33 @@ impl<'middleware> ModuleContext<'middleware> {
 
     pub(crate) fn into_parts(self) -> (Vec<GuideEntry>, Vec<HumanViewDef>) {
         (self.guides, self.views)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GroupSpec;
+
+    fn trivial_module(category: &str) -> Module {
+        Module::new(category.to_string(), |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new("g", "short"))
+        })
+    }
+
+    #[test]
+    fn module_with_feature_flag_sets_key_and_stage() {
+        let module = trivial_module("cat").with_feature_flag("my-module-flag", Stage::Beta);
+
+        let flag = module.feature_flag.expect("feature flag should be set");
+        assert_eq!(flag.key, "my-module-flag");
+        assert_eq!(flag.stage, Stage::Beta);
+    }
+
+    #[test]
+    fn module_feature_flag_defaults_to_none() {
+        let module = trivial_module("cat");
+
+        assert!(module.feature_flag.is_none());
     }
 }
