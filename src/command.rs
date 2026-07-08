@@ -6,8 +6,8 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    AuthRequirement, CommandMeta, Credential, CredentialResolver, Middleware, OutputSchema, Result,
-    SchemaInfo, Tier,
+    AuthRequirement, CommandMeta, Credential, CredentialResolver, FeatureFlag, Middleware,
+    OutputSchema, Result, SchemaInfo, Stage, Tier,
     middleware::ValueMap,
     output::{NextAction, TableColumn},
 };
@@ -272,6 +272,17 @@ pub struct CommandSpec {
     /// module or CLI, so several commands can share one table. Takes precedence
     /// over inline [`view_columns`](CommandSpec::view_columns).
     pub view_id: Option<String>,
+    /// This command's own feature-flag declaration, if any.
+    ///
+    /// `None` means the command has no explicit stage declaration of its own and
+    /// inherits its effective stage from its nearest ancestor (module, then group,
+    /// then nested group), implicitly resolving to [`Stage::Ga`] if nothing in the
+    /// ancestor chain declares a flag either; see [`Stage`]'s documentation for why
+    /// that is its default. Set with
+    /// [`with_feature_flag`](CommandSpec::with_feature_flag). Resolving the
+    /// effective stage across the ancestor chain is handled elsewhere; this field
+    /// only records the command's own declaration.
+    pub feature_flag: Option<FeatureFlag>,
 }
 
 impl CommandSpec {
@@ -413,6 +424,14 @@ impl CommandSpec {
     #[must_use]
     pub fn with_tier(mut self, tier: Tier) -> Self {
         self.tier = Some(tier);
+        self
+    }
+
+    /// Declares this command's own feature flag: the key used for policy
+    /// overrides and introspection, and the stage at which it becomes visible.
+    #[must_use]
+    pub fn with_feature_flag(mut self, key: impl Into<String>, stage: Stage) -> Self {
+        self.feature_flag = Some(FeatureFlag::new(key, stage));
         self
     }
 
@@ -558,6 +577,17 @@ pub struct GroupSpec {
     pub commands: Vec<CommandSpec>,
     /// Declarative nested groups used for static tree construction.
     pub groups: Vec<GroupSpec>,
+    /// This group's own feature-flag declaration, if any.
+    ///
+    /// `None` means the group has no explicit stage declaration of its own and
+    /// inherits its effective stage from its nearest ancestor (module, then
+    /// enclosing group), implicitly resolving to [`Stage::Ga`] if nothing in the
+    /// ancestor chain declares a flag either; see [`Stage`]'s documentation for why
+    /// that is its default. Set with
+    /// [`with_feature_flag`](GroupSpec::with_feature_flag). Resolving the
+    /// effective stage across the ancestor chain is handled elsewhere; this field
+    /// only records the group's own declaration.
+    pub feature_flag: Option<FeatureFlag>,
 }
 
 impl GroupSpec {
@@ -603,6 +633,14 @@ impl GroupSpec {
     #[must_use]
     pub fn with_group(mut self, group: GroupSpec) -> Self {
         self.groups.push(group);
+        self
+    }
+
+    /// Declares this group's own feature flag: the key used for policy overrides
+    /// and introspection, and the stage at which it becomes visible.
+    #[must_use]
+    pub fn with_feature_flag(mut self, key: impl Into<String>, stage: Stage) -> Self {
+        self.feature_flag = Some(FeatureFlag::new(key, stage));
         self
     }
 
@@ -988,5 +1026,50 @@ where
         [] => None,
         [single] => Some(single.clone()),
         _ => Some(Value::Array(values)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_spec_with_feature_flag_sets_key_and_stage() {
+        let spec =
+            CommandSpec::new("list", "List things").with_feature_flag("my-flag", Stage::Beta);
+
+        let flag = spec
+            .feature_flag
+            .as_ref()
+            .expect("feature flag should be set");
+        assert_eq!(flag.key, "my-flag");
+        assert_eq!(flag.stage, Stage::Beta);
+    }
+
+    #[test]
+    fn command_spec_feature_flag_defaults_to_none() {
+        let spec = CommandSpec::new("list", "List things");
+
+        assert!(spec.feature_flag.is_none());
+    }
+
+    #[test]
+    fn group_spec_with_feature_flag_sets_key_and_stage() {
+        let group = GroupSpec::new("project", "Manage projects")
+            .with_feature_flag("my-flag", Stage::Experimental);
+
+        let flag = group
+            .feature_flag
+            .as_ref()
+            .expect("feature flag should be set");
+        assert_eq!(flag.key, "my-flag");
+        assert_eq!(flag.stage, Stage::Experimental);
+    }
+
+    #[test]
+    fn group_spec_feature_flag_defaults_to_none() {
+        let group = GroupSpec::new("project", "Manage projects");
+
+        assert!(group.feature_flag.is_none());
     }
 }
