@@ -77,6 +77,8 @@ mod env_commands;
 pub mod environments;
 /// Shared error type and error traits.
 pub mod error;
+/// Stage-based feature flagging primitives (readiness gating), distinct from `flags`.
+pub mod feature_flags;
 /// Global framework flags and flag-extraction helpers.
 pub mod flags;
 /// Filesystem and path utilities (base dir, path-component safety, atomic write).
@@ -128,6 +130,7 @@ pub use environments::{Environment, EnvironmentDef, Environments, OAuthConfig};
 pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };
+pub use feature_flags::{FeatureFlag, FlagPolicy, Stage};
 pub use flags::{
     GlobalFlags, app_id_env_prefix, debug_component_enabled, default_output_format,
     derive_bool_flags, derive_value_flags, extract_command_path, extract_output_format,
