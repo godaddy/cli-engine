@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.1...cli-engine-v0.4.2) (2026-07-08)
+
+
+### Features
+
+* add stage-based feature flagging for modules, groups, and commands ([#43](https://github.com/godaddy/cli-engine/issues/43)) ([67038d4](https://github.com/godaddy/cli-engine/commit/67038d4bd0e132168820ee67c2b7ccc5b1d16a75))
+
 ## [0.4.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.0...cli-engine-v0.4.1) (2026-07-08)
 
 
