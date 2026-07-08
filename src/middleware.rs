@@ -533,7 +533,7 @@ pub struct Middleware {
     /// Every flagged module/group/command path discovered while pruning the
     /// command tree, populated as modules and groups are registered.
     ///
-    /// Powers `flags list`/`flags info` introspection (a later addition).
+    /// Powers `flags list`/`flags info` introspection.
     pub flag_registry: FlagRegistry,
 }
 

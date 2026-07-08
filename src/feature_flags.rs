@@ -182,9 +182,8 @@ pub struct FlagEntry {
 ///
 /// Populated once, when a [`Cli`](crate::Cli) mounts a module or group and
 /// resolves cascading feature flags across its tree. Powers `flags
-/// list`/`flags info` introspection (a later addition); for now this is
-/// stored on [`Middleware`](crate::Middleware) and populated as a side effect
-/// of pruning.
+/// list`/`flags info` introspection; stored on [`Middleware`](crate::Middleware)
+/// and populated as a side effect of pruning.
 #[derive(Debug, Clone, Default)]
 pub struct FlagRegistry {
     entries: Vec<FlagEntry>,
