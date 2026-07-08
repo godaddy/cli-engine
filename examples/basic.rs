@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::Arg;
 use cli_engine::{
     BuildInfo, Cli, CliConfig, CommandResult, CommandSpec, GroupSpec, Module, RuntimeCommandSpec,
-    RuntimeGroupSpec,
+    RuntimeGroupSpec, Stage,
 };
 use serde_json::json;
 
@@ -37,14 +37,27 @@ async fn main() -> ExitCode {
         },
     );
 
+    // Gated behind Stage::Experimental, so it is pruned from help/schema/dispatch under the
+    // default policy (min_stage: Stage::Ga). To see it, uncomment the .with_min_stage(...) line
+    // below (or add .with_feature_override("project-preview", Stage::Ga) instead).
+    let preview = RuntimeCommandSpec::new(
+        CommandSpec::new("preview", "Preview an upcoming project feature")
+            .with_system("projects-api")
+            .with_feature_flag("project-preview", Stage::Experimental)
+            .no_auth(true),
+        async |_credential, _args| Ok(CommandResult::new(json!({ "status": "coming-soon" }))),
+    );
+
     let project_module = Module::new("Platform Systems", move |_context| {
         RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects"))
             .with_command(list_projects.clone())
+            .with_command(preview.clone())
     });
 
     let cli = Cli::new(
         CliConfig::new("example", "Example cli-engine application", "example")
             .with_build(BuildInfo::new(env!("CARGO_PKG_VERSION")))
+            // .with_min_stage(Stage::Experimental)
             .with_module(project_module),
     );
 

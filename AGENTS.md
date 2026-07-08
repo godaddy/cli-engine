@@ -227,6 +227,7 @@ Command checklist:
   authenticate (this also suppresses default-env injection). Forgetting these annotations only
   over-prompts; it never lets a gated command run unauthenticated.
 - Use `.with_tier(...)` or `.mutates(true)` for mutating commands so `--dry-run` can short-circuit them.
+- Commands, groups, and modules default to `Stage::Ga` (visible everywhere). Add `.with_feature_flag(key, Stage::Experimental)` (or `Stage::Beta`) only when a command needs extra scrutiny before it reaches a public/external consumer CLI; promoting to GA later is a one-line removal or bump, not a rewrite.
 - Prefer returning structured JSON values from handlers; let cli-engine render JSON, human, and TOON formats.
 - Prefer `CommandSpec::from_args::<T>()` + `RuntimeCommandSpec::new_typed` when the command has many flags, needs clap validation attributes, or when porting existing derive-based commands. Use the builder path for simple commands with one or two flags.
 

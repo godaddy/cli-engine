@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{Result, error::CliCoreError};
+use crate::{Result, Stage, error::CliCoreError};
 
 /// Standard OAuth slice of an environment, consumed by `PkceAuthProvider`.
 ///
@@ -38,6 +38,11 @@ pub struct Environment {
     pub oauth: Option<OAuthConfig>,
     /// App-specific fields (for example `api_url`).
     pub extra: BTreeMap<String, String>,
+    /// Bulk override for this environment's minimum visible feature stage, if set
+    /// by any layer (compiled, file, or env var).
+    pub min_stage: Option<Stage>,
+    /// Per-key feature-stage overrides declared for this environment.
+    pub feature_overrides: BTreeMap<String, Stage>,
 }
 
 /// An unresolved per-environment declaration (one layer of configuration).
@@ -54,6 +59,10 @@ pub struct EnvironmentDef {
     token_url: Option<String>,
     #[serde(default)]
     scopes: Option<Vec<String>>,
+    #[serde(default)]
+    min_stage: Option<Stage>,
+    #[serde(default)]
+    feature_overrides: BTreeMap<String, Stage>,
     /// Everything not recognised above is captured here (app-specific fields).
     #[serde(flatten, default)]
     extra: BTreeMap<String, String>,
@@ -98,6 +107,20 @@ impl EnvironmentDef {
     #[must_use]
     pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets a bulk override for this environment's minimum visible feature stage.
+    #[must_use]
+    pub fn with_min_stage(mut self, stage: Stage) -> Self {
+        self.min_stage = Some(stage);
+        self
+    }
+
+    /// Sets a per-key feature-stage override for this environment.
+    #[must_use]
+    pub fn with_feature_override(mut self, key: impl Into<String>, stage: Stage) -> Self {
+        self.feature_overrides.insert(key.into(), stage);
         self
     }
 }
@@ -236,7 +259,7 @@ impl Environments {
         if let Some(def) = &file {
             merge_into(&mut merged, def);
         }
-        apply_env_vars(name, &mut merged);
+        apply_env_vars(name, &mut merged)?;
         Ok(finalize(name, merged))
     }
 
@@ -338,20 +361,34 @@ fn merge_into(dst: &mut EnvironmentDef, src: &EnvironmentDef) {
     if src.scopes.is_some() {
         dst.scopes = src.scopes.clone();
     }
+    if src.min_stage.is_some() {
+        dst.min_stage = src.min_stage;
+    }
+    for (k, v) in &src.feature_overrides {
+        dst.feature_overrides.insert(k.clone(), *v);
+    }
     for (k, v) in &src.extra {
         dst.extra.insert(k.clone(), v.clone());
     }
 }
 
-/// Applies `<ENV>_*` overrides: the three OAuth fields always, and any bag key
-/// already present in the merged record (keyed `<ENV>_<KEY>`).
+/// Applies `<ENV>_*` overrides: the three OAuth fields always, any bag key
+/// already present in the merged record (keyed `<ENV>_<KEY>`), the bulk
+/// `<ENV>_MIN_STAGE` stage override, and any feature key already present in
+/// the merged record (keyed `<ENV>_FEATURE_<KEY>`).
 ///
 /// The prefix is `name.to_uppercase().replace('-', "_")`, so environment names
 /// that differ only by `-` vs `_` map to the same prefix and will collide.
 ///
 /// Scopes are intentionally not env-var overridable; set them via the
 /// compiled-in layer or the `environments.toml` file.
-fn apply_env_vars(name: &str, def: &mut EnvironmentDef) {
+///
+/// # Errors
+///
+/// Returns an error when `<ENV>_MIN_STAGE` or `<ENV>_FEATURE_<KEY>` is set but
+/// fails to parse as a [`Stage`]. Unlike a missing var (a no-op), a malformed
+/// value is not silently ignored.
+fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
     let prefix = name.to_uppercase().replace('-', "_");
     if let Ok(v) = std::env::var(format!("{prefix}_OAUTH_CLIENT_ID")) {
         def.client_id = Some(v);
@@ -369,6 +406,22 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) {
             def.extra.insert(key, v);
         }
     }
+    if let Ok(v) = std::env::var(format!("{prefix}_MIN_STAGE")) {
+        def.min_stage = Some(v.parse::<Stage>().map_err(|err| {
+            CliCoreError::message(format!("invalid {prefix}_MIN_STAGE {v:?}: {err}"))
+        })?);
+    }
+    let feature_keys: Vec<String> = def.feature_overrides.keys().cloned().collect();
+    for key in feature_keys {
+        let var = format!("{prefix}_FEATURE_{}", key.to_uppercase().replace('-', "_"));
+        if let Ok(v) = std::env::var(&var) {
+            let stage = v
+                .parse::<Stage>()
+                .map_err(|err| CliCoreError::message(format!("invalid {var} {v:?}: {err}")))?;
+            def.feature_overrides.insert(key, stage);
+        }
+    }
+    Ok(())
 }
 
 /// Turns a fully-merged declaration into a resolved [`Environment`]. OAuth is
@@ -379,6 +432,8 @@ fn finalize(name: &str, def: EnvironmentDef) -> Environment {
         auth_url,
         token_url,
         scopes,
+        min_stage,
+        feature_overrides,
         extra,
     } = def;
     let oauth = client_id.map(|id| OAuthConfig {
@@ -391,6 +446,8 @@ fn finalize(name: &str, def: EnvironmentDef) -> Environment {
         name: name.to_owned(),
         oauth,
         extra,
+        min_stage,
+        feature_overrides,
     }
 }
 
@@ -540,6 +597,114 @@ mod tests {
     }
 
     #[test]
+    fn environment_def_min_stage_and_feature_override_builders_set_fields() {
+        let def = EnvironmentDef::new()
+            .with_min_stage(Stage::Experimental)
+            .with_feature_override("domain-bulk-transfer", Stage::Beta);
+        assert_eq!(def.min_stage, Some(Stage::Experimental));
+        assert_eq!(
+            def.feature_overrides.get("domain-bulk-transfer"),
+            Some(&Stage::Beta)
+        );
+    }
+
+    #[test]
+    fn resolve_returns_compiled_min_stage_and_feature_overrides() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = Environments::new("dev").with_environment(
+            "dev",
+            EnvironmentDef::new()
+                .with_client_id("dev-client")
+                .with_min_stage(Stage::Experimental)
+                .with_feature_override("domain-bulk-transfer", Stage::Beta),
+        );
+        let env = envs.resolve("dev").expect("dev resolves");
+        assert_eq!(env.min_stage, Some(Stage::Experimental));
+        assert_eq!(
+            env.feature_overrides.get("domain-bulk-transfer"),
+            Some(&Stage::Beta)
+        );
+    }
+
+    #[test]
+    fn env_var_min_stage_overrides_compiled_and_file_layers() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Local fixture with a compiled `min_stage` (Experimental) that differs
+        // from the env-var value (Beta), so a passing assertion proves the env
+        // var *wins over* an already-set compiled value — not merely that it
+        // populates an otherwise-empty field (which `sample()`'s prod, with no
+        // compiled `min_stage`, could not distinguish).
+        let envs = Environments::new("prod").with_environment(
+            "prod",
+            EnvironmentDef::new()
+                .with_client_id("prod-client")
+                .with_min_stage(Stage::Experimental),
+        );
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
+        unsafe { std::env::set_var("PROD_MIN_STAGE", "beta") };
+        let _guard = EnvGuard("PROD_MIN_STAGE");
+
+        let env = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(env.min_stage, Some(Stage::Beta));
+    }
+
+    #[test]
+    fn env_var_feature_override_updates_existing_key() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = Environments::new("prod").with_environment(
+            "prod",
+            EnvironmentDef::new().with_feature_override("domain-bulk-transfer", Stage::Beta),
+        );
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
+        unsafe { std::env::set_var("PROD_FEATURE_DOMAIN_BULK_TRANSFER", "ga") };
+        let _guard = EnvGuard("PROD_FEATURE_DOMAIN_BULK_TRANSFER");
+
+        let env = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(
+            env.feature_overrides.get("domain-bulk-transfer"),
+            Some(&Stage::Ga)
+        );
+    }
+
+    #[test]
+    fn env_var_feature_override_for_undeclared_key_is_ignored() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
+        unsafe { std::env::set_var("PROD_FEATURE_NEVER_DECLARED", "beta") };
+        let _guard = EnvGuard("PROD_FEATURE_NEVER_DECLARED");
+
+        let env = sample().resolve("prod").expect("prod resolves");
+        assert!(
+            !env.feature_overrides.contains_key("never-declared"),
+            "an env var must not introduce a brand-new feature key"
+        );
+    }
+
+    #[test]
+    fn malformed_min_stage_env_var_errors_clearly() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
+        unsafe { std::env::set_var("PROD_MIN_STAGE", "nightly") };
+        let _guard = EnvGuard("PROD_MIN_STAGE");
+
+        let err = sample().resolve("prod").unwrap_err().to_string();
+        assert!(
+            err.contains("PROD_MIN_STAGE") && err.contains("nightly"),
+            "expected error to mention the var name and bad value, got: {err}"
+        );
+    }
+
+    #[test]
     fn environments_file_path_sits_next_to_config() {
         let envs = sample().with_app_id("gddy").with_config_file(true);
         let path = envs.config_file_path().expect("path resolves with app id");
@@ -582,6 +747,42 @@ api_url = "https://api.custom.example.com"
         let custom = envs.resolve("custom").expect("custom");
         assert_eq!(custom.oauth.unwrap().client_id, "custom-client");
         assert!(envs.list().contains(&"custom".to_owned()));
+    }
+
+    #[test]
+    fn file_layer_min_stage_and_features_table_merge_into_feature_overrides() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("environments.toml");
+        std::fs::write(
+            &file,
+            r#"
+[dev]
+min_stage = "experimental"
+
+[staging]
+client_id = "staging-client"
+
+[staging.feature_overrides]
+"domain-bulk-transfer" = "beta"
+"#,
+        )
+        .expect("write file");
+
+        let envs = Environments::new("prod")
+            .with_config_file(true)
+            .with_config_file_path_override(file);
+
+        let dev = envs.resolve("dev").expect("dev");
+        assert_eq!(dev.min_stage, Some(Stage::Experimental));
+
+        let staging = envs.resolve("staging").expect("staging");
+        assert_eq!(
+            staging.feature_overrides.get("domain-bulk-transfer"),
+            Some(&Stage::Beta)
+        );
     }
 
     const ACTIVE_KEY: &str = "environment.active";

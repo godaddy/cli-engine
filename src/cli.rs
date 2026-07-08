@@ -17,7 +17,7 @@ use clap::{ArgMatches, Command};
 
 use crate::{
     ActivityEmitter, Auditor, AuthProvider, Authorizer, CliCoreError, CommandMeta, CommandSpec,
-    GroupSpec, GuideEntry, Middleware, MiddlewareRequest, Result, RuntimeCommandSpec,
+    FeatureFlag, GroupSpec, GuideEntry, Middleware, MiddlewareRequest, Result, RuntimeCommandSpec,
     RuntimeGroupSpec,
     auth::commands::auth_command_group,
     command::{
@@ -25,6 +25,7 @@ use crate::{
         leaf_matches,
     },
     error::exit_code_for_error,
+    feature_flags::{FlagEntry, FlagPolicy, FlagRegistry, Stage},
     flags::{
         GlobalFlags, default_output_format, derive_bool_flags, derive_value_flags,
         extract_command_path, extract_output_format, extract_search_query,
@@ -275,6 +276,29 @@ pub struct CliConfig {
     /// middleware, and exposes it to handlers through
     /// [`CommandContext::environment`](crate::command::CommandContext::environment).
     pub environments: Option<Arc<crate::environments::Environments>>,
+    /// Minimum feature stage required for a flagged command, group, or module
+    /// to remain mounted.
+    ///
+    /// Defaults to [`Stage::Ga`] via [`Stage`]'s own `Default`, which combined
+    /// with an empty [`feature_overrides`](Self::feature_overrides) is the
+    /// zero-config behavior: nothing is gated unless a command/group/module
+    /// opts in with `.with_feature_flag(...)`, and even then it stays visible
+    /// until this is lowered. Lower it (e.g. to [`Stage::Beta`] or
+    /// [`Stage::Experimental`]) to opt a build or environment into
+    /// pre-release commands. Set via [`CliConfig::with_min_stage`].
+    pub min_stage: Stage,
+    /// Per-key stage overrides that substitute a forced stage for a flag
+    /// key's own declared stage before comparing against
+    /// [`min_stage`](Self::min_stage).
+    ///
+    /// Empty by default. Populate via [`CliConfig::with_feature_override`] to
+    /// force one named flag to a specific effective stage — e.g. forcing a
+    /// single flag to [`Stage::Ga`] to turn it on for internal testing without
+    /// lowering [`min_stage`](Self::min_stage) for every other flagged
+    /// command, or forcing it to [`Stage::Experimental`] to disable it even
+    /// under a permissive `min_stage`. See [`FlagPolicy::visible`] for the
+    /// exact comparison.
+    pub feature_overrides: BTreeMap<String, Stage>,
 }
 
 impl CliConfig {
@@ -349,6 +373,37 @@ impl CliConfig {
     ) -> Self {
         self.environments = Some(environments);
         self
+    }
+
+    /// Sets the minimum feature stage required for a flagged command, group,
+    /// or module to remain mounted.
+    ///
+    /// See [`min_stage`](Self::min_stage) for the default and [`FlagPolicy`]
+    /// for how it combines with [`feature_overrides`](Self::feature_overrides)
+    /// during command-tree pruning.
+    #[must_use]
+    pub fn with_min_stage(mut self, stage: Stage) -> Self {
+        self.min_stage = stage;
+        self
+    }
+
+    /// Adds (or replaces) a per-key feature-flag stage override.
+    ///
+    /// See [`feature_overrides`](Self::feature_overrides) for how the
+    /// override participates in the [`FlagPolicy::visible`] comparison.
+    #[must_use]
+    pub fn with_feature_override(mut self, key: impl Into<String>, stage: Stage) -> Self {
+        self.feature_overrides.insert(key.into(), stage);
+        self
+    }
+
+    /// Builds the merged [`FlagPolicy`] used for command-tree pruning from
+    /// this config's `min_stage` and `feature_overrides`.
+    fn flag_policy(&self) -> FlagPolicy {
+        FlagPolicy {
+            min_stage: self.min_stage,
+            overrides: self.feature_overrides.clone(),
+        }
     }
 
     /// Overrides the outbound User-Agent string for all HTTP traffic.
@@ -677,6 +732,8 @@ impl std::fmt::Debug for CliConfig {
                 "argv0_routes",
                 &self.argv0_routes.keys().collect::<Vec<_>>(),
             )
+            .field("min_stage", &self.min_stage)
+            .field("feature_overrides", &self.feature_overrides)
             .finish()
     }
 }
@@ -855,6 +912,27 @@ impl Cli {
             middleware.env = environments.effective_active(None, &middleware.config);
             middleware.environments = Some(Arc::clone(environments));
         }
+        // Seed the merged flag policy before any module/group is registered so
+        // pruning during `add_module`/`add_module_group` below sees it. The active
+        // environment's fully-resolved (compiled + file + env-var) min_stage/
+        // feature_overrides, when present, take precedence over the consumer-level
+        // CliConfig policy — an environment can loosen or tighten visibility beyond
+        // what the binary set in code. Environment resolution failure (e.g. an
+        // unknown active environment name) is tolerated here and falls back to the
+        // consumer-level policy only: this is just flag-policy computation, not full
+        // environment validation, and must not make `Cli::new` fail in a new way.
+        // The normal lazy paths (`env get`/`env info`, `ctx.environment()?`) still
+        // surface a real resolution error to the user when a command needs it.
+        let mut flag_policy = config.flag_policy();
+        if let Some(environments) = &middleware.environments
+            && let Ok(env) = environments.resolve(&middleware.env)
+        {
+            if let Some(min_stage) = env.min_stage {
+                flag_policy.min_stage = min_stage;
+            }
+            flag_policy.overrides.extend(env.feature_overrides);
+        }
+        middleware.flag_policy = flag_policy;
 
         let mut cli = Self {
             config,
@@ -899,6 +977,7 @@ impl Cli {
         if cli.config.environments.is_some() {
             cli.ensure_env_command();
         }
+        cli.ensure_flags_command();
         cli
     }
 
@@ -1038,6 +1117,20 @@ impl Cli {
         category: impl Into<String>,
         group: RuntimeGroupSpec,
     ) -> &mut Self {
+        self.add_module_group_inner(category, group, None)
+    }
+
+    /// Shared implementation behind [`add_module_group`](Self::add_module_group)
+    /// and [`add_module`](Self::add_module). `inherited` is the effective
+    /// feature flag the group's enclosing module declared (if any), so a
+    /// module-level flag cascades down to the group even though
+    /// `add_module_group` itself has no concept of a module.
+    fn add_module_group_inner(
+        &mut self,
+        category: impl Into<String>,
+        group: RuntimeGroupSpec,
+        inherited: Option<FeatureFlag>,
+    ) -> &mut Self {
         // Prevent consumer modules from shadowing engine built-ins in the clap
         // command tree.  A reserved group name would override the engine's own
         // subcommand (last-writer-wins in clap) and corrupt the dispatch path.
@@ -1048,6 +1141,18 @@ impl Cli {
             );
             return self;
         }
+
+        let mut prefix = Vec::new();
+        let Some(group) = prune_feature_flag_tree(
+            group,
+            inherited.as_ref(),
+            &self.middleware.flag_policy,
+            &mut prefix,
+            &mut self.middleware.flag_registry,
+        ) else {
+            return self;
+        };
+
         let category = category.into();
         if !group.group.hidden {
             self.module_entries.push(ModuleHelpEntry {
@@ -1090,7 +1195,7 @@ impl Cli {
             self.middleware.human_views.register(view);
         }
         self.add_guides(guides);
-        self.add_module_group(module.category, group)
+        self.add_module_group_inner(module.category, group, module.feature_flag.clone())
     }
 
     /// Adds one top-level runtime command after construction.
@@ -2133,6 +2238,40 @@ impl Cli {
         self.refresh_root_long();
     }
 
+    /// Mounts the built-in `flags` command group and files it under the admin
+    /// help category. Idempotent and yields to a consumer-defined `flags`
+    /// subcommand if one already exists. Unlike [`Self::ensure_env_command`],
+    /// this is mounted unconditionally: feature-flag introspection does not
+    /// depend on any opt-in system, so it is always available.
+    fn ensure_flags_command(&mut self) {
+        if has_subcommand(&self.root, "flags") {
+            return;
+        }
+        let group = crate::flag_commands::flags_command_group();
+        let mut prefix = Vec::new();
+        group.register_commands(&mut prefix, &mut self.commands);
+        let mut prefix = Vec::new();
+        let clap_group = runtime_group_clap_command_with_schema_help(
+            &group,
+            &mut prefix,
+            &self.middleware.schema_registry,
+        );
+        self.root = self.root.clone().subcommand(clap_group);
+        let category = self
+            .config
+            .admin_category
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ADMIN_CATEGORY.to_owned());
+        if !self.module_entries.iter().any(|e| e.name == "flags") {
+            self.module_entries.push(ModuleHelpEntry {
+                category,
+                name: "flags".to_owned(),
+                short: "Inspect declared feature flags".to_owned(),
+            });
+        }
+        self.refresh_root_long();
+    }
+
     fn default_auth_provider(&self) -> String {
         if !self.middleware.default_auth_provider.is_empty() {
             return self.middleware.default_auth_provider.clone();
@@ -2953,6 +3092,106 @@ fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Walks a runtime group tree, resolving each node's effective feature flag by
+/// cascading from `inherited` — a node's own [`GroupSpec::feature_flag`] or
+/// [`CommandSpec::feature_flag`] wins if set, otherwise it inherits the
+/// nearest ancestor's effective flag, otherwise (nothing in the ancestor
+/// chain declared a flag) it implicitly resolves to [`Stage::Ga`] with no key.
+/// Every node that resolves to a *named* flag (own or inherited) is recorded
+/// into `registry` under its colon-separated path, together with whether
+/// `policy` judged it visible. Nodes that resolve to the implicit no-flag
+/// default are not recorded (there is nothing to introspect) and are always
+/// visible.
+///
+/// Returns `None` when this group itself should be dropped from the tree —
+/// either because its effective flag is not visible under `policy`, or
+/// because every one of its commands and subgroups was pruned away, leaving
+/// an empty group with nothing to mount. An emptied-out group is dropped
+/// unconditionally, even if its own flag was visible: a `clap` subcommand
+/// group with zero children is useless either way, so this simplifies the
+/// pruning logic rather than threading through a "was this group itself
+/// visible but empty" distinction that no caller needs.
+///
+/// Note that an invisible ancestor short-circuits before its children are
+/// even visited: a more permissive flag on a descendant cannot resurrect a
+/// subtree whose enclosing group already failed the visibility check.
+fn prune_feature_flag_tree(
+    mut group: RuntimeGroupSpec,
+    inherited: Option<&FeatureFlag>,
+    policy: &FlagPolicy,
+    prefix: &mut Vec<String>,
+    registry: &mut FlagRegistry,
+) -> Option<RuntimeGroupSpec> {
+    prefix.push(group.group.name.clone());
+
+    let effective = group
+        .group
+        .feature_flag
+        .clone()
+        .or_else(|| inherited.cloned());
+    if !record_and_check_visibility(effective.as_ref(), policy, prefix, registry) {
+        prefix.pop();
+        return None;
+    }
+
+    let mut kept_groups = Vec::with_capacity(group.groups.len());
+    for child in std::mem::take(&mut group.groups) {
+        if let Some(pruned) =
+            prune_feature_flag_tree(child, effective.as_ref(), policy, prefix, registry)
+        {
+            kept_groups.push(pruned);
+        }
+    }
+    group.groups = kept_groups;
+
+    let mut kept_commands = Vec::with_capacity(group.commands.len());
+    for command in std::mem::take(&mut group.commands) {
+        prefix.push(command.spec.name.clone());
+        let command_effective = command
+            .spec
+            .feature_flag
+            .clone()
+            .or_else(|| effective.clone());
+        let visible =
+            record_and_check_visibility(command_effective.as_ref(), policy, prefix, registry);
+        prefix.pop();
+        if visible {
+            kept_commands.push(command);
+        }
+    }
+    group.commands = kept_commands;
+
+    prefix.pop();
+
+    if group.commands.is_empty() && group.groups.is_empty() {
+        None
+    } else {
+        Some(group)
+    }
+}
+
+/// Records `effective` at the current `prefix` path into `registry` (only
+/// when it names a flag key — the implicit Ga default is not recorded) and
+/// returns whether the node is visible under `policy`.
+fn record_and_check_visibility(
+    effective: Option<&FeatureFlag>,
+    policy: &FlagPolicy,
+    prefix: &[String],
+    registry: &mut FlagRegistry,
+) -> bool {
+    let Some(flag) = effective else {
+        return true;
+    };
+    let visible = policy.visible(Some(flag.key.as_str()), flag.stage);
+    registry.record(FlagEntry {
+        path: prefix.join(":"),
+        key: flag.key.clone(),
+        stage: flag.stage,
+        visible,
+    });
+    visible
+}
+
 fn register_runtime_group_metadata(
     group: &RuntimeGroupSpec,
     prefix: &mut Vec<String>,
@@ -3263,5 +3502,433 @@ mod env_config_tests {
         let out = cli.run(["envtest2", "tree", "--env", "nope"]).await;
         assert_ne!(out.exit_code, 0);
         assert!(out.rendered.contains("nope"));
+    }
+}
+
+#[cfg(test)]
+mod feature_flag_pruning_tests {
+    use super::*;
+    use crate::CommandResult;
+
+    fn trivial_command(name: &str) -> RuntimeCommandSpec {
+        RuntimeCommandSpec::new(
+            CommandSpec::new(name, "short").no_auth(true),
+            async |_, _| Ok(CommandResult::new(serde_json::Value::Null)),
+        )
+    }
+
+    fn flagged_command(name: &str, key: &str, stage: Stage) -> RuntimeCommandSpec {
+        let mut command = trivial_command(name);
+        command.spec = command.spec.with_feature_flag(key, stage);
+        command
+    }
+
+    fn empty_policy() -> FlagPolicy {
+        FlagPolicy::default()
+    }
+
+    #[test]
+    fn no_flags_anywhere_keeps_everything() {
+        let group = RuntimeGroupSpec::new(GroupSpec::new("root", "short"))
+            .with_command(trivial_command("a"))
+            .with_command(trivial_command("b"))
+            .with_group(
+                RuntimeGroupSpec::new(GroupSpec::new("child", "short"))
+                    .with_command(trivial_command("c")),
+            );
+
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned =
+            prune_feature_flag_tree(group, None, &empty_policy(), &mut prefix, &mut registry);
+
+        let pruned = pruned.expect("unflagged tree should never be dropped");
+        assert_eq!(pruned.commands.len(), 2);
+        assert_eq!(pruned.groups.len(), 1);
+        assert_eq!(pruned.groups[0].commands.len(), 1);
+        assert!(registry.entries().is_empty());
+    }
+
+    #[test]
+    fn experimental_command_is_pruned_sibling_is_not() {
+        let group = RuntimeGroupSpec::new(GroupSpec::new("root", "short"))
+            .with_command(flagged_command("gated", "gated-flag", Stage::Experimental))
+            .with_command(trivial_command("sibling"));
+
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned =
+            prune_feature_flag_tree(group, None, &empty_policy(), &mut prefix, &mut registry)
+                .expect("group still has a visible command left");
+
+        assert_eq!(pruned.commands.len(), 1);
+        assert_eq!(pruned.commands[0].spec.name, "sibling");
+
+        let entries = registry.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "root:gated");
+        assert_eq!(entries[0].key, "gated-flag");
+        assert!(!entries[0].visible);
+    }
+
+    #[test]
+    fn beta_group_pruned_under_ga_min_stage_kept_under_beta_min_stage() {
+        let build_tree = || {
+            RuntimeGroupSpec::new(GroupSpec::new("root", "short"))
+                .with_command(trivial_command("keep-me"))
+                .with_group(
+                    RuntimeGroupSpec::new(
+                        GroupSpec::new("flagged-group", "short")
+                            .with_feature_flag("group-flag", Stage::Beta),
+                    )
+                    .with_command(trivial_command("cmd-default"))
+                    .with_command(flagged_command(
+                        "cmd-ga",
+                        "cmd-ga-flag",
+                        Stage::Ga,
+                    )),
+                )
+        };
+
+        // Default policy (min_stage: Ga) drops the whole Beta subtree, including
+        // both its undeclared and explicitly-Ga-declared children, because the
+        // ancestor group itself already fails visibility before children are
+        // even visited.
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned = prune_feature_flag_tree(
+            build_tree(),
+            None,
+            &empty_policy(),
+            &mut prefix,
+            &mut registry,
+        )
+        .expect("root keeps its unflagged sibling command");
+        assert!(pruned.groups.is_empty());
+        assert_eq!(pruned.commands.len(), 1);
+        assert_eq!(pruned.commands[0].spec.name, "keep-me");
+        // Only the group itself was recorded; its children were never visited.
+        assert_eq!(registry.entries().len(), 1);
+        assert_eq!(registry.entries()[0].path, "root:flagged-group");
+        assert!(!registry.entries()[0].visible);
+
+        // A Beta-permissive policy keeps the group and both of its children.
+        let policy = FlagPolicy::default().with_min_stage(Stage::Beta);
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned =
+            prune_feature_flag_tree(build_tree(), None, &policy, &mut prefix, &mut registry)
+                .expect("root is kept");
+        assert_eq!(pruned.groups.len(), 1);
+        assert_eq!(pruned.groups[0].commands.len(), 2);
+        assert!(registry.entries().iter().all(|entry| entry.visible));
+    }
+
+    #[test]
+    fn ancestor_invisibility_short_circuits_before_children_are_visited() {
+        // The child declares its own, more permissive Ga flag under a distinct
+        // key. Per the documented pruning semantics, an invisible ancestor drops
+        // its whole subtree unconditionally: the child's own flag is never even
+        // considered, because `prune_feature_flag_tree` returns `None` for the
+        // ancestor as soon as its own effective flag fails visibility, before
+        // recursing into commands or subgroups at all.
+        let group = RuntimeGroupSpec::new(
+            GroupSpec::new("ancestor", "short").with_feature_flag("ancestor-flag", Stage::Beta),
+        )
+        .with_command(flagged_command("child", "child-flag", Stage::Ga));
+
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned =
+            prune_feature_flag_tree(group, None, &empty_policy(), &mut prefix, &mut registry);
+
+        assert!(
+            pruned.is_none(),
+            "invisible ancestor drops its whole subtree"
+        );
+        // The child was never visited, so nothing about it was recorded.
+        assert_eq!(registry.entries().len(), 1);
+        assert_eq!(registry.entries()[0].path, "ancestor");
+        assert!(registry.by_key("child-flag").is_empty());
+    }
+
+    #[test]
+    fn cascading_inherited_flag_key_and_stage_reach_unflagged_descendants() {
+        // Simulates a module-level flag with no per-group/per-command
+        // declaration anywhere below it: `inherited` here stands in for
+        // `Module::feature_flag`, exactly as `add_module_group_inner` passes it.
+        let module_flag = FeatureFlag::new("module-flag", Stage::Beta);
+        let group = RuntimeGroupSpec::new(GroupSpec::new("root", "short"))
+            .with_command(trivial_command("unflagged-child"));
+
+        let policy = FlagPolicy::default().with_min_stage(Stage::Beta);
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned = prune_feature_flag_tree(
+            group,
+            Some(&module_flag),
+            &policy,
+            &mut prefix,
+            &mut registry,
+        )
+        .expect("Beta-permissive policy keeps a Beta-inherited tree");
+        assert_eq!(pruned.commands.len(), 1);
+
+        // Both the group and the descendant command recorded the *same*
+        // inherited key/stage, proving real cascading rather than an implicit
+        // Ga default at either level.
+        let entries = registry.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "root");
+        assert_eq!(entries[0].key, "module-flag");
+        assert_eq!(entries[0].stage, Stage::Beta);
+        assert_eq!(entries[1].path, "root:unflagged-child");
+        assert_eq!(entries[1].key, "module-flag");
+        assert_eq!(entries[1].stage, Stage::Beta);
+
+        // Under the default (Ga) policy the same inherited Beta flag makes the
+        // whole tree invisible together, since the group and its unflagged
+        // child resolve to the identical effective flag.
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned = prune_feature_flag_tree(
+            RuntimeGroupSpec::new(GroupSpec::new("root", "short"))
+                .with_command(trivial_command("unflagged-child")),
+            Some(&module_flag),
+            &empty_policy(),
+            &mut prefix,
+            &mut registry,
+        );
+        assert!(pruned.is_none());
+    }
+
+    #[test]
+    fn registry_records_only_named_flags_not_unflagged_nodes() {
+        let group = RuntimeGroupSpec::new(GroupSpec::new("root", "short")).with_group(
+            RuntimeGroupSpec::new(
+                GroupSpec::new("g", "short").with_feature_flag("g-flag", Stage::Beta),
+            )
+            .with_command(trivial_command("c1"))
+            .with_command(flagged_command("c2", "c2-flag", Stage::Ga)),
+        );
+
+        // Permissive enough that nothing is pruned, so every node is visited.
+        let policy = FlagPolicy::default().with_min_stage(Stage::Experimental);
+        let mut prefix = Vec::new();
+        let mut registry = FlagRegistry::new();
+        let pruned = prune_feature_flag_tree(group, None, &policy, &mut prefix, &mut registry)
+            .expect("permissive policy keeps everything");
+        assert_eq!(pruned.groups[0].commands.len(), 2);
+
+        let entries = registry.entries();
+        assert_eq!(entries.len(), 3, "root has no flag and is not recorded");
+        assert_eq!(entries[0].path, "root:g");
+        assert_eq!(entries[0].key, "g-flag");
+        assert_eq!(entries[1].path, "root:g:c1");
+        assert_eq!(entries[1].key, "g-flag");
+        assert_eq!(entries[1].stage, Stage::Beta);
+        assert_eq!(entries[2].path, "root:g:c2");
+        assert_eq!(entries[2].key, "c2-flag");
+        assert_eq!(entries[2].stage, Stage::Ga);
+        assert!(entries.iter().all(|entry| entry.visible));
+    }
+
+    #[test]
+    fn module_feature_flag_cascades_into_its_group_via_add_module() {
+        // Regression test for the bug this task fixes: `add_module` used to
+        // discard `module.feature_flag` entirely, so a module-level flag could
+        // never reach its group/commands. `Module::new` returns a group with an
+        // unflagged command; the module itself declares Experimental, and the
+        // default (Ga) policy must prune the whole group away.
+        let module = Module::new("Test Category", |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new("gated-mod", "short"))
+                .with_command(trivial_command("list"))
+        })
+        .with_feature_flag("module-flag", Stage::Experimental);
+
+        let mut cli = Cli::new(CliConfig::new("modtest", "Module test", "modtest"));
+        cli.add_module(module);
+
+        assert!(
+            !cli.commands.contains_key("gated-mod:list"),
+            "module-level Experimental flag should have pruned the whole group under the default Ga policy"
+        );
+        assert!(
+            !has_subcommand(&cli.root, "gated-mod"),
+            "the pruned group must not be mounted in the clap tree either"
+        );
+    }
+
+    #[test]
+    fn module_feature_flag_keeps_group_when_policy_allows_it() {
+        let module = Module::new("Test Category", |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new("gated-mod-2", "short"))
+                .with_command(trivial_command("list"))
+        })
+        .with_feature_flag("module-flag-2", Stage::Experimental);
+
+        let mut cli = Cli::new(
+            CliConfig::new("modtest2", "Module test", "modtest2")
+                .with_min_stage(Stage::Experimental),
+        );
+        cli.add_module(module);
+
+        assert!(cli.commands.contains_key("gated-mod-2:list"));
+        assert!(has_subcommand(&cli.root, "gated-mod-2"));
+    }
+
+    #[test]
+    fn active_environment_min_stage_loosens_consumer_level_policy() {
+        // The CliConfig itself leaves min_stage at its Ga default, which would
+        // normally prune this Experimental-flagged group. The active ("prod")
+        // environment's compiled min_stage override should reach
+        // `middleware.flag_policy` before pruning runs and keep it instead.
+        let module = Module::new("Test Category", |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new("gated-mod-3", "short"))
+                .with_command(trivial_command("list"))
+        })
+        .with_feature_flag("module-flag-3", Stage::Experimental);
+
+        let mut cli = Cli::new(
+            CliConfig::new("modtest3", "Module test", "modtest3").with_environments(Arc::new(
+                crate::environments::Environments::new("prod").with_environment(
+                    "prod",
+                    crate::environments::EnvironmentDef::new().with_min_stage(Stage::Experimental),
+                ),
+            )),
+        );
+        cli.add_module(module);
+
+        assert!(cli.commands.contains_key("gated-mod-3:list"));
+        assert!(has_subcommand(&cli.root, "gated-mod-3"));
+    }
+}
+
+#[cfg(test)]
+mod flags_command_tests {
+    use super::*;
+    use crate::CommandResult;
+
+    /// Builds a module with one flagged group containing one flagged (via
+    /// inheritance) `list` command, so `flag_registry` has something to
+    /// introspect once the module is mounted.
+    fn flagged_module(group_name: &'static str, key: &'static str, stage: Stage) -> Module {
+        Module::new("Test Category", move |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new(group_name, "short")).with_command(
+                RuntimeCommandSpec::new(
+                    CommandSpec::new("list", "short").no_auth(true),
+                    async |_, _| Ok(CommandResult::new(serde_json::Value::Null)),
+                ),
+            )
+        })
+        .with_feature_flag(key, stage)
+    }
+
+    #[tokio::test]
+    async fn flags_list_reports_flagged_entries() {
+        let mut cli = Cli::new(
+            CliConfig::new("flagtest", "Flag test", "flagtest").with_min_stage(Stage::Beta),
+        );
+        cli.add_module(flagged_module("flagged-mod", "list-flag", Stage::Beta));
+
+        let out = cli
+            .run(["flagtest", "flags", "list", "--output", "json"])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        let entries = rendered["data"].as_array().expect("data should be array");
+        let command_entry = entries
+            .iter()
+            .find(|entry| entry["path"] == "flagged-mod:list")
+            .expect("flagged command entry should be present");
+        assert_eq!(command_entry["key"], "list-flag");
+        assert_eq!(command_entry["stage"], "beta");
+        assert_eq!(command_entry["visible"], true);
+    }
+
+    #[tokio::test]
+    async fn flags_info_returns_policy_and_entries_for_known_key() {
+        let mut cli = Cli::new(
+            CliConfig::new("flagtest2", "Flag test", "flagtest2").with_min_stage(Stage::Beta),
+        );
+        cli.add_module(flagged_module("flagged-mod-2", "info-flag", Stage::Beta));
+
+        let out = cli
+            .run([
+                "flagtest2",
+                "flags",
+                "info",
+                "info-flag",
+                "--output",
+                "json",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        let data = &rendered["data"];
+        assert_eq!(data["key"], "info-flag");
+        assert_eq!(data["policy"]["min_stage"], "beta");
+        assert!(data["policy"]["override"].is_null());
+        let entries = data["entries"].as_array().expect("entries should be array");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().any(|entry| {
+            entry["path"] == "flagged-mod-2:list" && entry["decided_by"] == "min_stage"
+        }));
+    }
+
+    #[tokio::test]
+    async fn flags_info_reports_override_decided_by() {
+        // The module declares Experimental, which the default Ga policy would
+        // normally hide; the override forces Ga instead, so the entries stay
+        // visible even though `entry.stage` still reports the node's own
+        // (Experimental) declaration, not the override.
+        let mut cli = Cli::new(
+            CliConfig::new("flagtest3", "Flag test", "flagtest3")
+                .with_feature_override("override-flag", Stage::Ga),
+        );
+        cli.add_module(flagged_module(
+            "flagged-mod-3",
+            "override-flag",
+            Stage::Experimental,
+        ));
+
+        let out = cli
+            .run([
+                "flagtest3",
+                "flags",
+                "info",
+                "override-flag",
+                "--output",
+                "json",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        let data = &rendered["data"];
+        assert_eq!(data["policy"]["min_stage"], "ga");
+        assert_eq!(data["policy"]["override"], "ga");
+        let entries = data["entries"].as_array().expect("entries should be array");
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry["decided_by"] == "override")
+        );
+        assert!(entries.iter().all(|entry| entry["visible"] == true));
+        assert!(entries.iter().all(|entry| entry["stage"] == "experimental"));
+    }
+
+    #[tokio::test]
+    async fn flags_info_unknown_key_errors() {
+        let cli = Cli::new(CliConfig::new("flagtest4", "Flag test", "flagtest4"));
+
+        let out = cli
+            .run(["flagtest4", "flags", "info", "no-such-flag"])
+            .await;
+        assert_ne!(out.exit_code, 0);
+        assert!(out.rendered.contains("no such flag"));
     }
 }

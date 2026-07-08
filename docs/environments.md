@@ -37,9 +37,16 @@ client_id = "ote-client-id"
 auth_url   = "https://api.ote.example.com/v2/oauth2/authorize"
 token_url  = "https://api.ote.example.com/v2/oauth2/token"
 api_url    = "https://api.ote.example.com"
+
+[dev]
+min_stage = "experimental"
+
+[dev.feature_overrides]
+"domain-bulk-transfer" = "beta"
 ```
 
 The recognized OAuth keys — `client_id`, `auth_url`, `token_url`, and `scopes` (an array of strings) — are parsed into the typed `OAuthConfig` slice of the resolved `Environment`.
+`min_stage` and the `[<env>.feature_overrides]` table are the feature-flag layer, described in [Feature-Flag Layering](#feature-flag-layering) below. `feature_overrides` (rather than a shorter name like `features`) is deliberately specific: `EnvironmentDef`'s unrecognized keys fall through to the free-form `extra` bag, so a generic name would collide with any existing app-specific `extra` key of the same name.
 Every other key is captured as a free-form field in `Environment::extra`, which is a `BTreeMap<String, String>` — so these values **must be TOML strings** (for example `api_url` above).
 A non-OAuth key whose value is a number, boolean, or array fails to parse; quote it as a string instead.
 The `extra` bag is printed verbatim by `env info`, so it must not hold secrets.
@@ -61,6 +68,48 @@ Scopes are **not** env-var overridable; set them in the compiled-in layer or `en
 
 Bag keys in `Environment::extra` are overridable via `<ENV>_<KEY>` only when the key is already present in the merged record after layers 1 and 2.
 For example, `api_url` must exist in either the compiled defaults or the file before `PROD_API_URL` has any effect.
+
+## Feature-Flag Layering
+
+Feature-flag visibility is a fourth resolution axis, parallel to but independent from the OAuth/bag-key layers above. See [Feature Flags & Stages](concepts.md#feature-flags--stages) for what `Stage` and `FlagPolicy` mean; this section covers only the environment-specific plumbing.
+
+`EnvironmentDef` carries `min_stage: Option<Stage>` and `feature_overrides: BTreeMap<String, Stage>`, set with `.with_min_stage(stage)` and `.with_feature_override(key, stage)`. The resolved `Environment` mirrors both fields. They merge through the same three layers as OAuth/bag fields — compiled defaults, then `environments.toml`, then environment variables — and are then layered onto the consumer's own `CliConfig`-level policy.
+
+In `environments.toml`, `min_stage` is a plain key on the environment's table, and per-key overrides go in a nested `[<env>.feature_overrides]` table:
+
+```toml
+[dev]
+min_stage = "experimental"
+
+[staging.feature_overrides]
+"domain-bulk-transfer" = "ga"
+```
+
+An override must itself meet the active `min_stage` floor to reveal a node — overriding a command's stage to `beta` while `min_stage` stays `ga` still hides it (visibility requires `effective_stage >= min_stage`, and `beta < ga`); override to `ga` to reveal it regardless of the node's own declared stage. That is why the `staging` example above forces `domain-bulk-transfer` to `ga`: `staging` sets no `min_stage`, so its floor is the `Ga` default, and only a `ga` override clears it — one surgical unlock of that command while every other still-gated node stays hidden.
+
+Environment-variable overrides:
+
+| Variable | Field overridden |
+| --- | --- |
+| `<ENV>_MIN_STAGE` | `min_stage` |
+| `<ENV>_FEATURE_<KEY>` | `feature_overrides[<key>]` |
+
+`<ENV>_FEATURE_<KEY>` follows the same restriction as bag keys: it only takes effect when `<key>` is already present in `feature_overrides` after the compiled+file merge (layers 1 and 2). `<KEY>` is the flag key uppercased with `-` replaced by `_` (`domain-bulk-transfer` → `PROD_FEATURE_DOMAIN_BULK_TRANSFER`).
+
+The full precedence order, highest wins:
+
+```text
+env var for a specific key            (<ENV>_FEATURE_<KEY>)
+  > env var min-stage                 (<ENV>_MIN_STAGE)
+  > environment file's feature_overrides for that key
+  > environment file's min_stage
+  > consumer .with_feature_override(...)
+  > consumer .with_min_stage(...)     (default Stage::Ga)
+```
+
+The environment layer is applied only when environment resolution succeeds: if resolving the active environment errors — a malformed `<ENV>_MIN_STAGE` value, an unparsable `environments.toml`, or an active-environment name unknown to every layer — the engine silently falls back to the consumer-level `CliConfig` policy alone and drops the environment-layer contribution rather than failing the run. In the intended usage pattern (the consumer ships a `Ga` default and an environment *loosens* it for dev/experimental builds) this fails **closed**: a resolution error simply leaves the stricter compiled default in force. But the reverse pattern is unsafe: if a consumer ships a *permissive* compiled `min_stage` (or feature override) and relies on an environment to *tighten* it for a public/production build, a resolution error fails **open** — the gated nodes the environment would have re-hidden are mounted under the permissive compiled policy instead. A security model that depends on an environment tightening a permissive compiled default must therefore validate that environment resolution succeeds (for example via `env info`, or by not caching a build whose active environment cannot resolve) rather than assuming resolution errors cannot occur in practice; do not rely on this crate to fail closed for that direction.
+
+Unlike the OAuth/bag-key layers, this resolved `FlagPolicy` is fixed for the life of the `Cli`: `Cli::new` computes it once from the environment seeded at startup (the sticky/persisted active environment, or the compiled default) and uses it immediately afterward to prune the command tree that `--help`, `--schema`, and dispatch all read from. Passing `--env <name>` on the command line (`apply_env_flag`) updates `middleware.env` for that invocation — which does change which environment other commands such as `env info` or an OAuth provider resolve against — but it does not recompute `flag_policy` or re-prune the already-built tree, so it has no effect on feature-flag visibility for that run, including what `flags list`/`flags info` report, since they read the same startup-fixed policy; the visible/hidden set is fixed to whichever environment was active when the process started, and `--env` cannot widen or narrow it.
 
 ## Active Environment
 
