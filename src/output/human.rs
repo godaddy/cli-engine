@@ -1,12 +1,13 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::{Arc, OnceLock, RwLock},
 };
 
 use serde_json::Value;
 
-use super::{Envelope, NextAction};
+use super::{Envelope, NextAction, NextActionParam};
 
 /// Column definition for registered human table views.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -338,9 +339,11 @@ fn render_data_body(data: &Value, columns: Option<&[TableColumn]>) -> String {
 }
 
 /// Append a "Next steps:" footer listing suggested follow-up commands to `out`
-/// (a no-op when there are none). Each action shows its command template
-/// (placeholders like `<domain>` shown as-is) with the description beneath it.
-/// Writes directly into `out` to avoid per-action temporaries.
+/// (a no-op when there are none). Each action shows its command template with
+/// any known param values substituted into their `<placeholder>` (params
+/// without a known value, e.g. required-only hints, are shown as-is), followed
+/// by the description beneath it. Writes directly into `out` to avoid
+/// per-action temporaries.
 fn append_next_actions(out: &mut String, actions: &[NextAction]) {
     if actions.is_empty() {
         return;
@@ -348,11 +351,34 @@ fn append_next_actions(out: &mut String, actions: &[NextAction]) {
     out.push_str("\nNext steps:\n");
     for action in actions {
         out.push_str("  ");
-        out.push_str(&action.command);
+        out.push_str(&substitute_known_params(&action.command, &action.params));
         out.push_str("\n      ");
         out.push_str(&action.description);
         out.push('\n');
     }
+}
+
+/// Fills a `NextAction` command template with any params that carry a known
+/// concrete `value` — e.g. `"domain quote <domain>"` with
+/// `params["domain"].value == Some("example.com")` becomes
+/// `"domain quote example.com"`. A param's placeholder is its key wrapped in
+/// angle brackets (`<domain>`); params without a known value (required-only
+/// hints) are left as literal placeholder text for the user to fill in.
+/// Borrows `command` as-is (no allocation) when nothing has a known value.
+fn substitute_known_params<'cmd>(
+    command: &'cmd str,
+    params: &HashMap<String, NextActionParam>,
+) -> Cow<'cmd, str> {
+    let mut command = Cow::Borrowed(command);
+    for (key, param) in params {
+        if let Some(value) = &param.value {
+            let placeholder = format!("<{key}>");
+            if command.contains(&placeholder) {
+                command = Cow::Owned(command.replace(&placeholder, value));
+            }
+        }
+    }
+    command
 }
 
 /// Upper bound on a `no_truncate` column's width, even though it otherwise
@@ -599,6 +625,35 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Register at the quoted price"), "{out}");
+    }
+
+    #[test]
+    fn human_output_substitutes_known_next_action_params() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+            .with_next_actions(vec![
+                NextAction::new(
+                    "domain purchase --quote-token <quote-token> --agree --confirm",
+                    "Register at the quoted price",
+                )
+                .with_param("quote-token", NextActionParam::value("abc-123")),
+            ]);
+        let out = render_human(&envelope);
+        assert!(
+            out.contains("domain purchase --quote-token abc-123 --agree --confirm"),
+            "{out}"
+        );
+        assert!(!out.contains("<quote-token>"), "{out}");
+    }
+
+    #[test]
+    fn human_output_leaves_placeholder_without_a_known_value() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+            .with_next_actions(vec![
+                NextAction::new("domain quote <domain>", "Price a registration")
+                    .with_param("domain", NextActionParam::required()),
+            ]);
+        let out = render_human(&envelope);
+        assert!(out.contains("domain quote <domain>"), "{out}");
     }
 
     #[test]
