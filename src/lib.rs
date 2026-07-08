@@ -79,6 +79,8 @@ pub mod environments;
 pub mod error;
 /// Stage-based feature flagging primitives (readiness gating), distinct from `flags`.
 pub mod feature_flags;
+/// Built-in `flags` command group (private; only `cli.rs` consumes it).
+mod flag_commands;
 /// Global framework flags and flag-extraction helpers.
 pub mod flags;
 /// Filesystem and path utilities (base dir, path-component safety, atomic write).

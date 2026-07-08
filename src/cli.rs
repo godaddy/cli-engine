@@ -977,6 +977,7 @@ impl Cli {
         if cli.config.environments.is_some() {
             cli.ensure_env_command();
         }
+        cli.ensure_flags_command();
         cli
     }
 
@@ -2232,6 +2233,40 @@ impl Cli {
                 category,
                 name: "env".to_owned(),
                 short: "Manage the active environment".to_owned(),
+            });
+        }
+        self.refresh_root_long();
+    }
+
+    /// Mounts the built-in `flags` command group and files it under the admin
+    /// help category. Idempotent and yields to a consumer-defined `flags`
+    /// subcommand if one already exists. Unlike [`Self::ensure_env_command`],
+    /// this is mounted unconditionally: feature-flag introspection does not
+    /// depend on any opt-in system, so it is always available.
+    fn ensure_flags_command(&mut self) {
+        if has_subcommand(&self.root, "flags") {
+            return;
+        }
+        let group = crate::flag_commands::flags_command_group();
+        let mut prefix = Vec::new();
+        group.register_commands(&mut prefix, &mut self.commands);
+        let mut prefix = Vec::new();
+        let clap_group = runtime_group_clap_command_with_schema_help(
+            &group,
+            &mut prefix,
+            &self.middleware.schema_registry,
+        );
+        self.root = self.root.clone().subcommand(clap_group);
+        let category = self
+            .config
+            .admin_category
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ADMIN_CATEGORY.to_owned());
+        if !self.module_entries.iter().any(|e| e.name == "flags") {
+            self.module_entries.push(ModuleHelpEntry {
+                category,
+                name: "flags".to_owned(),
+                short: "Inspect declared feature flags".to_owned(),
             });
         }
         self.refresh_root_long();
@@ -3766,5 +3801,134 @@ mod feature_flag_pruning_tests {
 
         assert!(cli.commands.contains_key("gated-mod-3:list"));
         assert!(has_subcommand(&cli.root, "gated-mod-3"));
+    }
+}
+
+#[cfg(test)]
+mod flags_command_tests {
+    use super::*;
+    use crate::CommandResult;
+
+    /// Builds a module with one flagged group containing one flagged (via
+    /// inheritance) `list` command, so `flag_registry` has something to
+    /// introspect once the module is mounted.
+    fn flagged_module(group_name: &'static str, key: &'static str, stage: Stage) -> Module {
+        Module::new("Test Category", move |_ctx| {
+            RuntimeGroupSpec::new(GroupSpec::new(group_name, "short")).with_command(
+                RuntimeCommandSpec::new(
+                    CommandSpec::new("list", "short").no_auth(true),
+                    async |_, _| Ok(CommandResult::new(serde_json::Value::Null)),
+                ),
+            )
+        })
+        .with_feature_flag(key, stage)
+    }
+
+    #[tokio::test]
+    async fn flags_list_reports_flagged_entries() {
+        let mut cli = Cli::new(
+            CliConfig::new("flagtest", "Flag test", "flagtest").with_min_stage(Stage::Beta),
+        );
+        cli.add_module(flagged_module("flagged-mod", "list-flag", Stage::Beta));
+
+        let out = cli
+            .run(["flagtest", "flags", "list", "--output", "json"])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        let entries = rendered["data"].as_array().expect("data should be array");
+        let command_entry = entries
+            .iter()
+            .find(|entry| entry["path"] == "flagged-mod:list")
+            .expect("flagged command entry should be present");
+        assert_eq!(command_entry["key"], "list-flag");
+        assert_eq!(command_entry["stage"], "beta");
+        assert_eq!(command_entry["visible"], true);
+    }
+
+    #[tokio::test]
+    async fn flags_info_returns_policy_and_entries_for_known_key() {
+        let mut cli = Cli::new(
+            CliConfig::new("flagtest2", "Flag test", "flagtest2").with_min_stage(Stage::Beta),
+        );
+        cli.add_module(flagged_module("flagged-mod-2", "info-flag", Stage::Beta));
+
+        let out = cli
+            .run([
+                "flagtest2",
+                "flags",
+                "info",
+                "info-flag",
+                "--output",
+                "json",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        let data = &rendered["data"];
+        assert_eq!(data["key"], "info-flag");
+        assert_eq!(data["policy"]["min_stage"], "beta");
+        assert!(data["policy"]["override"].is_null());
+        let entries = data["entries"].as_array().expect("entries should be array");
+        assert!(!entries.is_empty());
+        assert!(entries.iter().any(|entry| {
+            entry["path"] == "flagged-mod-2:list" && entry["decided_by"] == "min_stage"
+        }));
+    }
+
+    #[tokio::test]
+    async fn flags_info_reports_override_decided_by() {
+        // The module declares Experimental, which the default Ga policy would
+        // normally hide; the override forces Ga instead, so the entries stay
+        // visible even though `entry.stage` still reports the node's own
+        // (Experimental) declaration, not the override.
+        let mut cli = Cli::new(
+            CliConfig::new("flagtest3", "Flag test", "flagtest3")
+                .with_feature_override("override-flag", Stage::Ga),
+        );
+        cli.add_module(flagged_module(
+            "flagged-mod-3",
+            "override-flag",
+            Stage::Experimental,
+        ));
+
+        let out = cli
+            .run([
+                "flagtest3",
+                "flags",
+                "info",
+                "override-flag",
+                "--output",
+                "json",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        let data = &rendered["data"];
+        assert_eq!(data["policy"]["min_stage"], "ga");
+        assert_eq!(data["policy"]["override"], "ga");
+        let entries = data["entries"].as_array().expect("entries should be array");
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry["decided_by"] == "override")
+        );
+        assert!(entries.iter().all(|entry| entry["visible"] == true));
+        assert!(entries.iter().all(|entry| entry["stage"] == "experimental"));
+    }
+
+    #[tokio::test]
+    async fn flags_info_unknown_key_errors() {
+        let cli = Cli::new(CliConfig::new("flagtest4", "Flag test", "flagtest4"));
+
+        let out = cli
+            .run(["flagtest4", "flags", "info", "no-such-flag"])
+            .await;
+        assert_ne!(out.exit_code, 0);
+        assert!(out.rendered.contains("no such flag"));
     }
 }
