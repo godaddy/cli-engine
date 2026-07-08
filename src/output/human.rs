@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::{Arc, OnceLock, RwLock},
@@ -338,9 +339,11 @@ fn render_data_body(data: &Value, columns: Option<&[TableColumn]>) -> String {
 }
 
 /// Append a "Next steps:" footer listing suggested follow-up commands to `out`
-/// (a no-op when there are none). Each action shows its command template
-/// (placeholders like `<domain>` shown as-is) with the description beneath it.
-/// Writes directly into `out` to avoid per-action temporaries.
+/// (a no-op when there are none). Each action shows its command template with
+/// any known param values substituted into their `<placeholder>` (params
+/// without a known value, e.g. required-only hints, are shown as-is), followed
+/// by the description beneath it. Writes directly into `out` to avoid
+/// per-action temporaries.
 fn append_next_actions(out: &mut String, actions: &[NextAction]) {
     if actions.is_empty() {
         return;
@@ -361,11 +364,18 @@ fn append_next_actions(out: &mut String, actions: &[NextAction]) {
 /// `"domain quote example.com"`. A param's placeholder is its key wrapped in
 /// angle brackets (`<domain>`); params without a known value (required-only
 /// hints) are left as literal placeholder text for the user to fill in.
-fn substitute_known_params(command: &str, params: &HashMap<String, NextActionParam>) -> String {
-    let mut command = command.to_owned();
+/// Borrows `command` as-is (no allocation) when nothing has a known value.
+fn substitute_known_params<'cmd>(
+    command: &'cmd str,
+    params: &HashMap<String, NextActionParam>,
+) -> Cow<'cmd, str> {
+    let mut command = Cow::Borrowed(command);
     for (key, param) in params {
         if let Some(value) = &param.value {
-            command = command.replace(&format!("<{key}>"), value);
+            let placeholder = format!("<{key}>");
+            if command.contains(&placeholder) {
+                command = Cow::Owned(command.replace(&placeholder, value));
+            }
         }
     }
     command
