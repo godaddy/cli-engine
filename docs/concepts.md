@@ -423,15 +423,9 @@ Risk tiers classify command impact:
 
 ## Feature Flags & Stages
 
-Feature flags classify command readiness rather than risk. `Stage` orders `Experimental < Beta <
-Ga`; the default is `Ga`, so gating is opt-in — a command with no flag declaration is fully visible
-under every policy.
+Feature flags classify command readiness rather than risk. `Stage` orders `Experimental < Beta < Ga`; the default is `Ga`, so gating is opt-in — a command with no flag declaration is fully visible under every policy.
 
-`.with_feature_flag(key, stage)` is available on `CommandSpec`, `GroupSpec`, and `Module`. A node's
-effective flag is its own declaration if set, else the nearest ancestor's, walking module → group →
-nested group → command; the nearest declaration wins. A node with no declaration anywhere in its
-chain resolves to `Stage::Ga` with no key, so existing commands are unaffected unless an author
-opts a node into a lower stage.
+`.with_feature_flag(key, stage)` is available on `CommandSpec`, `GroupSpec`, and `Module`. A node's effective flag is its own declaration if set, else the nearest ancestor's, walking module → group → nested group → command; the nearest declaration wins. A node with no declaration anywhere in its chain resolves to `Stage::Ga` with no key, so existing commands are unaffected unless an author opts a node into a lower stage.
 
 ```rust
 use cli_engine::{CommandSpec, Stage};
@@ -440,22 +434,14 @@ CommandSpec::new("preview", "Preview an upcoming feature")
     .with_feature_flag("project-preview", Stage::Experimental);
 ```
 
-`Cli::add_module`/`add_module_group` resolve the cascading flag for every node while building the
-command tree, record each flagged node into a `FlagRegistry`, and prune any node whose effective
-flag isn't visible under the active `FlagPolicy`. Pruning removes the node from the tree entirely —
-help, `--schema`, search, and dispatch — not just from a listing.
+`Cli::add_module`/`add_module_group` resolve the cascading flag for every node while building the command tree, record each flagged node into a `FlagRegistry`, and prune any node whose effective flag isn't visible under the active `FlagPolicy`. Pruning removes the node from the tree entirely — help, `--schema`, search, and dispatch — not just from a listing.
 
-`FlagPolicy` has two fields: `min_stage` (the floor a node's stage must meet or exceed) and
-`overrides` (per-key stage substitutions, checked before `min_stage`). The policy is assembled from
-`CliConfig::with_min_stage`/`CliConfig::with_feature_override`, layered with the active
-environment's own `min_stage`/`feature_overrides` when `with_environments` is configured; see
-[Environments](environments.md) for the environment-layer precedence and TOML shape.
+`FlagPolicy` has two fields: `min_stage` (the floor a node's stage must meet or exceed) and `overrides` (per-key stage substitutions, checked before `min_stage`). The policy is assembled from `CliConfig::with_min_stage`/`CliConfig::with_feature_override`, layered with the active environment's own `min_stage`/`feature_overrides` when `with_environments` is configured; see [Environments](environments.md) for the environment-layer precedence and TOML shape.
 
 The built-in `flags` command group exposes:
 
 - `flags list` — every declared flag node (path, key, stage, effective visibility).
-- `flags info <key>` — the active policy for one key plus every node that resolved to it, with
-  `decided_by: "override"` or `"min_stage"` indicating which policy layer decided visibility.
+- `flags info <key>` — the active policy for one key plus every node that resolved to it, with `decided_by: "override"` or `"min_stage"` indicating which policy layer decided visibility.
 
 ## Output
 
