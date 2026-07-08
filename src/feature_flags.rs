@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum Stage {
     /// Early, unstable functionality; visible only when explicitly opted in.
     Experimental,
@@ -83,6 +83,7 @@ pub struct FeatureFlag {
 
 impl FeatureFlag {
     /// Creates a new feature flag with the given key and stage.
+    #[must_use]
     pub fn new(key: impl Into<String>, stage: Stage) -> Self {
         Self {
             key: key.into(),
