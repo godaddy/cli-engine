@@ -1,12 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::{Arc, OnceLock, RwLock},
 };
 
 use serde_json::Value;
 
-use super::{Envelope, NextAction};
+use super::{Envelope, NextAction, NextActionParam};
 
 /// Column definition for registered human table views.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -348,11 +348,27 @@ fn append_next_actions(out: &mut String, actions: &[NextAction]) {
     out.push_str("\nNext steps:\n");
     for action in actions {
         out.push_str("  ");
-        out.push_str(&action.command);
+        out.push_str(&substitute_known_params(&action.command, &action.params));
         out.push_str("\n      ");
         out.push_str(&action.description);
         out.push('\n');
     }
+}
+
+/// Fills a `NextAction` command template with any params that carry a known
+/// concrete `value` — e.g. `"domain quote <domain>"` with
+/// `params["domain"].value == Some("example.com")` becomes
+/// `"domain quote example.com"`. A param's placeholder is its key wrapped in
+/// angle brackets (`<domain>`); params without a known value (required-only
+/// hints) are left as literal placeholder text for the user to fill in.
+fn substitute_known_params(command: &str, params: &HashMap<String, NextActionParam>) -> String {
+    let mut command = command.to_owned();
+    for (key, param) in params {
+        if let Some(value) = &param.value {
+            command = command.replace(&format!("<{key}>"), value);
+        }
+    }
+    command
 }
 
 /// Upper bound on a `no_truncate` column's width, even though it otherwise
@@ -599,6 +615,35 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Register at the quoted price"), "{out}");
+    }
+
+    #[test]
+    fn human_output_substitutes_known_next_action_params() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+            .with_next_actions(vec![
+                NextAction::new(
+                    "domain purchase --quote-token <quote-token> --agree --confirm",
+                    "Register at the quoted price",
+                )
+                .with_param("quote-token", NextActionParam::value("abc-123")),
+            ]);
+        let out = render_human(&envelope);
+        assert!(
+            out.contains("domain purchase --quote-token abc-123 --agree --confirm"),
+            "{out}"
+        );
+        assert!(!out.contains("<quote-token>"), "{out}");
+    }
+
+    #[test]
+    fn human_output_leaves_placeholder_without_a_known_value() {
+        let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+            .with_next_actions(vec![
+                NextAction::new("domain quote <domain>", "Price a registration")
+                    .with_param("domain", NextActionParam::required()),
+            ]);
+        let out = render_human(&envelope);
+        assert!(out.contains("domain quote <domain>"), "{out}");
     }
 
     #[test]
