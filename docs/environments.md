@@ -37,9 +37,16 @@ client_id = "ote-client-id"
 auth_url   = "https://api.ote.example.com/v2/oauth2/authorize"
 token_url  = "https://api.ote.example.com/v2/oauth2/token"
 api_url    = "https://api.ote.example.com"
+
+[dev]
+min_stage = "experimental"
+
+[dev.features]
+"domain-bulk-transfer" = "beta"
 ```
 
 The recognized OAuth keys — `client_id`, `auth_url`, `token_url`, and `scopes` (an array of strings) — are parsed into the typed `OAuthConfig` slice of the resolved `Environment`.
+`min_stage` and the `[<env>.features]` table are the feature-flag layer, described in [Feature-Flag Layering](#feature-flag-layering) below.
 Every other key is captured as a free-form field in `Environment::extra`, which is a `BTreeMap<String, String>` — so these values **must be TOML strings** (for example `api_url` above).
 A non-OAuth key whose value is a number, boolean, or array fails to parse; quote it as a string instead.
 The `extra` bag is printed verbatim by `env info`, so it must not hold secrets.
@@ -61,6 +68,42 @@ Scopes are **not** env-var overridable; set them in the compiled-in layer or `en
 
 Bag keys in `Environment::extra` are overridable via `<ENV>_<KEY>` only when the key is already present in the merged record after layers 1 and 2.
 For example, `api_url` must exist in either the compiled defaults or the file before `PROD_API_URL` has any effect.
+
+## Feature-Flag Layering
+
+Feature-flag visibility is a fourth resolution axis, parallel to but independent from the OAuth/bag-key layers above. See [Feature Flags & Stages](concepts.md#feature-flags--stages) for what `Stage` and `FlagPolicy` mean; this section covers only the environment-specific plumbing.
+
+`EnvironmentDef` carries `min_stage: Option<Stage>` and `feature_overrides: BTreeMap<String, Stage>`, set with `.with_min_stage(stage)` and `.with_feature_override(key, stage)`. The resolved `Environment` mirrors both fields. They merge through the same three layers as OAuth/bag fields — compiled defaults, then `environments.toml`, then environment variables — and are then layered onto the consumer's own `CliConfig`-level policy.
+
+In `environments.toml`, `min_stage` is a plain key on the environment's table, and per-key overrides go in a nested `[<env>.features]` table:
+
+```toml
+[dev]
+min_stage = "experimental"
+
+[staging.features]
+"domain-bulk-transfer" = "beta"
+```
+
+Environment-variable overrides:
+
+| Variable | Field overridden |
+| --- | --- |
+| `<ENV>_MIN_STAGE` | `min_stage` |
+| `<ENV>_FEATURE_<KEY>` | `feature_overrides[<key>]` |
+
+`<ENV>_FEATURE_<KEY>` follows the same restriction as bag keys: it only takes effect when `<key>` is already present in `feature_overrides` after the compiled+file merge (layers 1 and 2). `<KEY>` is the flag key uppercased with `-` replaced by `_` (`domain-bulk-transfer` → `PROD_FEATURE_DOMAIN_BULK_TRANSFER`).
+
+The full precedence order, highest wins:
+
+```text
+env var for a specific key            (<ENV>_FEATURE_<KEY>)
+  > env var min-stage                 (<ENV>_MIN_STAGE)
+  > environment file's feature_overrides for that key
+  > environment file's min_stage
+  > consumer .with_feature_override(...)
+  > consumer .with_min_stage(...)     (default Stage::Ga)
+```
 
 ## Active Environment
 
