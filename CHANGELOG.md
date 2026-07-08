@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.0...cli-engine-v0.4.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* substitute known NextAction params in human output ([#41](https://github.com/godaddy/cli-engine/issues/41)) ([86b4bd7](https://github.com/godaddy/cli-engine/commit/86b4bd7ac6d5235c90ce68d1285fa9a6c0559be6))
+
 ## [0.4.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.3.5...cli-engine-v0.4.0) (2026-07-07)
 
 
