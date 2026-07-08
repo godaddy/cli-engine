@@ -453,3 +453,54 @@ async fn flags_list_and_info_report_override_and_min_stage_decisions_end_to_end(
         unknown.rendered
     );
 }
+
+#[tokio::test]
+async fn flags_info_decides_per_entry_when_multiple_nodes_share_a_key() {
+    // Two unrelated nodes declare the same key with different stages. The
+    // override (to Beta) flips one node's outcome (Experimental -> visible)
+    // but not the other's (Beta was already >= min_stage). `decided_by` must
+    // reflect that per entry, not uniformly for the whole key.
+    let cli = Cli::new(
+        CliConfig::new("flagintro2", "Flags introspection test", "flagintro2-app")
+            .with_min_stage(Stage::Beta)
+            .with_feature_override("shared-key", Stage::Beta)
+            .with_module(flagged_module(
+                "already-visible-group",
+                "shared-key",
+                Stage::Beta,
+            ))
+            .with_module(flagged_module(
+                "flipped-group",
+                "shared-key",
+                Stage::Experimental,
+            )),
+    );
+
+    let info = cli
+        .run([
+            "flagintro2",
+            "flags",
+            "info",
+            "shared-key",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(info.exit_code, 0, "{}", info.rendered);
+    let data: Value = serde_json::from_str(&info.rendered).expect("json output");
+    let entries = data["data"]["entries"].as_array().expect("entries array");
+
+    let already_visible = entries
+        .iter()
+        .find(|entry| entry["path"] == "already-visible-group:list")
+        .expect("already-visible entry present");
+    assert_eq!(already_visible["visible"], true);
+    assert_eq!(already_visible["decided_by"], "min_stage");
+
+    let flipped = entries
+        .iter()
+        .find(|entry| entry["path"] == "flipped-group:list")
+        .expect("flipped entry present");
+    assert_eq!(flipped["visible"], true);
+    assert_eq!(flipped["decided_by"], "override");
+}

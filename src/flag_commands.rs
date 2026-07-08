@@ -62,11 +62,7 @@ pub fn flags_command_group() -> RuntimeGroupSpec {
                     return Err(CliCoreError::message(format!("no such flag: {key}")));
                 }
                 let has_override = ctx.middleware.flag_policy.overrides.contains_key(&key);
-                let decided_by = if has_override {
-                    "override"
-                } else {
-                    "min_stage"
-                };
+                let min_stage = ctx.middleware.flag_policy.min_stage;
                 let override_stage = ctx
                     .middleware
                     .flag_policy
@@ -77,6 +73,16 @@ pub fn flags_command_group() -> RuntimeGroupSpec {
                 let entries: Vec<_> = matches
                     .iter()
                     .map(|entry| {
+                        // An override only "decides" this entry's visibility if removing
+                        // it would flip the outcome; otherwise min_stage alone explains
+                        // it, even though an override for this key happens to exist.
+                        let visible_without_override = entry.stage >= min_stage;
+                        let decided_by =
+                            if has_override && visible_without_override != entry.visible {
+                                "override"
+                            } else {
+                                "min_stage"
+                            };
                         json!({
                             "path": entry.path,
                             "stage": entry.stage.as_str(),
