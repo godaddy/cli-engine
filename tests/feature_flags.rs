@@ -217,6 +217,55 @@ async fn environment_feature_override_reveals_pruned_subtree_end_to_end() {
     assert_eq!(dispatch.exit_code, 0, "{}", dispatch.rendered);
 }
 
+#[tokio::test]
+async fn environment_min_stage_tightens_permissive_consumer_policy_end_to_end() {
+    // The tightening direction, opposite every test above: the `CliConfig` is
+    // *permissive* (`min_stage` = Experimental, which on its own reveals the
+    // Experimental `sandbox` subgroup), but the active environment raises
+    // `min_stage` back up to Ga and re-hides it. Proves the environment layer's
+    // unconditional replace in `Cli::new` can strengthen — not only loosen — the
+    // consumer's compiled policy, all the way through pruning and dispatch.
+    //
+    // Compiled-only environment, so no env var and no `ENV_LOCK`; the name is
+    // test-scoped for the same collision reason as the loosening tests above.
+    let cli = Cli::new(
+        CliConfig::new("flagtighten", "Flag tighten test", "flagtighten-app")
+            .with_min_stage(Stage::Experimental)
+            .with_environments(Arc::new(
+                Environments::new("flagtest-tighten").with_environment(
+                    "flagtest-tighten",
+                    EnvironmentDef::new().with_min_stage(Stage::Ga),
+                ),
+            ))
+            .with_module(gated_module()),
+    );
+
+    // `sandbox` would be visible under the consumer's Experimental floor alone,
+    // but the environment's Ga floor prunes it again.
+    let help = cli.run(["flagtighten", "devkit"]).await;
+    assert_eq!(help.exit_code, 0, "{}", help.rendered);
+    assert!(help.rendered.contains("status"), "{}", help.rendered);
+    assert!(!help.rendered.contains("sandbox"), "{}", help.rendered);
+
+    // And the re-hidden node is not dispatchable: it was never mounted.
+    let dispatch = cli
+        .run([
+            "flagtighten",
+            "devkit",
+            "sandbox",
+            "peek",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_ne!(dispatch.exit_code, 0, "{}", dispatch.rendered);
+    assert!(
+        dispatch.rendered.contains("unknown command"),
+        "{}",
+        dispatch.rendered
+    );
+}
+
 /// Serializes this file's env-var mutations across parallel test threads.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

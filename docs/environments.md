@@ -82,8 +82,10 @@ In `environments.toml`, `min_stage` is a plain key on the environment's table, a
 min_stage = "experimental"
 
 [staging.features]
-"domain-bulk-transfer" = "beta"
+"domain-bulk-transfer" = "ga"
 ```
+
+An override must itself meet the active `min_stage` floor to reveal a node — overriding a command's stage to `beta` while `min_stage` stays `ga` still hides it (visibility requires `effective_stage >= min_stage`, and `beta < ga`); override to `ga` to reveal it regardless of the node's own declared stage. That is why the `staging` example above forces `domain-bulk-transfer` to `ga`: `staging` sets no `min_stage`, so its floor is the `Ga` default, and only a `ga` override clears it — one surgical unlock of that command while every other still-gated node stays hidden.
 
 Environment-variable overrides:
 
@@ -104,6 +106,8 @@ env var for a specific key            (<ENV>_FEATURE_<KEY>)
   > consumer .with_feature_override(...)
   > consumer .with_min_stage(...)     (default Stage::Ga)
 ```
+
+The environment layer is applied only when environment resolution succeeds: if resolving the active environment errors — a malformed `<ENV>_MIN_STAGE` value, an unparsable `environments.toml`, or an active-environment name unknown to every layer — the engine silently falls back to the consumer-level `CliConfig` policy alone and drops the environment-layer contribution rather than failing the run. In the intended usage pattern (the consumer ships a `Ga` default and an environment *loosens* it for dev/experimental builds) this fails **closed**: a resolution error simply leaves the stricter compiled default in force. But the reverse pattern is unsafe: if a consumer ships a *permissive* compiled `min_stage` (or feature override) and relies on an environment to *tighten* it for a public/production build, a resolution error fails **open** — the gated nodes the environment would have re-hidden are mounted under the permissive compiled policy instead. A security model that depends on an environment tightening a permissive compiled default must therefore validate that environment resolution succeeds (for example via `env info`, or by not caching a build whose active environment cannot resolve) rather than assuming resolution errors cannot occur in practice; do not rely on this crate to fail closed for that direction.
 
 ## Active Environment
 

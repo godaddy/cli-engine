@@ -633,11 +633,22 @@ mod tests {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Local fixture with a compiled `min_stage` (Experimental) that differs
+        // from the env-var value (Beta), so a passing assertion proves the env
+        // var *wins over* an already-set compiled value — not merely that it
+        // populates an otherwise-empty field (which `sample()`'s prod, with no
+        // compiled `min_stage`, could not distinguish).
+        let envs = Environments::new("prod").with_environment(
+            "prod",
+            EnvironmentDef::new()
+                .with_client_id("prod-client")
+                .with_min_stage(Stage::Experimental),
+        );
         // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
         unsafe { std::env::set_var("PROD_MIN_STAGE", "beta") };
         let _guard = EnvGuard("PROD_MIN_STAGE");
 
-        let env = sample().resolve("prod").expect("prod resolves");
+        let env = envs.resolve("prod").expect("prod resolves");
         assert_eq!(env.min_stage, Some(Stage::Beta));
     }
 
