@@ -41,12 +41,12 @@ api_url    = "https://api.ote.example.com"
 [dev]
 min_stage = "experimental"
 
-[dev.features]
+[dev.feature_overrides]
 "domain-bulk-transfer" = "beta"
 ```
 
 The recognized OAuth keys — `client_id`, `auth_url`, `token_url`, and `scopes` (an array of strings) — are parsed into the typed `OAuthConfig` slice of the resolved `Environment`.
-`min_stage` and the `[<env>.features]` table are the feature-flag layer, described in [Feature-Flag Layering](#feature-flag-layering) below.
+`min_stage` and the `[<env>.feature_overrides]` table are the feature-flag layer, described in [Feature-Flag Layering](#feature-flag-layering) below. `feature_overrides` (rather than a shorter name like `features`) is deliberately specific: `EnvironmentDef`'s unrecognized keys fall through to the free-form `extra` bag, so a generic name would collide with any existing app-specific `extra` key of the same name.
 Every other key is captured as a free-form field in `Environment::extra`, which is a `BTreeMap<String, String>` — so these values **must be TOML strings** (for example `api_url` above).
 A non-OAuth key whose value is a number, boolean, or array fails to parse; quote it as a string instead.
 The `extra` bag is printed verbatim by `env info`, so it must not hold secrets.
@@ -75,13 +75,13 @@ Feature-flag visibility is a fourth resolution axis, parallel to but independent
 
 `EnvironmentDef` carries `min_stage: Option<Stage>` and `feature_overrides: BTreeMap<String, Stage>`, set with `.with_min_stage(stage)` and `.with_feature_override(key, stage)`. The resolved `Environment` mirrors both fields. They merge through the same three layers as OAuth/bag fields — compiled defaults, then `environments.toml`, then environment variables — and are then layered onto the consumer's own `CliConfig`-level policy.
 
-In `environments.toml`, `min_stage` is a plain key on the environment's table, and per-key overrides go in a nested `[<env>.features]` table:
+In `environments.toml`, `min_stage` is a plain key on the environment's table, and per-key overrides go in a nested `[<env>.feature_overrides]` table:
 
 ```toml
 [dev]
 min_stage = "experimental"
 
-[staging.features]
+[staging.feature_overrides]
 "domain-bulk-transfer" = "ga"
 ```
 

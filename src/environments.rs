@@ -61,7 +61,7 @@ pub struct EnvironmentDef {
     scopes: Option<Vec<String>>,
     #[serde(default)]
     min_stage: Option<Stage>,
-    #[serde(default, rename = "features")]
+    #[serde(default)]
     feature_overrides: BTreeMap<String, Stage>,
     /// Everything not recognised above is captured here (app-specific fields).
     #[serde(flatten, default)]
@@ -765,7 +765,7 @@ min_stage = "experimental"
 [staging]
 client_id = "staging-client"
 
-[staging.features]
+[staging.feature_overrides]
 "domain-bulk-transfer" = "beta"
 "#,
         )
