@@ -31,7 +31,10 @@ pub struct Envelope {
 /// A suggested follow-up command the caller can run next.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NextAction {
-    /// Executable command template, e.g. `"application info --name {{name}}"`.
+    /// Executable command template, e.g. `"application info --name <name>"`.
+    /// A param's placeholder is its key wrapped in angle brackets (`<key>`);
+    /// human output substitutes it when the param carries a known
+    /// [`NextActionParam::value`].
     pub command: String,
     /// Human-readable description of what this action does.
     pub description: String,
@@ -544,7 +547,7 @@ mod tests {
     fn next_actions_appear_in_serialized_envelope() {
         let envelope =
             Envelope::success(json!({"id": "p1"}), "projects-api").with_next_actions(vec![
-                NextAction::new("project get --id {{id}}", "Get project details"),
+                NextAction::new("project get --id <id>", "Get project details"),
             ]);
 
         let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
@@ -553,7 +556,7 @@ mod tests {
 
         assert_eq!(
             parsed["next_actions"][0]["command"],
-            "project get --id {{id}}"
+            "project get --id <id>"
         );
         assert_eq!(
             parsed["next_actions"][0]["description"],
@@ -577,7 +580,7 @@ mod tests {
 
     #[test]
     fn next_action_params_serialize_when_present() {
-        let action = NextAction::new("deploy run --app {{app}}", "Deploy the app").with_param(
+        let action = NextAction::new("deploy run --app <app>", "Deploy the app").with_param(
             "app",
             NextActionParam {
                 description: Some("Application name".to_owned()),
