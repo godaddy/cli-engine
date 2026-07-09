@@ -981,7 +981,7 @@ impl Cli {
         &self,
         args: I,
         stdout: &mut O,
-        stderr: &mut E,
+        _stderr: &mut E,
         shutdown: Shutdown,
     ) -> std::io::Result<ExitCode>
     where
@@ -999,11 +999,11 @@ impl Cli {
         {
             on_shutdown();
         }
-        if output.exit_code == 0 {
-            stdout.write_all(output.rendered.as_bytes())?;
-        } else {
-            stderr.write_all(output.rendered.as_bytes())?;
-        }
+        // The JSON envelope always goes to stdout — success and error alike.
+        // The exit code communicates success/failure to the shell; the envelope's
+        // `error` field communicates it to JSON consumers. stderr is reserved for
+        // diagnostics only (tracing, update notices, signal messages).
+        stdout.write_all(output.rendered.as_bytes())?;
         Ok(process_exit_code(output.exit_code))
     }
 

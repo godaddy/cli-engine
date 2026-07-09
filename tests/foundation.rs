@@ -458,7 +458,7 @@ async fn cli_runtime_root_help_includes_find_commands_without_modules() {
 }
 
 #[tokio::test]
-async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
+async fn cli_execute_from_writes_all_output_to_stdout() {
     // execute_from publishes the config-derived User-Agent process-wide, so this
     // test shares the lock with the user-agent tests and restores the default
     // on exit (including panic) via the RAII guard, while the lock is held.
@@ -502,13 +502,13 @@ async fn cli_execute_from_writes_success_to_stdout_and_errors_to_stderr() {
         .await
         .expect("execute should write");
     assert_eq!(code, std::process::ExitCode::from(1));
-    assert!(stdout.is_empty());
-    let rendered = String::from_utf8(stderr).expect("utf8");
+    assert!(stderr.is_empty());
+    let rendered = String::from_utf8(stdout).expect("utf8");
     assert!(rendered.contains("missing"));
 }
 
 #[tokio::test]
-async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
+async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stdout() {
     // execute_from_until_signal publishes the config-derived User-Agent
     // process-wide; share the lock and restore the default (panic-safe) like above.
     let _ua_guard = USER_AGENT_TEST_LOCK.lock().await;
@@ -540,9 +540,9 @@ async fn cli_execute_from_shutdown_signal_writes_interrupt_to_stderr() {
         .expect("execute should write interrupt output");
 
     assert_eq!(code, std::process::ExitCode::from(130));
-    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
     assert_eq!(
-        String::from_utf8(stderr).expect("stderr should be utf8"),
+        String::from_utf8(stdout).expect("stdout should be utf8"),
         "command interrupted\n"
     );
     assert_eq!(shutdown_count.load(Ordering::SeqCst), 1);
