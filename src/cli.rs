@@ -999,10 +999,6 @@ impl Cli {
         {
             on_shutdown();
         }
-        // The JSON envelope always goes to stdout — success and error alike.
-        // The exit code communicates success/failure to the shell; the envelope's
-        // `error` field communicates it to JSON consumers. stderr is reserved for
-        // diagnostics only (tracing, update notices, signal messages).
         stdout.write_all(output.rendered.as_bytes())?;
         Ok(process_exit_code(output.exit_code))
     }
