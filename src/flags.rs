@@ -63,6 +63,19 @@ impl Default for GlobalFlags {
 /// Registers framework-global flags on a `clap` command.
 pub fn register_global_flags(command: Command) -> Command {
     command
+        .disable_help_flag(true)
+        .arg(
+            // clap's default help arg shows an abbreviated summary for `-h`
+            // and the full help text for `--help`. Override it so both
+            // flags print the same full help everywhere; `disable_help_flag`
+            // propagates to every subcommand.
+            Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(ArgAction::HelpLong)
+                .global(true)
+                .help("Print help"),
+        )
         .arg(
             Arg::new("output")
                 .long("output")
@@ -549,7 +562,12 @@ fn arg_requires_value(arg: &Arg) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{debug_component_enabled, output_env_var, resolve_default_output_format};
+    use clap::Command;
+
+    use super::{
+        debug_component_enabled, output_env_var, register_global_flags,
+        resolve_default_output_format,
+    };
 
     #[test]
     fn debug_component_matcher_handles_wildcards_and_negation() {
@@ -600,5 +618,28 @@ mod tests {
         assert_eq!(output_env_var("godaddy"), "GODADDY_OUTPUT");
         assert_eq!(output_env_var("gdx"), "GDX_OUTPUT");
         assert_eq!(output_env_var("my-cli"), "MY_CLI_OUTPUT");
+    }
+
+    #[test]
+    fn short_and_long_help_flags_render_identical_output() {
+        let build = || {
+            register_global_flags(Command::new("testcli"))
+                .subcommand(Command::new("sub").about("A subcommand"))
+        };
+        let help_text = |args: &[&str]| {
+            build()
+                .try_get_matches_from(args)
+                .expect_err("help action short-circuits parsing")
+                .to_string()
+        };
+
+        assert_eq!(
+            help_text(&["testcli", "-h"]),
+            help_text(&["testcli", "--help"])
+        );
+        assert_eq!(
+            help_text(&["testcli", "sub", "-h"]),
+            help_text(&["testcli", "sub", "--help"])
+        );
     }
 }
