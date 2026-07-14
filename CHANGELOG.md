@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.2...cli-engine-v0.4.3) (2026-07-14)
+
+
+### Bug Fixes
+
+* make -h an alias for --help on every command ([#48](https://github.com/godaddy/cli-engine/issues/48)) ([9bd7f36](https://github.com/godaddy/cli-engine/commit/9bd7f36f511a23b784aadc026cb2c32a27c2b042))
+
+
+### Miscellaneous
+
+* add pull request template ([#46](https://github.com/godaddy/cli-engine/issues/46)) ([fe1600d](https://github.com/godaddy/cli-engine/commit/fe1600dfb153a2b8f28f6ea7813531cf19f3ae4f))
+
 ## [0.4.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.1...cli-engine-v0.4.2) (2026-07-08)
 
 
