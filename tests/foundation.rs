@@ -4499,6 +4499,41 @@ async fn auth_extra_commands_output_schema_registers_for_schema_flag() {
     );
 }
 
+#[tokio::test]
+async fn auth_extra_commands_colliding_with_each_other_keeps_the_first() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        default_auth_provider: Some("primary".to_owned()),
+        auth_extra_commands: vec![
+            RuntimeCommandSpec::new(
+                CommandSpec::new("scopes", "First scopes command").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!("first"))),
+            ),
+            RuntimeCommandSpec::new(
+                CommandSpec::new("scopes", "Second scopes command").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!("second"))),
+            ),
+        ],
+        ..CliConfig::default()
+    });
+    cli.register_auth_provider(Arc::new(FakeProvider {
+        name: "primary".to_owned(),
+        identity: "tester".to_owned(),
+        logout_fails: false,
+        environments: vec!["prod".to_owned()],
+    }));
+
+    let scopes = cli
+        .run(["my-cli", "auth", "scopes", "--output", "json"])
+        .await;
+    assert_eq!(scopes.exit_code, 0, "{}", scopes.rendered);
+    let scopes_json: serde_json::Value =
+        serde_json::from_str(&scopes.rendered).expect("valid json");
+    assert_eq!(scopes_json["data"], json!("first"));
+}
+
 fn auth_cli_with_default_env(env: &'static str) -> Cli {
     Cli::new(CliConfig {
         name: "my-cli".to_owned(),
