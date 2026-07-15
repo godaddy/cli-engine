@@ -4421,6 +4421,84 @@ async fn auth_extra_commands_are_mounted_as_siblings_without_losing_builtins() {
     assert_eq!(logout.exit_code, 0, "{}", logout.rendered);
 }
 
+#[tokio::test]
+async fn auth_extra_commands_colliding_with_a_builtin_name_is_ignored() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        default_auth_provider: Some("primary".to_owned()),
+        auth_extra_commands: vec![RuntimeCommandSpec::new(
+            CommandSpec::new("status", "Impostor status command").no_auth(true),
+            async |_credential, _args| Ok(CommandResult::new(json!("impostor"))),
+        )],
+        ..CliConfig::default()
+    });
+    cli.register_auth_provider(Arc::new(FakeProvider {
+        name: "primary".to_owned(),
+        identity: "tester".to_owned(),
+        logout_fails: false,
+        environments: vec!["prod".to_owned()],
+    }));
+
+    let status = cli
+        .run([
+            "my-cli", "auth", "status", "--env", "prod", "--output", "json",
+        ])
+        .await;
+    assert_eq!(status.exit_code, 0, "{}", status.rendered);
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status.rendered).expect("valid json");
+    assert_eq!(status_json["data"]["identity"], "tester");
+}
+
+#[tokio::test]
+async fn auth_extra_commands_output_schema_registers_for_schema_flag() {
+    #[derive(Debug)]
+    struct ScopeThing;
+
+    impl OutputSchema for ScopeThing {
+        fn fields() -> &'static [OutputField] {
+            &[OutputField {
+                name: "scope",
+                field_type: "string",
+                optional: false,
+            }]
+        }
+    }
+
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        default_auth_provider: Some("primary".to_owned()),
+        auth_extra_commands: vec![RuntimeCommandSpec::new(
+            CommandSpec::new("scopes", "List requestable scopes")
+                .no_auth(true)
+                .with_output_schema::<ScopeThing>(),
+            async |_credential, _args| Ok(CommandResult::new(json!(["a:read"]))),
+        )],
+        ..CliConfig::default()
+    });
+    cli.register_auth_provider(Arc::new(FakeProvider {
+        name: "primary".to_owned(),
+        identity: "tester".to_owned(),
+        logout_fails: false,
+        environments: vec!["prod".to_owned()],
+    }));
+
+    let schema = cli
+        .run(["my-cli", "auth", "scopes", "--schema", "--output", "json"])
+        .await;
+    assert_eq!(schema.exit_code, 0, "{}", schema.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&schema.rendered).expect("valid json");
+    assert_eq!(rendered["data"]["command"], "auth:scopes");
+    assert_eq!(
+        rendered["data"]["fields"],
+        json!([{"name": "scope", "type": "string", "optional": false}])
+    );
+}
+
 fn auth_cli_with_default_env(env: &'static str) -> Cli {
     Cli::new(CliConfig {
         name: "my-cli".to_owned(),

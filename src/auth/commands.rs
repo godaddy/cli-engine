@@ -34,6 +34,7 @@ pub struct AuthStatusEntry {
     pub expires_at: String,
     /// OAuth scopes granted to the cached credential, empty when missing,
     /// unavailable, or the provider doesn't expose scope data (e.g. PATs).
+    #[serde(default)]
     pub scopes: Vec<String>,
     /// Whether the cached credential is expired or unavailable.
     pub expired: bool,

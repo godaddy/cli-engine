@@ -141,14 +141,21 @@ impl Module {
 /// Materializes a module's command tree standalone, outside a running
 /// [`Cli`](crate::Cli).
 ///
-/// Builds a throwaway [`Middleware`] (the same construction path
-/// [`Cli::new`](crate::Cli::new) uses) and runs the module's registration
-/// function against it, so callers can walk the real [`RuntimeGroupSpec`] —
-/// e.g. to derive a scope→command registry from
+/// Builds a throwaway [`Middleware`] and runs the module's registration
+/// function against it — the same call [`Cli::new`](crate::Cli::new) makes —
+/// so callers can walk the real [`RuntimeGroupSpec`] — e.g. to derive a
+/// scope→command registry from
 /// [`CommandSpec::metadata`](crate::CommandSpec::metadata) — without
 /// duplicating each module's command declarations. Guides and views the
 /// module registers via [`ModuleContext`] are discarded; only the command
 /// tree is returned.
+///
+/// Unlike mounting a module through [`Cli::new`]/`add_module`, this does
+/// **not** apply feature-flag pruning: the returned tree includes every node
+/// regardless of the active [`FlagPolicy`](crate::FlagPolicy), so it may
+/// contain commands or groups that are actually hidden at runtime. Fine for
+/// callers that only need the static declarations (e.g. scope metadata), but
+/// don't treat the result as "what's mounted right now."
 #[must_use]
 pub fn build_module_group(module: &Module) -> RuntimeGroupSpec {
     let mut middleware = Middleware::new();

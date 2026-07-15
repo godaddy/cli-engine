@@ -2175,9 +2175,25 @@ impl Cli {
             return;
         }
         let mut group = auth_command_group(&default_provider, &registered_names);
+        let builtin_names: std::collections::HashSet<String> =
+            group.commands.iter().map(|c| c.spec.name.clone()).collect();
         for extra in self.config.auth_extra_commands.clone() {
+            if builtin_names.contains(&extra.spec.name) {
+                tracing::warn!(
+                    command = %extra.spec.name,
+                    "auth_extra_commands entry collides with a built-in auth subcommand name; ignoring"
+                );
+                continue;
+            }
             group = group.with_command(extra);
         }
+        let mut prefix = Vec::new();
+        register_runtime_group_metadata(
+            &group,
+            &mut prefix,
+            &mut self.middleware.schema_registry,
+            &mut self.middleware.human_views,
+        );
         let mut prefix = Vec::new();
         group.register_commands(&mut prefix, &mut self.commands);
         let mut prefix = Vec::new();
