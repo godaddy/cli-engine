@@ -37,6 +37,11 @@ pub struct Credential {
     /// Account type associated with the credential.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub account_type: String,
+    /// OAuth scopes granted to this credential's token. Empty for providers
+    /// that don't expose scope data (e.g. PATs, whose scopes are opaque and
+    /// enforced server-side).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 impl Credential {

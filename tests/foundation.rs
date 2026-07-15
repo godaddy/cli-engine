@@ -24,8 +24,9 @@ use cli_engine::{
         auth_command_group, login_and_build, logout_result, status_result, to_status_entry,
     },
     auth::exec::{ACTION_AUTHENTICATE, AuthnRequest, ExecProvider},
-    build_root_long, build_tree_from_clap, derive_bool_flags, derive_value_flags,
-    extract_command_path, extract_output_format, extract_search_query, format_help_section,
+    build_module_group, build_root_long, build_tree_from_clap, derive_bool_flags,
+    derive_value_flags, extract_command_path, extract_output_format, extract_search_query,
+    format_help_section,
     guide::guide_content,
     has_true_schema_flag,
     output::render_human_with_view,
@@ -1518,6 +1519,33 @@ fn module_builder_and_trait_defaults_cover_debug_and_default_contributions() {
     assert!(trait_module.views.is_empty());
 }
 
+#[test]
+fn build_module_group_materializes_the_real_command_tree_standalone() {
+    let module = Module::new("Platform Systems", |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("things", "Manage things"))
+            .with_command(RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List things")
+                    .with_scopes(&["things:read"])
+                    .no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({"ok": true}))),
+            ))
+            .with_group(RuntimeGroupSpec::new(GroupSpec::new("sub", "Sub things")))
+    })
+    .with_guide(GuideEntry::new("one", "One", "one body"));
+
+    let group = build_module_group(&module);
+
+    assert_eq!(group.group.name, "things");
+    let list = group
+        .commands
+        .iter()
+        .find(|command| command.spec.name == "list")
+        .expect("list command should be present");
+    assert_eq!(list.spec.metadata().scopes, vec!["things:read"]);
+    assert_eq!(group.groups.len(), 1);
+    assert_eq!(group.groups[0].group.name, "sub");
+}
+
 #[tokio::test]
 async fn cli_seeds_schema_and_human_views_from_global_registries() {
     #[derive(Debug)]
@@ -2692,6 +2720,7 @@ async fn cli_runtime_auth_status_and_logout_render_legacy_shapes() {
             "env": "prod",
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
+            "scopes": [],
             "expired": false
         })
     );
@@ -4258,6 +4287,7 @@ async fn auth_command_helpers_match_login_status_and_logout_shapes() {
             "env": "prod",
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
+            "scopes": [],
             "expired": false
         })
     );
@@ -4272,6 +4302,7 @@ async fn auth_command_helpers_match_login_status_and_logout_shapes() {
             "env": "prod",
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
+            "scopes": [],
             "expired": false
         }])
     );
@@ -4342,6 +4373,52 @@ fn auth_command_group_sets_provider_defaults() {
                 .any(|arg| arg.get_id() == "env" && !arg.is_required_set())
         );
     }
+}
+
+#[tokio::test]
+async fn auth_extra_commands_are_mounted_as_siblings_without_losing_builtins() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        default_auth_provider: Some("primary".to_owned()),
+        auth_extra_commands: vec![RuntimeCommandSpec::new(
+            CommandSpec::new("scopes", "List requestable scopes").no_auth(true),
+            async |_credential, _args| Ok(CommandResult::new(json!(["a:read", "b:write"]))),
+        )],
+        ..CliConfig::default()
+    });
+    cli.register_auth_provider(Arc::new(FakeProvider {
+        name: "primary".to_owned(),
+        identity: "tester".to_owned(),
+        logout_fails: false,
+        environments: vec!["prod".to_owned()],
+    }));
+
+    let scopes = cli
+        .run(["my-cli", "auth", "scopes", "--output", "json"])
+        .await;
+    assert_eq!(scopes.exit_code, 0, "{}", scopes.rendered);
+    let scopes_json: serde_json::Value =
+        serde_json::from_str(&scopes.rendered).expect("valid json");
+    assert_eq!(scopes_json["data"], json!(["a:read", "b:write"]));
+
+    let status = cli
+        .run([
+            "my-cli", "auth", "status", "--env", "prod", "--output", "json",
+        ])
+        .await;
+    assert_eq!(status.exit_code, 0, "{}", status.rendered);
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status.rendered).expect("valid json");
+    assert_eq!(status_json["data"]["identity"], "tester");
+
+    let logout = cli
+        .run([
+            "my-cli", "auth", "logout", "--env", "prod", "--output", "json",
+        ])
+        .await;
+    assert_eq!(logout.exit_code, 0, "{}", logout.rendered);
 }
 
 fn auth_cli_with_default_env(env: &'static str) -> Cli {
@@ -4494,6 +4571,7 @@ fn crate_root_reexports_auth_command_result_surfaces() {
         env: "prod".to_owned(),
         identity: "tester".to_owned(),
         expires_at: "2030-01-01T00:00:00Z".to_owned(),
+        scopes: vec!["domains.domain:read".to_owned()],
         expired: false,
     };
     assert!(!status.expired);

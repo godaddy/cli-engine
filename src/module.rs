@@ -138,6 +138,24 @@ impl Module {
     }
 }
 
+/// Materializes a module's command tree standalone, outside a running
+/// [`Cli`](crate::Cli).
+///
+/// Builds a throwaway [`Middleware`] (the same construction path
+/// [`Cli::new`](crate::Cli::new) uses) and runs the module's registration
+/// function against it, so callers can walk the real [`RuntimeGroupSpec`] —
+/// e.g. to derive a scope→command registry from
+/// [`CommandSpec::metadata`](crate::CommandSpec::metadata) — without
+/// duplicating each module's command declarations. Guides and views the
+/// module registers via [`ModuleContext`] are discarded; only the command
+/// tree is returned.
+#[must_use]
+pub fn build_module_group(module: &Module) -> RuntimeGroupSpec {
+    let mut middleware = Middleware::new();
+    let mut ctx = ModuleContext::new(&mut middleware);
+    (module.register)(&mut ctx)
+}
+
 impl std::fmt::Debug for Module {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

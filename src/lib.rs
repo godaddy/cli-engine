@@ -144,7 +144,7 @@ pub use middleware::{
     ActivityEmitter, ActivityEvent, Auditor, AuthRequirement, Authorizer, CommandMeta,
     CredentialResolver, Middleware, MiddlewareOutput, MiddlewareRequest,
 };
-pub use module::{CommandModule, Module, ModuleContext, ModuleRegister};
+pub use module::{CommandModule, Module, ModuleContext, ModuleRegister, build_module_group};
 pub use output::{
     Envelope, ErrorEnvelope, FieldInfo, HumanViewDef, HumanViewFn, HumanViewRegistry,
     HumanViewRenderer, Metadata, NextAction, NextActionParam, OutputField, OutputFormat,

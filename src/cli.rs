@@ -213,6 +213,12 @@ pub struct CliConfig {
     pub modules: Vec<Module>,
     /// Additional top-level runtime commands.
     pub commands: Vec<RuntimeCommandSpec>,
+    /// Additional commands mounted as siblings of the built-in `auth`
+    /// group's `login`/`status`/`logout` (e.g. `auth scopes`). Populate via
+    /// [`CliConfig::with_auth_extra_commands`]; folded in by
+    /// [`Cli::ensure_auth_command`] after the built-in group is built, so the
+    /// built-ins are never lost or overwritten.
+    pub auth_extra_commands: Vec<RuntimeCommandSpec>,
     /// Global guide entries mounted under `guide`.
     pub guides: Vec<GuideEntry>,
     /// Global human output views.
@@ -487,6 +493,24 @@ impl CliConfig {
     #[must_use]
     pub fn with_command(mut self, command: RuntimeCommandSpec) -> Self {
         self.commands.push(command);
+        self
+    }
+
+    /// Adds commands mounted as siblings of the built-in `auth` group's
+    /// `login`/`status`/`logout`.
+    ///
+    /// Use this to extend `auth` with consumer-specific subcommands (e.g.
+    /// `auth scopes`) without losing or duplicating the built-ins — unlike
+    /// pre-registering an `auth` [`Module`], which either drops the built-ins
+    /// entirely or has them silently overwrite any extra command added this
+    /// way, [`Cli::ensure_auth_command`] folds these in additively after
+    /// building the built-in group.
+    #[must_use]
+    pub fn with_auth_extra_commands(
+        mut self,
+        commands: impl IntoIterator<Item = RuntimeCommandSpec>,
+    ) -> Self {
+        self.auth_extra_commands.extend(commands);
         self
     }
 
@@ -2150,7 +2174,10 @@ impl Cli {
         if has_subcommand(&self.root, "auth") && !replacing_builtin {
             return;
         }
-        let group = auth_command_group(&default_provider, &registered_names);
+        let mut group = auth_command_group(&default_provider, &registered_names);
+        for extra in self.config.auth_extra_commands.clone() {
+            group = group.with_command(extra);
+        }
         let mut prefix = Vec::new();
         group.register_commands(&mut prefix, &mut self.commands);
         let mut prefix = Vec::new();
