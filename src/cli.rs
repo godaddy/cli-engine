@@ -215,9 +215,9 @@ pub struct CliConfig {
     pub commands: Vec<RuntimeCommandSpec>,
     /// Additional commands mounted as siblings of the built-in `auth`
     /// group's `login`/`status`/`logout` (e.g. `auth scopes`). Populate via
-    /// [`CliConfig::with_auth_extra_commands`]; folded in by
-    /// [`Cli::ensure_auth_command`] after the built-in group is built, so the
-    /// built-ins are never lost or overwritten.
+    /// [`CliConfig::with_auth_extra_commands`]; folded in internally after
+    /// the built-in group is built, so the built-ins are never lost or
+    /// overwritten.
     pub auth_extra_commands: Vec<RuntimeCommandSpec>,
     /// Global guide entries mounted under `guide`.
     pub guides: Vec<GuideEntry>,
@@ -503,8 +503,7 @@ impl CliConfig {
     /// `auth scopes`) without losing or duplicating the built-ins — unlike
     /// pre-registering an `auth` [`Module`], which either drops the built-ins
     /// entirely or has them silently overwrite any extra command added this
-    /// way, [`Cli::ensure_auth_command`] folds these in additively after
-    /// building the built-in group.
+    /// way, these are folded in additively after building the built-in group.
     #[must_use]
     pub fn with_auth_extra_commands(
         mut self,

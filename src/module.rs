@@ -150,8 +150,8 @@ impl Module {
 /// module registers via [`ModuleContext`] are discarded; only the command
 /// tree is returned.
 ///
-/// Unlike mounting a module through [`Cli::new`]/`add_module`, this does
-/// **not** apply feature-flag pruning: the returned tree includes every node
+/// Unlike mounting a module through [`Cli::new`](crate::Cli::new)/`add_module`,
+/// this does **not** apply feature-flag pruning: the returned tree includes every node
 /// regardless of the active [`FlagPolicy`](crate::FlagPolicy), so it may
 /// contain commands or groups that are actually hidden at runtime. Fine for
 /// callers that only need the static declarations (e.g. scope metadata), but
