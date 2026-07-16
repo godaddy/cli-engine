@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.3...cli-engine-v0.4.4) (2026-07-16)
+
+
+### Features
+
+* **auth:** add scopes tracking, extensible auth commands, standalone module walk ([#49](https://github.com/godaddy/cli-engine/issues/49)) ([bebe5bb](https://github.com/godaddy/cli-engine/commit/bebe5bbb8880beae2e7992c2726da4066fa7e405))
+
+
+### Bug Fixes
+
+* only register --reason when authz/auditor/activity is configured ([#50](https://github.com/godaddy/cli-engine/issues/50)) ([81f50b1](https://github.com/godaddy/cli-engine/commit/81f50b15e8fe50cbaddb04b1a5c97a99daeb1190))
+
 ## [0.4.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.2...cli-engine-v0.4.3) (2026-07-14)
 
 
