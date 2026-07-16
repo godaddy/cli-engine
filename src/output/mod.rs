@@ -23,6 +23,7 @@ pub use envelope::{
     build_detailed_error_envelope, build_error_envelope,
 };
 pub use fields::{FieldTree, filter_fields, parse_fields};
+pub(crate) use human::terminal_width;
 pub use human::{
     HumanViewDef, HumanViewFn, HumanViewRegistry, HumanViewRenderer, TableColumn,
     global_human_view_registry_snapshot, lookup_global_human_view_columns,

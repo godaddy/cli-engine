@@ -106,6 +106,32 @@ fn output_format_falls_back_to_default_when_not_given_explicitly() {
 }
 
 #[test]
+fn output_format_selectors_are_mutually_exclusive() {
+    // DEVEX-888: giving more than one output-format selector used to resolve
+    // silently (whichever the precedence chain checked first won); it must
+    // now be a usage error instead.
+    for args in [
+        ["my-cli", "--json", "--human"].as_slice(),
+        ["my-cli", "--json", "--toon"].as_slice(),
+        ["my-cli", "--toon", "--human"].as_slice(),
+        ["my-cli", "--output", "human", "--json"].as_slice(),
+    ] {
+        assert!(
+            parser().try_get_matches_from(args).is_err(),
+            "conflicting format flags should fail to parse: {args:?}"
+        );
+    }
+    // A lone selector, or `--output`'s own default with no explicit flag at
+    // all, must still parse fine — only explicit conflicts are rejected.
+    for args in [["my-cli", "--json"].as_slice(), ["my-cli"].as_slice()] {
+        assert!(
+            parser().try_get_matches_from(args).is_ok(),
+            "non-conflicting args should still parse: {args:?}"
+        );
+    }
+}
+
+#[test]
 fn global_flags_reject_invalid_bool_and_numeric_inputs() {
     for args in [
         ["my-cli", "--schema=maybe"].as_slice(),

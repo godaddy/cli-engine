@@ -83,6 +83,10 @@ pub fn register_global_flags(command: Command) -> Command {
                 .global(true)
                 .value_name("FORMAT")
                 .default_value("json")
+                // Only conflicts when *explicitly* given: clap's conflict
+                // checks ignore an arg's default value, so a bare `--json`
+                // with no `--output` at all is unaffected.
+                .conflicts_with_all(["json", "toon", "human"])
                 .help("Output format: toon|json|human"),
         )
         .arg(
@@ -193,6 +197,10 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("json")
                 .global(true)
                 .action(ArgAction::SetTrue)
+                // Mutually exclusive with the other format selectors, so
+                // e.g. `--json --human` together is a usage error rather
+                // than one silently overriding the other.
+                .conflicts_with_all(["toon", "human"])
                 .help("Shorthand for --output json"),
         )
         .arg(
@@ -200,6 +208,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("toon")
                 .global(true)
                 .action(ArgAction::SetTrue)
+                .conflicts_with_all(["json", "human"])
                 .help("Shorthand for --output toon"),
         )
         .arg(
@@ -207,6 +216,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("human")
                 .global(true)
                 .action(ArgAction::SetTrue)
+                .conflicts_with_all(["json", "toon"])
                 .help("Shorthand for --output human"),
         )
 }
@@ -235,17 +245,23 @@ pub fn register_reason_flag(command: Command) -> Command {
 
 /// Resolves the default output format when the user gave no explicit format.
 ///
-/// Precedence here is env-override first, then a TTY policy: an interactive
-/// terminal gets human-friendly output, everything else (pipes, files, CI,
-/// most agents) gets machine-readable JSON. Pure so it can be unit-tested
-/// without a real terminal.
+/// Precedence: `env_override`, then `config_override` (the `[output].format`
+/// key in `config.toml`), then a TTY policy — an interactive terminal gets
+/// human-friendly output, everything else (pipes, files, CI, most agents)
+/// gets machine-readable JSON. Pure so it can be unit-tested without a real
+/// terminal or config file.
 #[must_use]
-pub fn resolve_default_output_format(env_override: Option<&str>, is_tty: bool) -> String {
-    if let Some(value) = env_override {
-        // Normalize case (env vars are commonly upper/mixed case) and ignore
-        // blank or unrecognized values, so a stray or miscased override can't
-        // break all command output — only a valid format is honored.
-        let normalized = value.trim().to_ascii_lowercase();
+pub fn resolve_default_output_format(
+    env_override: Option<&str>,
+    config_override: Option<&str>,
+    is_tty: bool,
+) -> String {
+    // Normalize case (env vars and config values are commonly upper/mixed
+    // case) and ignore blank or unrecognized values, so a stray or miscased
+    // override can't break all command output — only a valid format is
+    // honored, and an invalid one falls through to the next tier.
+    for candidate in [env_override, config_override].into_iter().flatten() {
+        let normalized = candidate.trim().to_ascii_lowercase();
         if crate::output::is_valid_output_format(&normalized) {
             return normalized;
         }
@@ -282,13 +298,18 @@ pub fn output_env_var(app_id: &str) -> String {
 }
 
 /// Computes the default output format for `app_id`, consulting the
-/// `${APP_ID}_OUTPUT` env override and whether stdout is an interactive
-/// terminal. Used as the fallback when no explicit `--output`/`--json`/
-/// `--toon`/`--human` is given.
+/// `${APP_ID}_OUTPUT` env override, the `[output].format` key in
+/// `config.toml`, and whether stdout is an interactive terminal. Used as the
+/// fallback when no explicit `--output`/`--json`/`--toon`/`--human` is given.
 #[must_use]
 pub fn default_output_format(app_id: &str) -> String {
     let env = std::env::var(output_env_var(app_id)).ok();
-    resolve_default_output_format(env.as_deref(), std::io::stdout().is_terminal())
+    let file = crate::config::load(app_id);
+    resolve_default_output_format(
+        env.as_deref(),
+        file.output.format.as_deref(),
+        std::io::stdout().is_terminal(),
+    )
 }
 
 #[must_use]
@@ -613,23 +634,68 @@ mod tests {
 
     #[test]
     fn default_output_format_follows_env_override_then_tty() {
-        // TTY policy when no env override.
-        assert_eq!(resolve_default_output_format(None, true), "human");
-        assert_eq!(resolve_default_output_format(None, false), "json");
+        // TTY policy when no env or config override.
+        assert_eq!(resolve_default_output_format(None, None, true), "human");
+        assert_eq!(resolve_default_output_format(None, None, false), "json");
         // A valid env override wins over the TTY policy in both directions.
-        assert_eq!(resolve_default_output_format(Some("json"), true), "json");
-        assert_eq!(resolve_default_output_format(Some("human"), false), "human");
-        // Env override is case-insensitive (env vars are commonly upper-cased).
-        assert_eq!(resolve_default_output_format(Some("JSON"), true), "json");
         assert_eq!(
-            resolve_default_output_format(Some(" Human "), false),
+            resolve_default_output_format(Some("json"), None, true),
+            "json"
+        );
+        assert_eq!(
+            resolve_default_output_format(Some("human"), None, false),
+            "human"
+        );
+        // Env override is case-insensitive (env vars are commonly upper-cased).
+        assert_eq!(
+            resolve_default_output_format(Some("JSON"), None, true),
+            "json"
+        );
+        assert_eq!(
+            resolve_default_output_format(Some(" Human "), None, false),
             "human"
         );
         // Blank or unrecognized env overrides are ignored (fall back to TTY).
-        assert_eq!(resolve_default_output_format(Some("   "), false), "json");
-        assert_eq!(resolve_default_output_format(Some(""), true), "human");
-        assert_eq!(resolve_default_output_format(Some("yaml"), false), "json");
-        assert_eq!(resolve_default_output_format(Some("yaml"), true), "human");
+        assert_eq!(
+            resolve_default_output_format(Some("   "), None, false),
+            "json"
+        );
+        assert_eq!(resolve_default_output_format(Some(""), None, true), "human");
+        assert_eq!(
+            resolve_default_output_format(Some("yaml"), None, false),
+            "json"
+        );
+        assert_eq!(
+            resolve_default_output_format(Some("yaml"), None, true),
+            "human"
+        );
+    }
+
+    #[test]
+    fn default_output_format_config_override_wins_over_tty_but_not_env() {
+        // Config override wins over the TTY policy when there's no env override.
+        assert_eq!(
+            resolve_default_output_format(None, Some("json"), true),
+            "json"
+        );
+        assert_eq!(
+            resolve_default_output_format(None, Some("human"), false),
+            "human"
+        );
+        // Env override still wins over a config override.
+        assert_eq!(
+            resolve_default_output_format(Some("human"), Some("json"), false),
+            "human"
+        );
+        // Blank or unrecognized config overrides are ignored (fall back to TTY).
+        assert_eq!(
+            resolve_default_output_format(None, Some("yaml"), true),
+            "human"
+        );
+        assert_eq!(
+            resolve_default_output_format(None, Some("yaml"), false),
+            "json"
+        );
     }
 
     #[test]

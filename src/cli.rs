@@ -27,10 +27,10 @@ use crate::{
     error::exit_code_for_error,
     feature_flags::{FlagEntry, FlagPolicy, FlagRegistry, Stage},
     flags::{
-        GlobalFlags, default_output_format, derive_bool_flags, derive_value_flags,
-        extract_command_path, extract_output_format, extract_search_query,
-        global_flags_from_matches, has_true_schema_flag, register_global_flags,
-        register_reason_flag,
+        GlobalFlags, derive_bool_flags, derive_value_flags, extract_command_path,
+        extract_output_format, extract_search_query, global_flags_from_matches,
+        has_true_schema_flag, output_env_var, register_global_flags, register_reason_flag,
+        resolve_default_output_format,
     },
     guide::{guide_content, render_guide_human},
     module::{Module, ModuleContext},
@@ -1375,6 +1375,20 @@ impl Cli {
         }
     }
 
+    /// Computes the default output format for this run — the fallback used
+    /// when no explicit `--output`/`--json`/`--human`/`--toon` is given.
+    fn resolve_run_output_format(&self) -> String {
+        use std::io::IsTerminal;
+
+        let env = std::env::var(output_env_var(&self.config.app_id)).ok();
+        let config_format = self.middleware.config.engine().output.format.clone();
+        resolve_default_output_format(
+            env.as_deref(),
+            config_format.as_deref(),
+            std::io::stdout().is_terminal(),
+        )
+    }
+
     /// Comma-separated, sorted list of registered alternative `argv[0]` names,
     /// used in the error shown for an unknown explicit `argv0` invocation.
     fn known_argv0_names(&self) -> String {
@@ -1393,7 +1407,7 @@ impl Cli {
     fn render_argv0_error(&self, text_args: &[String], message: impl Into<String>) -> CliRunOutput {
         let mut middleware = self.middleware.clone();
         middleware.output_format =
-            extract_output_format(text_args, &default_output_format(&self.config.app_id));
+            extract_output_format(text_args, &self.resolve_run_output_format());
         let err = CliCoreError::message(message);
         self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id))
     }
@@ -1582,7 +1596,7 @@ impl Cli {
             }
         };
 
-        let default_format = default_output_format(&self.config.app_id);
+        let default_format = self.resolve_run_output_format();
         let flags = global_flags_from_matches(&matches, &default_format);
         // Publish the --credential-store override so auth providers resolving
         // their storage backend see it at the top of the precedence chain.
@@ -1835,8 +1849,7 @@ impl Cli {
             return None;
         }
         let scope = self.search_scope(args);
-        let output_format =
-            extract_output_format(args, &default_output_format(&self.config.app_id));
+        let output_format = extract_output_format(args, &self.resolve_run_output_format());
         Some(self.render_search(&query, &scope, &output_format))
     }
 
@@ -1856,8 +1869,7 @@ impl Cli {
         if command.get_subcommands().next().is_some() {
             return None;
         }
-        let output_format =
-            extract_output_format(args, &default_output_format(&self.config.app_id));
+        let output_format = extract_output_format(args, &self.resolve_run_output_format());
         // When no schema is registered, report that rather than running the
         // command — matching the middleware's no-schema response so the public
         // path and the lower layer agree even when required args are missing.
@@ -2046,14 +2058,7 @@ impl Cli {
                 // raw markdown so their output stays deterministic.
                 let rendered = if topic.is_some() && output_format == "human" {
                     let is_tty = std::io::stdout().is_terminal();
-                    // Use the live terminal width when interactive; otherwise a fixed
-                    // width with no color so a piped `--human` remains deterministic.
-                    let width = if is_tty {
-                        usize::from(termimad::terminal_size().0)
-                    } else {
-                        80
-                    };
-                    render_guide_human(&rendered, width, is_tty)
+                    render_guide_human(&rendered, crate::output::terminal_width(), is_tty)
                 } else {
                     rendered
                 };
