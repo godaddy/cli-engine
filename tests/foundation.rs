@@ -4040,8 +4040,11 @@ async fn reason_flag_is_registered_only_when_authz_auditor_or_activity_is_config
     let bare = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"))
         .run(["my-cli", "tree", "--reason", "test"])
         .await;
-    assert_ne!(
-        bare.exit_code, 0,
+    // clap's usage/parse-error exit code (unknown argument, missing required
+    // arg, etc.), distinct from a command's own runtime-error exit code — this
+    // pins the assertion to "unknown argument" specifically, not any failure.
+    assert_eq!(
+        bare.exit_code, 2,
         "no authz/auditor/activity configured, so --reason should be an unknown argument: {}",
         bare.rendered
     );
