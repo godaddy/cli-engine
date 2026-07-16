@@ -245,7 +245,7 @@ Framework global flags populate middleware and apply consistently to every comma
 | `--limit` | Client-side page size for list output. |
 | `--offset` | Client-side starting offset for list output. |
 | `--schema` | Renders command schema instead of running business logic. |
-| `--reason` | Reason passed to authorization, audit, and activity. |
+| `--reason` | Reason passed to authorization, audit, and activity. Only registered when `CliConfig` has an `authz`, `auditor`, or `activity` hook configured directly (not via `init_deps`, which runs after flag registration). |
 | `--timeout` | Command deadline (e.g. `60s`, `5m`); default is no timeout (`0s`). |
 | `--debug` | Debug selector for integrations that use it. |
 | `--search` | Searches command and guide documentation before command execution. |
