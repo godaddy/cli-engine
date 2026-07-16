@@ -2502,7 +2502,8 @@ async fn cli_runtime_auth_login_uses_registered_provider_default() {
             "provider": "primary",
             "env": "prod",
             "identity": "tester",
-            "expires_at": "2099-01-01T00:00:00Z"
+            "expires_at": "2099-01-01T00:00:00Z",
+            "scopes": []
         })
     );
 
@@ -2544,7 +2545,8 @@ async fn cli_runtime_auth_login_uses_middleware_env_when_env_flag_omitted() {
             "provider": "primary",
             "env": "dev",
             "identity": "tester",
-            "expires_at": "2099-01-01T00:00:00Z"
+            "expires_at": "2099-01-01T00:00:00Z",
+            "scopes": []
         })
     );
 }
@@ -4291,6 +4293,7 @@ async fn auth_command_helpers_match_login_status_and_logout_shapes() {
     assert_eq!(login.env, "prod");
     assert_eq!(login.identity, "tester");
     assert_eq!(login.expires_at, "2099-01-01T00:00:00Z");
+    assert!(login.scopes.is_empty());
 
     let status = status_result(&dispatcher, "primary", "prod")
         .await
@@ -4329,6 +4332,39 @@ async fn auth_command_helpers_match_login_status_and_logout_shapes() {
         logout,
         json!({"provider": "primary", "env": "prod", "status": "logged out"})
     );
+}
+
+/// `auth login`'s output must carry the same granted scopes as a subsequent
+/// `auth status` for the same credential — both are derived from
+/// `Credential::scopes`, so they should never disagree.
+#[tokio::test]
+async fn login_and_build_surfaces_credential_scopes_like_status_does() {
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register(Arc::new(ScopedFakeProvider {
+        name: "primary".to_owned(),
+        scopes: vec![
+            "domains.domain:read".to_owned(),
+            "offline_access".to_owned(),
+        ],
+    }));
+
+    let login = login_and_build(&dispatcher, "primary", "prod")
+        .await
+        .expect("login result should build");
+    assert_eq!(
+        login.scopes,
+        vec![
+            "domains.domain:read".to_owned(),
+            "offline_access".to_owned()
+        ]
+    );
+
+    let status = to_status_entry(
+        "primary",
+        "prod",
+        Some(&dispatcher.status("primary", "prod").await.expect("status")),
+    );
+    assert_eq!(login.scopes, status.scopes);
 }
 
 #[test]
@@ -4680,6 +4716,7 @@ fn auth_module_reexports_primary_auth_port_surfaces() {
         env: "prod".to_owned(),
         identity: "tester".to_owned(),
         expires_at: "2030-01-01T00:00:00Z".to_owned(),
+        scopes: Vec::new(),
     };
     assert_eq!(login.identity, "tester");
 }
@@ -4691,6 +4728,7 @@ fn crate_root_reexports_auth_command_result_surfaces() {
         env: "prod".to_owned(),
         identity: "tester".to_owned(),
         expires_at: "2030-01-01T00:00:00Z".to_owned(),
+        scopes: Vec::new(),
     };
     assert_eq!(login.provider, "primary");
 
@@ -9906,6 +9944,46 @@ impl AuthProvider for FakeProvider {
         } else {
             Ok(self.environments.clone())
         }
+    }
+}
+
+/// Auth provider whose credential always carries a fixed set of granted
+/// scopes, for asserting `AuthLoginResult`/`AuthStatusEntry` both surface
+/// `Credential::scopes` (unlike [`FakeProvider`], which always returns an
+/// empty scopes list via `Credential::default()`).
+#[derive(Debug)]
+struct ScopedFakeProvider {
+    name: String,
+    scopes: Vec<String>,
+}
+
+#[async_trait]
+impl AuthProvider for ScopedFakeProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
+        Ok(Credential {
+            token: "token".to_owned(),
+            expires_at: "2099-01-01T00:00:00Z".to_owned(),
+            env: env.to_owned(),
+            identity: "scoped-tester".to_owned(),
+            scopes: self.scopes.clone(),
+            ..Credential::default()
+        })
+    }
+
+    async fn status(&self, env: &str) -> Result<Credential> {
+        self.get_credential(env, "", "").await
+    }
+
+    async fn logout(&self, _env: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_environments(&self) -> Result<Vec<String>> {
+        Ok(vec![])
     }
 }
 

@@ -19,6 +19,12 @@ pub struct AuthLoginResult {
     pub identity: String,
     /// Credential expiration timestamp.
     pub expires_at: String,
+    /// OAuth scopes granted to the new credential, empty when the provider
+    /// doesn't expose scope data (e.g. PATs). Mirrors
+    /// [`AuthStatusEntry::scopes`], so `auth login`'s output is consistent
+    /// with a subsequent `auth status`.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// Data rendered by `auth status`.
@@ -199,6 +205,7 @@ pub async fn login_and_build_with_scopes(
         env: env.to_owned(),
         identity: credential.identity,
         expires_at: credential.expires_at,
+        scopes: credential.scopes,
     })
 }
 
