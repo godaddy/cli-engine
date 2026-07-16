@@ -269,7 +269,7 @@ populate middleware:
 | `--limit` | `limit` | `0` | Client-side page size for list output. |
 | `--offset` | `offset` | `0` | Client-side starting offset for list output. |
 | `--schema` | `schema` | `false` | Renders command schema instead of running business logic. |
-| `--reason` | `reason` | empty | Reason passed to authorization. Only registered when `CliConfig` has an `authz`, `auditor`, or `activity` hook configured — apps with none of those simply don't have the flag. |
+| `--reason` | `reason` | empty | Reason passed to authorization, audit, and activity. Only registered when `CliConfig` has an `authz`, `auditor`, or `activity` hook configured directly (not via `init_deps`, which runs after flag registration) — apps with none of those simply don't have the flag. |
 | `--timeout` | `timeout` | `0s` | Command deadline (e.g. `60s`, `5m`); default `0s` = no timeout. |
 | `--debug` | `debug` | empty | Enables debug components (comma-separated patterns). Bare `--debug` enables all; a specific value uses the `=` form: `--debug=transport`, `--debug='*,-auth'`. `transport` dumps HTTP requests/responses to stderr. See [HTTP debug logging](#http-debug-logging). |
 | `--search` | `search` | empty | Searches command and guide documentation before command execution. |

@@ -219,14 +219,17 @@ pub fn register_global_flags(command: Command) -> Command {
 /// [`ActivityEmitter`](crate::middleware::ActivityEmitter) to consume it (see
 /// `Cli::new`'s conditional call to this function). Apps with none of those
 /// configured never register this flag at all, rather than exposing a flag
-/// that nothing reads.
+/// that nothing reads. `Cli::new` only checks the eager `authz`/`auditor`/
+/// `activity` fields on `CliConfig`; installing one of these later via
+/// `init_deps` does not register `--reason`, since flag registration happens
+/// before `init_deps` runs.
 pub fn register_reason_flag(command: Command) -> Command {
     command.arg(
         Arg::new("reason")
             .long("reason")
             .global(true)
             .value_name("TEXT")
-            .help("Short explanation of why this command is being run (forwarded to your authorizer/auditor)"),
+            .help("Short explanation of why this command is being run (forwarded to your authorizer, auditor, or activity emitter)"),
     )
 }
 

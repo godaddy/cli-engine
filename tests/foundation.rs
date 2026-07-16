@@ -4035,6 +4035,33 @@ fn schema_command_path_extraction_skips_bool_and_value_flags() {
     );
 }
 
+#[tokio::test]
+async fn reason_flag_is_registered_only_when_authz_auditor_or_activity_is_configured() {
+    let bare = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"))
+        .run(["my-cli", "tree", "--reason", "test"])
+        .await;
+    assert_ne!(
+        bare.exit_code, 0,
+        "no authz/auditor/activity configured, so --reason should be an unknown argument: {}",
+        bare.rendered
+    );
+
+    let authorized_tiers = Arc::new(StdMutex::new(Vec::new()));
+    let with_authz = Cli::new(CliConfig {
+        authz: Some(Arc::new(RecordingAuthorizer {
+            tiers: Arc::clone(&authorized_tiers),
+        })),
+        ..CliConfig::new("my-cli", "Dev tooling", "my-cli")
+    })
+    .run(["my-cli", "tree", "--reason", "test"])
+    .await;
+    assert_eq!(
+        with_authz.exit_code, 0,
+        "authz is configured, so --reason should parse: {}",
+        with_authz.rendered
+    );
+}
+
 #[test]
 fn schema_command_path_extraction_uses_recursive_command_flags() {
     let command = register_global_flags(Command::new("my-cli"))
