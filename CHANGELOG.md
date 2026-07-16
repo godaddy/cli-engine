@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.4...cli-engine-v0.4.5) (2026-07-16)
+
+
+### Bug Fixes
+
+* **auth:** surface granted scopes in auth login output, matching auth status ([#52](https://github.com/godaddy/cli-engine/issues/52)) ([2f62417](https://github.com/godaddy/cli-engine/commit/2f624178a7d587f04f8398fb10c9f991e090501b))
+
 ## [0.4.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.3...cli-engine-v0.4.4) (2026-07-16)
 
 
