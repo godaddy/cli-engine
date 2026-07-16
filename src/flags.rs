@@ -156,13 +156,6 @@ pub fn register_global_flags(command: Command) -> Command {
                 .help("Dump output field metadata instead of running the command"),
         )
         .arg(
-            Arg::new("reason")
-                .long("reason")
-                .global(true)
-                .value_name("TEXT")
-                .help("Short explanation of why this command is being run (required for destructive commands)"),
-        )
-        .arg(
             Arg::new("timeout")
                 .long("timeout")
                 .global(true)
@@ -216,6 +209,25 @@ pub fn register_global_flags(command: Command) -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Shorthand for --output human"),
         )
+}
+
+/// Registers the `--reason` flag on a `clap` command.
+///
+/// Not part of [`register_global_flags`]: `--reason` is only meaningful when an
+/// app has registered an [`Authorizer`](crate::middleware::Authorizer),
+/// [`Auditor`](crate::middleware::Auditor), or
+/// [`ActivityEmitter`](crate::middleware::ActivityEmitter) to consume it (see
+/// `Cli::new`'s conditional call to this function). Apps with none of those
+/// configured never register this flag at all, rather than exposing a flag
+/// that nothing reads.
+pub fn register_reason_flag(command: Command) -> Command {
+    command.arg(
+        Arg::new("reason")
+            .long("reason")
+            .global(true)
+            .value_name("TEXT")
+            .help("Short explanation of why this command is being run (forwarded to your authorizer/auditor)"),
+    )
 }
 
 /// Resolves the default output format when the user gave no explicit format.
@@ -317,8 +329,12 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
         limit: matches.get_one::<i64>("limit").copied().unwrap_or(0),
         offset: matches.get_one::<i64>("offset").copied().unwrap_or(0),
         schema: matches.get_one::<bool>("schema").copied().unwrap_or(false),
+        // `--reason` is only registered when an authorizer/auditor/activity
+        // emitter is configured.
         reason: matches
-            .get_one::<String>("reason")
+            .try_get_one::<String>("reason")
+            .ok()
+            .flatten()
             .cloned()
             .unwrap_or_default(),
         timeout: matches

@@ -6,14 +6,14 @@ use cli_engine::{
     SchemaInfo, command_args_from_matches, command_path_from_matches, command_path_from_parts,
     derive_bool_flags, derive_value_flags, exit_code_for_error, exit_code_for_exit_coder,
     extract_command_path, fields_from_json_schema, global_flags_from_matches, has_true_schema_flag,
-    json_schema_info, register_global_flags,
+    json_schema_info, register_global_flags, register_reason_flag,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Value, json};
 
 fn command_with_common_args() -> Command {
-    register_global_flags(
+    register_reason_flag(register_global_flags(
         Command::new("my-cli").subcommand(
             Command::new("project")
                 .alias("p")
@@ -33,7 +33,7 @@ fn command_with_common_args() -> Command {
                     ),
                 ),
         ),
-    )
+    ))
 }
 
 #[test]

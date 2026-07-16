@@ -30,7 +30,8 @@ use cli_engine::{
     has_true_schema_flag,
     output::render_human_with_view,
     output::{Envelope, OutputFormat, PipelineOpts, apply_pipeline, filter_fields, render},
-    register_global_flags, register_global_human_view, register_global_schema, render_tree_human,
+    register_global_flags, register_global_human_view, register_global_schema,
+    register_reason_flag, render_tree_human,
     search::{SearchDocument, SearchIndex, tokenize},
     transport::{
         ApiKeyInjector, AuthInjector, BasicAuthInjector, BearerTokenInjector,
@@ -893,18 +894,6 @@ async fn cli_runtime_group_unknown_command_matches_legacy_group_run_e() {
     assert_eq!(output.exit_code, 1);
     assert_eq!(
         output.rendered,
-        "unknown command \"missing\" for \"my-cli project\""
-    );
-
-    let with_reason = cli
-        .run([
-            "my-cli", "--reason", "ticket-1", "--output", "json", "p", "missing",
-        ])
-        .await;
-
-    assert_eq!(with_reason.exit_code, 1);
-    assert_eq!(
-        with_reason.rendered,
         "unknown command \"missing\" for \"my-cli project\""
     );
 }
@@ -1985,17 +1974,13 @@ async fn cli_config_pre_run_runs_for_builtins_without_init_deps_preserves_legacy
 #[tokio::test]
 async fn cli_config_meta_resolver_can_adjust_command_metadata() {
     let authorized_tiers = Arc::new(StdMutex::new(Vec::new()));
-    let authorized_tiers_for_init = Arc::clone(&authorized_tiers);
     let cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
         app_id: "my-cli".to_owned(),
         default_auth_provider: Some("primary".to_owned()),
-        init_deps: Some(Arc::new(move |middleware| {
-            middleware.authz = Some(Arc::new(RecordingAuthorizer {
-                tiers: Arc::clone(&authorized_tiers_for_init),
-            }));
-            Ok(())
+        authz: Some(Arc::new(RecordingAuthorizer {
+            tiers: Arc::clone(&authorized_tiers),
         })),
         auth_providers: vec![
             Arc::new(FakeProvider::new("primary", "default-user")),
@@ -4021,7 +4006,7 @@ fn global_flag_defaults_and_derived_flag_classes_cover_common_clap_actions() {
 
 #[test]
 fn schema_command_path_extraction_skips_bool_and_value_flags() {
-    let command = register_global_flags(Command::new("my-cli"));
+    let command = register_reason_flag(register_global_flags(Command::new("my-cli")));
     let bool_flags = derive_bool_flags(&command);
     let value_flags = derive_value_flags(&command);
 

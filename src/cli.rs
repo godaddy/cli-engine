@@ -30,6 +30,7 @@ use crate::{
         GlobalFlags, default_output_format, derive_bool_flags, derive_value_flags,
         extract_command_path, extract_output_format, extract_search_query,
         global_flags_from_matches, has_true_schema_flag, register_global_flags,
+        register_reason_flag,
     },
     guide::{guide_content, render_guide_human},
     module::{Module, ModuleContext},
@@ -870,6 +871,13 @@ impl Cli {
             .subcommand(completion_command());
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
+        }
+        // `--reason` is only meaningful when something actually consumes it —
+        // an authorizer, auditor, or activity emitter. Apps with none of those
+        // registered never see the flag at all, rather than a flag whose value
+        // is captured and silently discarded.
+        if config.authz.is_some() || config.auditor.is_some() || config.activity.is_some() {
+            root = register_reason_flag(root);
         }
         if config.environments.is_some() {
             root = root.arg(
