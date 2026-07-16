@@ -213,6 +213,12 @@ pub struct CliConfig {
     pub modules: Vec<Module>,
     /// Additional top-level runtime commands.
     pub commands: Vec<RuntimeCommandSpec>,
+    /// Additional commands mounted as siblings of the built-in `auth`
+    /// group's `login`/`status`/`logout` (e.g. `auth scopes`). Populate via
+    /// [`CliConfig::with_auth_extra_commands`]; folded in internally after
+    /// the built-in group is built, so the built-ins are never lost or
+    /// overwritten.
+    pub auth_extra_commands: Vec<RuntimeCommandSpec>,
     /// Global guide entries mounted under `guide`.
     pub guides: Vec<GuideEntry>,
     /// Global human output views.
@@ -487,6 +493,23 @@ impl CliConfig {
     #[must_use]
     pub fn with_command(mut self, command: RuntimeCommandSpec) -> Self {
         self.commands.push(command);
+        self
+    }
+
+    /// Adds commands mounted as siblings of the built-in `auth` group's
+    /// `login`/`status`/`logout`.
+    ///
+    /// Use this to extend `auth` with consumer-specific subcommands (e.g.
+    /// `auth scopes`) without losing or duplicating the built-ins — unlike
+    /// pre-registering an `auth` [`Module`], which either drops the built-ins
+    /// entirely or has them silently overwrite any extra command added this
+    /// way, these are folded in additively after building the built-in group.
+    #[must_use]
+    pub fn with_auth_extra_commands(
+        mut self,
+        commands: impl IntoIterator<Item = RuntimeCommandSpec>,
+    ) -> Self {
+        self.auth_extra_commands.extend(commands);
         self
     }
 
@@ -2150,7 +2173,27 @@ impl Cli {
         if has_subcommand(&self.root, "auth") && !replacing_builtin {
             return;
         }
-        let group = auth_command_group(&default_provider, &registered_names);
+        let mut group = auth_command_group(&default_provider, &registered_names);
+        let mut seen_names: std::collections::HashSet<String> =
+            group.commands.iter().map(|c| c.spec.name.clone()).collect();
+        for extra in self.config.auth_extra_commands.clone() {
+            if !seen_names.insert(extra.spec.name.clone()) {
+                tracing::warn!(
+                    command = %extra.spec.name,
+                    "auth_extra_commands entry collides with a built-in auth subcommand or an \
+                     earlier auth_extra_commands entry; ignoring"
+                );
+                continue;
+            }
+            group = group.with_command(extra);
+        }
+        let mut prefix = Vec::new();
+        register_runtime_group_metadata(
+            &group,
+            &mut prefix,
+            &mut self.middleware.schema_registry,
+            &mut self.middleware.human_views,
+        );
         let mut prefix = Vec::new();
         group.register_commands(&mut prefix, &mut self.commands);
         let mut prefix = Vec::new();

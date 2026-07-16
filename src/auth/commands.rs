@@ -32,6 +32,10 @@ pub struct AuthStatusEntry {
     pub identity: String,
     /// Credential expiration timestamp, empty when missing or unavailable.
     pub expires_at: String,
+    /// OAuth scopes granted to the cached credential, empty when missing,
+    /// unavailable, or the provider doesn't expose scope data (e.g. PATs).
+    #[serde(default)]
+    pub scopes: Vec<String>,
     /// Whether the cached credential is expired or unavailable.
     pub expired: bool,
 }
@@ -217,6 +221,7 @@ pub async fn status_result(dispatcher: &Dispatcher, provider: &str, env: &str) -
                     env: entry.env.clone(),
                     identity: String::new(),
                     expires_at: String::new(),
+                    scopes: Vec::new(),
                     expired: true,
                 }
             } else {
@@ -250,6 +255,7 @@ pub fn to_status_entry(
             env: env.to_owned(),
             identity: String::new(),
             expires_at: String::new(),
+            scopes: Vec::new(),
             expired: true,
         },
         |credential| AuthStatusEntry {
@@ -257,6 +263,7 @@ pub fn to_status_entry(
             env: env.to_owned(),
             identity: credential.identity.clone(),
             expires_at: credential.expires_at.clone(),
+            scopes: credential.scopes.clone(),
             expired: credential.is_expired(),
         },
     )

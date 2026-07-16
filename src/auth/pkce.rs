@@ -417,6 +417,7 @@ impl PkceAuthProvider {
                 .unwrap_or_default(),
             identity,
             sub,
+            scopes: granted_scopes(token),
             ..Credential::default()
         }
     }
@@ -1639,6 +1640,15 @@ mod tests {
         assert_eq!(credential.sub, "subject-1");
         assert_eq!(credential.env, "prod");
         assert_eq!(credential.provider, "test");
+    }
+
+    #[test]
+    fn build_credential_populates_scopes_from_stored_token() {
+        let provider = test_provider();
+        let mut token = valid_token(&make_jwt(&json!({"sub": "subject-1"})));
+        token.scopes = vec!["a".to_owned(), "b".to_owned()];
+        let credential = provider.build_credential("prod", &token);
+        assert_eq!(credential.scopes, vec!["a", "b"]);
     }
 
     #[test]
