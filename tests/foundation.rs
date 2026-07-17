@@ -8613,7 +8613,7 @@ fn human_renderer_column_mixed_object_scalar_array_falls_back_to_lines() {
     );
 
     assert_eq!(
-        render_human_with_view(&envelope, Some(&columns)),
+        render_human_with_view(&envelope, Some(&columns), ""),
         "{\"name\":\"alpha\"}\ntrue\n"
     );
 }
@@ -8644,7 +8644,7 @@ fn human_view_registry_renders_registered_columns_for_lists() {
         "things",
     );
 
-    let rendered = render_human_with_view(&envelope, registry.columns("things"));
+    let rendered = render_human_with_view(&envelope, registry.columns("things"), "");
 
     assert_eq!(
         rendered,
@@ -8668,7 +8668,7 @@ fn human_view_registry_renders_registered_columns_for_objects() {
     ];
     let envelope = Envelope::success(json!({"name": "alpha", "ignored": "x"}), "things");
 
-    let rendered = render_human_with_view(&envelope, Some(&columns));
+    let rendered = render_human_with_view(&envelope, Some(&columns), "");
 
     assert_eq!(rendered, "Name: alpha\nMissing: \n");
 }

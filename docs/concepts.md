@@ -356,15 +356,20 @@ where `${PREFIX}` is the app id uppercased with non-alphanumerics replaced by `_
 cli-engine provides a single per-application TOML config file that **consumer CLIs share with the engine**. It lives at `<config-base>/<app_id>/config.toml`, where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`. Loading is best-effort: a missing/unreadable/malformed file yields an empty config (a warning is logged for malformed) rather than failing the
 command.
 
-Engine-reserved settings live in documented top-level tables (today just `[credentials]`); the consumer CLI owns **every other top-level table**:
+Engine-reserved settings live in documented top-level tables (today `[credentials]` and `[output]`); the consumer CLI owns **every other top-level table**:
 
 ```toml
 [credentials]        # engine-reserved
 store = "file"       # "auto" | "keyring" | "file"
 
+[output]             # engine-reserved
+format = "json"      # "json" | "human" | "toon"
+
 [deploy]             # consumer-owned
 region = "us-west"
 ```
+
+`[output].format` sets the default output format for a user who never passes `--output`/`--json`/`--human`/`--toon` — useful for a user who never wants a table, or always wants one, without repeating a flag on every invocation. Precedence is `--output`/`--json`/`--human`/`--toon` flag > `${PREFIX}_OUTPUT` env var > `[output].format` in config.toml > TTY-based default (human on an interactive terminal, JSON otherwise). See `resolve_default_output_format`/`default_output_format` in the `flags` module.
 
 ### Reading config
 
@@ -388,7 +393,7 @@ mycli config set deploy.region us-east     # set + save (mutating; --dry-run awa
 mycli config list                          # print the whole file
 ```
 
-`config set` is dry-run aware, parses the value as a bool/int/float when it looks like one (else a string), preserves existing comments and formatting (backed by `toml_edit`), and validates the engine-reserved `credentials.store` key. Programmatically, `ConfigFile::set` + `ConfigFile::save` do the same.
+`config set` is dry-run aware, parses the value as a bool/int/float when it looks like one (else a string), preserves existing comments and formatting (backed by `toml_edit`), and validates the engine-reserved `credentials.store` and `output.format` keys. Programmatically, `ConfigFile::set` + `ConfigFile::save` do the same.
 
 The `config` module also exposes `load`, `resolve_credential_store`, and the pure `resolve_credential_store_with` for testing credential-store precedence without touching process state.
 
@@ -534,12 +539,30 @@ let spec = cli_engine::CommandSpec::new("list", "List projects")
 Human output is designed for readable terminal display:
 
 - Custom human renderers win over generic formatting.
-- Registered columns win over generic object key sorting.
-- Arrays of objects render as tables.
+- Arrays of objects render as tables — with a registered view or not. A command
+  with no view is conceptually a *dynamic* view: its columns are derived from
+  whatever fields are present (or named in `--fields`/`default_fields`) rather
+  than declared ahead of time, but selection, ordering, width-fitting, and
+  hiding all work identically either way.
 - Objects render as `key: value` lines.
 - Mixed object/scalar arrays fall back to line-per-item rendering.
 - Objects in fallback lines render as compact JSON.
 - JSON numbers use `serde_json` number text.
+- Table columns size to the live terminal width (falling back to a fixed 80
+  columns when stdout isn't a TTY, e.g. when piped) rather than a fixed
+  per-column cap. A column only shrinks below its natural width when there
+  isn't enough room, and headers are never cut short.
+- `TableColumn::no_truncate` opts a column out of shrinking entirely (still
+  bounded by a large pathological-value safety cap) — use it for values that
+  are useless when cut short, such as URLs.
+- When the terminal is too narrow for every column, hiding a column is
+  preferred over truncating a cell: the lowest-priority (trailing) columns —
+  see "Column order is priority" below — are hidden one at a time until the
+  survivors fit in full, or only one column remains. A footer names whatever
+  got hidden and suggests `--fields`/`--json`. A similar footer appears if a
+  cell still had to be shortened (only possible once hiding can't help
+  further — e.g. a single remaining column whose value alone exceeds the
+  display width).
 
 Views can be assigned to commands. There are two ways to do it.
 
@@ -575,8 +598,12 @@ let shared = HumanViewDef::new(
 let spec = CommandSpec::new("get", "Get a project").with_view_id("projects-table");
 ```
 
-Field selection composes with views. `--fields` (defaulting to the command's `default_fields`) selects which JSON fields appear when there is no view, and which of a view's columns appear when there is one. So a command with a view of `id`/`name`/`status` columns and `default_fields = "id,name"` shows just those two columns by default; `--fields all` shows every column, and `--fields id,status` shows that pair. A custom view renderer receives the full payload and
-ignores field selection.
+### Column order is priority
+
+Column order is a priority order, most important first — put the column a reader most needs (usually an id or name) first. This drives two things: display order, and which columns survive when the terminal is too narrow to show all of them (lowest-priority, trailing columns are hidden first).
+
+A view's *declared* order is only the fallback, though: whenever
+`--fields`/`default_fields` gives an explicit selection, that order wins instead — for both display and hide-priority — the same way for a view or a no-view command. `--fields` (defaulting to the command's `default_fields`) selects which fields appear and in what order: which of a view's declared columns show (a field the view doesn't declare never appears, no matter what `--fields` says — the view is a closed, complete set), or which JSON fields show when there's no view (open — whatever's named, or present, shows). So a command with a view of `id`/`name`/`status` columns and `default_fields = "id,name"` shows just those two by default, in that order; `--fields status,id` shows `status` before `id`; `--fields all` shows every declared column in its declared order. A custom view renderer receives the full payload and ignores field selection.
 
 ## Guides
 

@@ -7,16 +7,31 @@
 //! Loading is best-effort: a missing file yields defaults, and a malformed file
 //! logs a warning and falls back to defaults rather than failing the command.
 //!
-//! The primary setting today selects where credentials are stored — see
-//! [`CredentialStore`]. The effective mode is resolved with the precedence
+//! Two engine-reserved settings live here today:
 //!
-//! ```text
-//! --credential-store flag  >  ${PREFIX}_CREDENTIAL_STORE env  >  config file  >  default (Auto)
-//! ```
+//! - Where credentials are stored — see [`CredentialStore`]. The effective
+//!   mode is resolved with the precedence
+//!
+//!   ```text
+//!   --credential-store flag  >  ${PREFIX}_CREDENTIAL_STORE env  >  config file  >  default (Auto)
+//!   ```
+//!
+//!   See [`resolve_credential_store`] and the pure
+//!   [`resolve_credential_store_with`].
+//!
+//! - The default output format for a user who never sets
+//!   `--output`/`--json`/`--human`/`--toon` — see [`crate::config::OutputConfig`]. Resolved
+//!   with the precedence
+//!
+//!   ```text
+//!   --output/--json/--human/--toon flag  >  ${PREFIX}_OUTPUT env  >  config file  >  TTY-based default
+//!   ```
+//!
+//!   See [`crate::flags::default_output_format`] and the pure
+//!   [`crate::flags::resolve_default_output_format`].
 //!
 //! where `${PREFIX}` is the app id sanitized by
-//! [`app_id_env_prefix`](crate::flags::app_id_env_prefix). See
-//! [`resolve_credential_store`] and the pure [`resolve_credential_store_with`].
+//! [`app_id_env_prefix`](crate::flags::app_id_env_prefix).
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -116,6 +131,8 @@ impl<'de> Deserialize<'de> for CredentialStore {
 pub struct EngineConfig {
     /// Credential-storage settings (`[credentials]` table).
     pub credentials: CredentialsConfig,
+    /// Output-format settings (`[output]` table).
+    pub output: OutputConfig,
 }
 
 /// The `[credentials]` table of the engine config file.
@@ -124,6 +141,21 @@ pub struct EngineConfig {
 pub struct CredentialsConfig {
     /// Selected credential store, or `None` when the key is absent.
     pub store: Option<CredentialStore>,
+}
+
+/// The `[output]` table of the engine config file.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    /// Default output format (`"json"`, `"human"`, or `"toon"`), or `None`
+    /// when the key is absent. Kept as a plain string rather than
+    /// [`crate::output::OutputFormat`] so validation stays in one place —
+    /// [`crate::flags::resolve_default_output_format`] — with the same
+    /// silently-ignored-if-invalid treatment already applied to the
+    /// `${PREFIX}_OUTPUT` env override (falls through to the next tier, no
+    /// log line), rather than `OutputFormat`'s permissive `FromStr` (which
+    /// silently maps unknown strings to `Json`).
+    pub format: Option<String>,
 }
 
 // Per-thread override from the `--credential-store` global flag.
@@ -366,8 +398,9 @@ impl ConfigFile {
     /// a version like `"1.0"`), this API does not currently support quoting —
     /// wrap the value in the config file by hand.
     ///
-    /// The engine-reserved `[credentials]` table is validated: only the known
-    /// key `credentials.store` is accepted; unknown keys in that table are
+    /// The engine-reserved `[credentials]` and `[output]` tables are
+    /// validated: only their known keys (`credentials.store`,
+    /// `output.format`) are accepted; unknown keys in those tables are
     /// rejected. Existing comments and formatting elsewhere in the file are
     /// preserved. Call [`save`](ConfigFile::save) to persist.
     ///
@@ -376,11 +409,11 @@ impl ConfigFile {
     /// key, an invalid engine value, or a key whose parent path is not a
     /// table.
     pub fn set(&mut self, dotted_key: &str, value: &str) -> crate::Result<()> {
-        // Validate engine-reserved keys under [credentials].
-        // Only the documented key `credentials.store` is accepted; any other
-        // key in that table is rejected to prevent silently writing unknown
+        // Validate engine-reserved keys under [credentials] and [output].
+        // Only the documented key in each table is accepted; any other key
+        // in those tables is rejected to prevent silently writing unknown
         // engine config that would be ignored (and confuse the user).
-        const ENGINE_RESERVED_TABLES: &[&str] = &["credentials"];
+        const ENGINE_RESERVED_TABLES: &[&str] = &["credentials", "output"];
         let first_segment = dotted_key.split('.').next().unwrap_or("");
         if ENGINE_RESERVED_TABLES.contains(&first_segment) {
             match dotted_key {
@@ -389,10 +422,17 @@ impl ConfigFile {
                         .parse::<CredentialStore>()
                         .map_err(|e| CliCoreError::message(e.to_string()))?;
                 }
+                "output.format" => {
+                    if !crate::output::is_valid_output_format(&value.trim().to_ascii_lowercase()) {
+                        return Err(CliCoreError::message(format!(
+                            "invalid output format {value:?} (expected one of: json, human, toon)"
+                        )));
+                    }
+                }
                 other => {
                     return Err(CliCoreError::message(format!(
-                        "unknown engine-reserved key {other:?}; \
-                         the only supported key in [credentials] is \"credentials.store\""
+                        "unknown engine-reserved key {other:?}; the only supported keys are \
+                         \"credentials.store\" and \"output.format\""
                     )));
                 }
             }
@@ -636,6 +676,7 @@ mod tests {
             credentials: CredentialsConfig {
                 store: Some(CredentialStore::Keyring),
             },
+            ..Default::default()
         };
         // flag wins over everything
         assert_eq!(
@@ -668,6 +709,7 @@ mod tests {
             credentials: CredentialsConfig {
                 store: Some(CredentialStore::File),
             },
+            ..Default::default()
         };
         // invalid env is ignored, so the file value applies
         assert_eq!(

@@ -206,7 +206,7 @@ fn human_view_columns_preserve_shape_for_empty_missing_and_nested_values() {
     );
 
     assert_eq!(
-        render_human_with_view(&envelope, Some(&columns)),
+        render_human_with_view(&envelope, Some(&columns), ""),
         "ID  OWNER  MISSING\n--  -----  -------\np1                \np2                \n\n(2 rows)\n"
     );
 }
@@ -219,12 +219,14 @@ fn human_view_no_truncate_column_preserves_long_values_in_table_output() {
         TableColumn::new("title", "Title"),
         TableColumn::new("url", "URL").no_truncate(true),
     ];
+    // Short enough that, alongside the no_truncate URL column, both columns
+    // still fit within the fallback 80-column width used in non-TTY test runs.
     let envelope = Envelope::success(
-        json!([{"title": "Registration Agreement", "url": long_url}]),
+        json!([{"title": "Agreement", "url": long_url}]),
         "agreements:list",
     );
 
-    let rendered = render_human_with_view(&envelope, Some(&columns));
+    let rendered = render_human_with_view(&envelope, Some(&columns), "");
 
     assert!(
         rendered.contains(long_url),

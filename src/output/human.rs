@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
+    io::IsTerminal,
     sync::{Arc, OnceLock, RwLock},
 };
 
@@ -10,15 +11,27 @@ use serde_json::Value;
 use super::{Envelope, NextAction, NextActionParam};
 
 /// Column definition for registered human table views.
+///
+/// Column order is a priority order, most important first: table rendering
+/// keeps this order on screen, and when the terminal is too narrow to show
+/// every column, the lowest-priority (trailing) columns are hidden first. Put
+/// the column a reader most needs — usually an id or name — first.
+///
+/// This declared order is only the *fallback* — whenever a `--fields`/
+/// `default_fields` selection is given, its order wins instead (see
+/// [`crate::output::render_human_with_registry_selected`]), for both display
+/// and hide-priority. Declared order only governs output when no selection is
+/// given at all.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableColumn {
     /// JSON field path.
     pub field: String,
     /// Display header.
     pub header: String,
-    /// When true, this column's values skip the default 40-char width cap in
-    /// table output (still capped at `NO_TRUNCATE_MAX_WIDTH` to bound
-    /// pathologically long values).
+    /// When true, this column's values are never shrunk to fit the terminal
+    /// (still capped at `NO_TRUNCATE_MAX_WIDTH` to bound pathologically long
+    /// values). Use this for values that are useless when cut short, such as
+    /// URLs.
     pub no_truncate: bool,
 }
 
@@ -33,8 +46,8 @@ impl TableColumn {
         }
     }
 
-    /// Opts this column out of the table renderer's default 40-char
-    /// column-width cap. Values are still capped at `NO_TRUNCATE_MAX_WIDTH`.
+    /// Opts this column out of terminal-width-driven shrinking. Values are
+    /// still capped at `NO_TRUNCATE_MAX_WIDTH`.
     #[must_use]
     pub fn no_truncate(mut self, value: bool) -> Self {
         self.no_truncate = value;
@@ -43,11 +56,14 @@ impl TableColumn {
 }
 
 /// Human view definition keyed by schema id.
+///
+/// `columns` order is a priority order — see [`TableColumn`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HumanViewDef {
     /// Schema id, usually the command path.
     pub schema_id: String,
-    /// Columns rendered for matching object or list data.
+    /// Columns rendered for matching object or list data, most important
+    /// first.
     pub columns: Vec<TableColumn>,
 }
 
@@ -208,9 +224,14 @@ pub fn global_human_view_registry_snapshot() -> HumanViewRegistry {
 }
 
 /// Renders an envelope using generic human output.
+///
+/// There's no field-selection concept at this entry point, so a no-view
+/// array/object falls back to alphabetical key order — use
+/// [`render_human_with_registry_selected`] when a `--fields`/`default_fields`
+/// value is available, so its order can drive column order too.
 #[must_use]
 pub fn render_human(envelope: &Envelope) -> String {
-    render_human_with_view(envelope, None)
+    render_human_with_view(envelope, None, "")
 }
 
 /// Renders an envelope using a human view registry.
@@ -262,79 +283,145 @@ pub fn render_human_with_registry_selected(
     match registry.columns(schema_id) {
         Some(columns) => {
             let selected = select_columns(columns, fields);
-            render_human_with_view(envelope, Some(&selected))
+            render_human_with_view(envelope, Some(&selected), fields)
         }
-        None => render_human_with_view(envelope, None),
+        None => render_human_with_view(envelope, None, fields),
     }
 }
 
-/// Narrows view columns to a `--fields`-style selection. An empty string,
-/// `all`, or `*` keeps every column; otherwise a column survives when its
-/// `field` appears in the comma-separated list.
+/// Narrows and reorders view columns to a `--fields`-style selection. An
+/// empty string, `all`, or `*` keeps every column in its declared order;
+/// otherwise columns are chosen and ordered by the comma-separated list
+/// (deduplicated, first occurrence wins) — a name with no matching column is
+/// silently skipped, so a view still only ever shows its own declared
+/// fields.
 fn select_columns(columns: &[TableColumn], fields: &str) -> Vec<TableColumn> {
     let fields = fields.trim();
     if fields.is_empty() || fields == "all" || fields == "*" {
         return columns.to_vec();
     }
-    let allowed: BTreeSet<&str> = fields
+    let mut seen = BTreeSet::new();
+    fields
         .split(',')
         .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-    columns
-        .iter()
-        .filter(|column| allowed.contains(column.field.as_str()))
-        .cloned()
+        .filter(|part| !part.is_empty() && seen.insert(*part))
+        .filter_map(|name| columns.iter().find(|column| column.field == name).cloned())
         .collect()
 }
 
 /// Renders an envelope using explicit table columns.
+///
+/// `columns`, when `Some`, is expected to already be `--fields`-selected and
+/// ordered (applied by callers such as
+/// [`render_human_with_registry_selected`] before this function runs) — this
+/// function does not re-apply `fields` to it. `fields` is only read here when
+/// `columns` is `None`, to give the dynamically-derived, no-view column
+/// catalog the same field selection and order a view would have gotten. Pass
+/// `""` when no field-selection value is available.
 #[must_use]
-pub fn render_human_with_view(envelope: &Envelope, columns: Option<&[TableColumn]>) -> String {
+pub fn render_human_with_view(
+    envelope: &Envelope,
+    columns: Option<&[TableColumn]>,
+    fields: &str,
+) -> String {
     // Errors render on their own; success output gets the data body plus, when
     // present, a "Next steps:" footer built from the envelope's next_actions
     // (these otherwise appear only in JSON/TOON).
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
     }
-    let mut body = match &envelope.data {
-        None => "(no data)\n".to_owned(),
-        Some(data) => render_data_body(data, columns),
+    let available_width = terminal_width();
+    let (mut body, notes) = match &envelope.data {
+        None => ("(no data)\n".to_owned(), RenderNotes::default()),
+        Some(data) => render_data_body(data, columns, fields, available_width),
     };
-    // Append the footer in place: the common no-footer path leaves `body`
-    // untouched (no realloc/copy), and non-empty actions are written directly
-    // into it (no per-action temporaries).
+    // Footers are appended in place: the common no-footer path leaves `body`
+    // untouched (no realloc/copy), and non-empty content is written directly
+    // into it (no per-footer temporaries).
+    append_render_notes(&mut body, &notes);
     append_next_actions(&mut body, &envelope.next_actions);
     body
 }
 
 /// Render just the data portion of a success envelope (no next-steps footer).
-fn render_data_body(data: &Value, columns: Option<&[TableColumn]>) -> String {
+fn render_data_body(
+    data: &Value,
+    columns: Option<&[TableColumn]>,
+    fields: &str,
+    available_width: usize,
+) -> (String, RenderNotes) {
     if let Some(columns) = columns {
         return match data {
-            Value::Array(items) => render_array_with_columns(items, columns),
-            Value::Object(map) => render_object_with_columns(map, columns),
+            Value::Array(items) => render_array_with_columns(items, columns, available_width),
+            Value::Object(map) => (
+                render_object_with_columns(map, columns),
+                RenderNotes::default(),
+            ),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-                format!("{}\n", format_value(data))
+                (format!("{}\n", format_value(data)), RenderNotes::default())
             }
         };
     }
     match data {
-        Value::Array(items) => render_array(items),
+        Value::Array(items) => render_array(items, fields, available_width),
         Value::Object(map) => {
             if map.is_empty() {
-                "(no data)\n".to_owned()
-            } else {
-                let mut keys = map.keys().collect::<Vec<_>>();
-                keys.sort();
-                let mut out = String::new();
-                for key in keys {
-                    out.push_str(&format!("{key}: {}\n", format_value(&map[key])));
-                }
-                out
+                return ("(no data)\n".to_owned(), RenderNotes::default());
             }
+            let columns = dynamic_columns(fields, || map.keys().cloned().collect());
+            (
+                render_object_with_columns(map, &columns),
+                RenderNotes::default(),
+            )
         }
-        other => format!("{}\n", format_plain_value(other)),
+        other => (
+            format!("{}\n", format_plain_value(other)),
+            RenderNotes::default(),
+        ),
+    }
+}
+
+/// Builds the column catalog for data with no registered view: when `fields`
+/// names specific fields (not empty/`all`/`*`), columns are derived from that
+/// list, in the order given (deduplicated) — the same order source a
+/// registered view's `--fields` selection uses (see [`select_columns`]).
+/// Otherwise falls back to `natural_keys()` sorted alphabetically, since a
+/// bare JSON object has no other order signal to offer.
+fn dynamic_columns(fields: &str, natural_keys: impl FnOnce() -> Vec<String>) -> Vec<TableColumn> {
+    let fields = fields.trim();
+    if fields.is_empty() || fields == "all" || fields == "*" {
+        let mut keys = natural_keys();
+        keys.sort();
+        return keys
+            .into_iter()
+            .map(|key| TableColumn::new(key.clone(), key))
+            .collect();
+    }
+    let mut seen = BTreeSet::new();
+    fields
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && seen.insert(*part))
+        .map(|field| TableColumn::new(field, field))
+        .collect()
+}
+
+/// Appends footer hints for truncated cells and/or hidden columns to `out`
+/// (a no-op when neither happened). Mirrors `append_next_actions`: writes
+/// directly into `out` rather than building a separate string.
+fn append_render_notes(out: &mut String, notes: &RenderNotes) {
+    if notes.truncated {
+        out.push_str(
+            "\nOutput truncated to fit the display width — use --fields to show fewer columns, or --json for full values.\n",
+        );
+    }
+    if !notes.hidden_columns.is_empty() {
+        out.push_str(&format!(
+            "\n{} column{} hidden to fit the display width ({}) — use --fields to choose columns, or --json for full output.\n",
+            notes.hidden_columns.len(),
+            if notes.hidden_columns.len() == 1 { "" } else { "s" },
+            notes.hidden_columns.join(", "),
+        ));
     }
 }
 
@@ -394,18 +481,151 @@ fn substitute_known_params<'cmd>(
 /// guards against.
 const NO_TRUNCATE_MAX_WIDTH: usize = 4096;
 
-fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String {
-    if items.is_empty() {
-        return "(no results)\n".to_owned();
+/// Space between adjacent rendered columns. Must match the gutter
+/// `render_table` actually writes, since width-fitting math (how much room
+/// is left for column content) has to agree with what gets printed.
+const COLUMN_GUTTER: usize = 2;
+
+/// Detects how wide to render human-output tables and guides.
+///
+/// An interactive terminal gets its live width (via `termimad`); anything
+/// else (pipes, files, CI) gets a fixed `80` so non-interactive `--human`
+/// output stays deterministic. Floored at `20` in case a terminal reports an
+/// unusably small or zero width.
+#[must_use]
+pub(crate) fn terminal_width() -> usize {
+    if std::io::stdout().is_terminal() {
+        usize::from(termimad::terminal_size().0).max(20)
+    } else {
+        80
+    }
+}
+
+/// Signals produced while rendering a table body, used to build human-output
+/// footer hints. `Default` means nothing was hidden or shortened.
+#[derive(Default)]
+struct RenderNotes {
+    /// Whether any cell was shortened to fit the terminal.
+    truncated: bool,
+    /// Headers of columns dropped entirely because there wasn't room for
+    /// them, in their original declared/requested order (the order they
+    /// would have appeared in the table, had they fit) — not reverse
+    /// priority order.
+    hidden_columns: Vec<String>,
+}
+
+/// Chooses how many leading columns (priority order, most important first),
+/// each contributing at least `min_widths[i]`, fit in `available_width` — so
+/// lower-priority trailing columns can be dropped when the terminal is too
+/// narrow for all of them. `min_widths[i]` should be the column's header
+/// length for a column that can still shrink, or its full natural width for
+/// one that can't (e.g. `no_truncate`) — using a shrinkable column's header
+/// length here lets it still be counted as fitting even though its eventual
+/// rendered width may be larger. Always keeps at least one column, even if
+/// it alone exceeds `available_width`.
+fn columns_fitting_width(min_widths: &[usize], available_width: usize) -> usize {
+    let mut used = 0_usize;
+    let mut kept = 0_usize;
+    for (index, &min_width) in min_widths.iter().enumerate() {
+        let gutter = if index == 0 { 0 } else { COLUMN_GUTTER };
+        let next_used = used + gutter + min_width;
+        if next_used > available_width && kept > 0 {
+            break;
+        }
+        used = next_used;
+        kept += 1;
+    }
+    kept
+}
+
+/// Fits `natural` (fully-untruncated) column widths into `available_width`.
+///
+/// `no_truncate` columns are never shrunk (they keep their natural width
+/// unconditionally — that's the whole point of the flag) and their width is
+/// reserved out of the budget up front. The remaining columns are never
+/// shrunk below their header length, and share whatever budget is left
+/// beyond that, smallest-need-first, so a column that wants only a little
+/// gets exactly that instead of an equal-but-wasteful split.
+///
+/// Returns the fitted widths and whether any truncatable column ended up
+/// narrower than its natural width (i.e. some cell will actually be cut).
+fn fit_column_widths(
+    headers: &[usize],
+    natural: &[usize],
+    no_truncate: &[bool],
+    available_width: usize,
+) -> (Vec<usize>, bool) {
+    let mut widths = natural.to_vec();
+    let truncatable: Vec<usize> = (0..no_truncate.len())
+        .filter(|&index| !no_truncate[index])
+        .collect();
+    if truncatable.is_empty() {
+        return (widths, false);
+    }
+    let gutters = COLUMN_GUTTER * headers.len().saturating_sub(1);
+    let reserved: usize = (0..no_truncate.len())
+        .filter(|&index| no_truncate[index])
+        .map(|index| natural[index])
+        .sum();
+    let budget = available_width
+        .saturating_sub(gutters)
+        .saturating_sub(reserved);
+    let header_floor: usize = truncatable.iter().map(|&index| headers[index]).sum();
+    for &index in &truncatable {
+        widths[index] = headers[index];
+    }
+    let mut leftover = budget.saturating_sub(header_floor);
+    let mut needy: Vec<usize> = truncatable
+        .iter()
+        .copied()
+        .filter(|&index| natural[index] > headers[index])
+        .collect();
+    needy.sort_by_key(|&index| natural[index] - headers[index]);
+    // Smallest-need-first, take exactly what's wanted or whatever's left,
+    // whichever is less. Deliberately not an even split of `leftover` across
+    // the remaining columns: dividing first and taking `min(wants, share)`
+    // can floor a small want to zero when `leftover < remaining columns`,
+    // denying it entirely while a later, greedier column absorbs the
+    // remainder — worse than just letting small wants claim what they need
+    // outright before anyone larger gets a turn.
+    for &index in &needy {
+        let wants = natural[index] - headers[index];
+        let take = wants.min(leftover);
+        widths[index] += take;
+        leftover -= take;
+    }
+    let truncated = truncatable
+        .iter()
+        .any(|&index| widths[index] < natural[index]);
+    (widths, truncated)
+}
+
+fn render_array_with_columns(
+    items: &[Value],
+    columns: &[TableColumn],
+    available_width: usize,
+) -> (String, RenderNotes) {
+    if items.is_empty() || columns.is_empty() {
+        // Empty columns happens when every item is `{}` (the no-view
+        // dynamic catalog has no keys to show) or a view's `--fields`
+        // filtered out every declared column — either way there's nothing
+        // to build a table from, so fall back to the same message used for
+        // no items at all rather than rendering a blank header/rows table.
+        return ("(no results)\n".to_owned(), RenderNotes::default());
     }
     if !items.iter().all(Value::is_object) {
-        return render_array_lines(items);
+        return (render_array_lines(items), RenderNotes::default());
     }
-    let mut widths = columns
-        .iter()
-        .map(|column| column.header.len())
-        .collect::<Vec<_>>();
-    let rows = items
+    // Natural widths (and rows) are computed for every original column
+    // before deciding what to hide: a `no_truncate` column never shrinks
+    // below its natural width, so the hiding decision has to know that real
+    // requirement — using just its header length here could keep a
+    // low-priority trailing column that would never have fit anyway,
+    // producing an overflow that hiding it would have avoided.
+    let header_lens: Vec<usize> = columns.iter().map(|column| column.header.len()).collect();
+    let no_truncate_all: Vec<bool> = columns.iter().map(|column| column.no_truncate).collect();
+    let mut natural = header_lens.clone();
+    let rows: Vec<Vec<String>> = items
         .iter()
         .map(|item| {
             columns
@@ -416,29 +636,70 @@ fn render_array_with_columns(items: &[Value], columns: &[TableColumn]) -> String
                         .as_object()
                         .and_then(|map| map.get(&column.field))
                         .map_or_else(String::new, format_value);
-                    widths[index] = if column.no_truncate {
-                        widths[index]
-                            .max(value.len())
-                            .min(NO_TRUNCATE_MAX_WIDTH)
-                            .max(column.header.len())
+                    let cap = if column.no_truncate {
+                        NO_TRUNCATE_MAX_WIDTH
                     } else {
-                        widths[index]
-                            .max(value.len())
-                            .min(40)
-                            .max(column.header.len())
+                        usize::MAX
                     };
+                    natural[index] = natural[index].max(value.len().min(cap));
                     value
                 })
                 .collect::<Vec<_>>()
         })
+        .collect();
+
+    let min_widths: Vec<usize> = (0..columns.len())
+        .map(|index| {
+            if no_truncate_all[index] {
+                natural[index]
+            } else {
+                header_lens[index]
+            }
+        })
+        .collect();
+    let mut kept = columns_fitting_width(&min_widths, available_width);
+
+    // Hiding a column is preferred over truncating a cell: if the survivors
+    // still don't fit their natural width, keep dropping the lowest-priority
+    // one and re-fitting, until either everyone remaining fits in full or
+    // only one column is left (which always stays, however it fits).
+    let (fitted, truncated) = loop {
+        let (fitted, truncated) = fit_column_widths(
+            &header_lens[..kept],
+            &natural[..kept],
+            &no_truncate_all[..kept],
+            available_width,
+        );
+        if !truncated || kept <= 1 {
+            break (fitted, truncated);
+        }
+        kept -= 1;
+    };
+
+    let hidden_columns = columns[kept..]
+        .iter()
+        .map(|column| column.header.clone())
         .collect::<Vec<_>>();
-    render_table(
+    let columns = &columns[..kept];
+    let rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|row| row.into_iter().take(kept).collect())
+        .collect();
+
+    let table = render_table(
         &columns
             .iter()
             .map(|column| column.header.clone())
             .collect::<Vec<_>>(),
-        &widths,
+        &fitted,
         &rows,
+    );
+    (
+        table,
+        RenderNotes {
+            truncated,
+            hidden_columns,
+        },
     )
 }
 
@@ -459,43 +720,18 @@ fn render_object_with_columns(
     out
 }
 
-fn render_array(items: &[Value]) -> String {
+fn render_array(items: &[Value], fields: &str, available_width: usize) -> (String, RenderNotes) {
     if items.is_empty() {
-        return "(no results)\n".to_owned();
+        return ("(no results)\n".to_owned(), RenderNotes::default());
     }
-    let Some(first) = items.first() else {
-        return "(no results)\n".to_owned();
-    };
-    let Value::Object(first_map) = first else {
-        return render_array_lines(items);
+    let Some(Value::Object(first_map)) = items.first() else {
+        return (render_array_lines(items), RenderNotes::default());
     };
     if !items.iter().all(Value::is_object) {
-        return render_array_lines(items);
+        return (render_array_lines(items), RenderNotes::default());
     }
-    let mut cols = first_map.keys().cloned().collect::<Vec<_>>();
-    cols.sort();
-    if cols.is_empty() {
-        return "(no results)\n".to_owned();
-    }
-    let mut widths = cols.iter().map(String::len).collect::<Vec<_>>();
-    let rows = items
-        .iter()
-        .map(|item| {
-            cols.iter()
-                .enumerate()
-                .map(|(index, col)| {
-                    let value = item
-                        .as_object()
-                        .and_then(|map| map.get(col))
-                        .map_or_else(String::new, format_value);
-                    widths[index] = widths[index].max(value.len()).min(40).max(col.len());
-                    value
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
-    render_table(&cols, &widths, &rows)
+    let columns = dynamic_columns(fields, || first_map.keys().cloned().collect());
+    render_array_with_columns(items, &columns, available_width)
 }
 
 fn render_array_lines(items: &[Value]) -> String {
@@ -682,19 +918,28 @@ mod tests {
         assert!(long_url.len() > 40, "fixture must exceed the default cap");
         let items = vec![json!({ "title": long_url, "url": long_url })];
         let columns = vec![
-            TableColumn::new("title", "Title"),
+            // Declared first (higher priority) so it survives hide-before-
+            // truncate rather than the lower-priority title column
+            // absorbing truncation instead — with only two columns, any
+            // truncation now cascades to hiding the lower-priority one.
             TableColumn::new("url", "URL").no_truncate(true),
+            TableColumn::new("title", "Title"),
         ];
 
-        let out = render_array_with_columns(&items, &columns);
+        let (out, notes) = render_array_with_columns(&items, &columns, 80);
 
-        assert!(
-            out.contains("..."),
-            "default column should still truncate: {out}"
-        );
         assert!(
             out.contains(long_url),
             "no_truncate column must keep the full value: {out}"
+        );
+        assert!(
+            !out.contains("..."),
+            "hiding the lower-priority column avoided any truncation: {out}"
+        );
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["Title".to_owned()],
+            "the lower-priority truncatable column is hidden rather than shown truncated: {out}"
         );
     }
 
@@ -704,7 +949,7 @@ mod tests {
         let items = vec![json!({ "url": huge_value })];
         let columns = vec![TableColumn::new("url", "URL").no_truncate(true)];
 
-        let out = render_array_with_columns(&items, &columns);
+        let (out, _notes) = render_array_with_columns(&items, &columns, 80);
 
         assert!(
             out.contains("..."),
@@ -719,21 +964,362 @@ mod tests {
     #[test]
     fn column_width_never_shrinks_below_a_long_header() {
         let long_header = "A Very Long Header That Exceeds The Default Width Cap";
-        assert!(
-            long_header.len() > 40,
-            "fixture must exceed the default cap"
-        );
         let items = vec![json!({ "field": "short" })];
         let columns = vec![TableColumn::new("field", long_header)];
 
-        let out = render_array_with_columns(&items, &columns);
+        // Deliberately far narrower than the header: the header must still
+        // render in full even though the row ends up wider than the terminal.
+        let (out, _notes) = render_array_with_columns(&items, &columns, 10);
         let header_line = out.lines().next().expect("header line");
         let separator_line = out.lines().nth(1).expect("separator line");
 
         assert_eq!(
             header_line.len(),
             separator_line.len(),
-            "header and separator must stay aligned when the header exceeds the cap: {out}"
+            "header and separator must stay aligned even when the header alone exceeds the terminal: {out}"
         );
+        assert!(
+            header_line.len() >= long_header.len(),
+            "header must not be cut short: {out}"
+        );
+    }
+
+    #[test]
+    fn wide_terminal_shows_full_values_without_truncation() {
+        let description = "a description that is well past the old forty-character cap";
+        assert!(description.len() > 40, "fixture must exceed the old cap");
+        let items = vec![json!({ "id": "1", "description": description })];
+        let columns = vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("description", "Description"),
+        ];
+
+        let (out, notes) = render_array_with_columns(&items, &columns, 200);
+
+        assert!(
+            !notes.truncated,
+            "plenty of room, nothing to shorten: {out}"
+        );
+        assert!(notes.hidden_columns.is_empty(), "{out}");
+        assert!(out.contains(description), "{out}");
+        assert!(!out.contains("..."), "{out}");
+    }
+
+    #[test]
+    fn narrow_terminal_truncates_and_reports_it() {
+        // A single column whose value is far longer than the terminal
+        // allows: there's nothing else to hide (hide-before-truncate has no
+        // lower-priority column to drop), so truncation is the only option
+        // and it must still be reported.
+        let description = "a description that is well past the old forty-character cap";
+        let items = vec![json!({ "description": description })];
+        let columns = vec![TableColumn::new("description", "Description")];
+
+        let (out, notes) = render_array_with_columns(&items, &columns, 20);
+
+        assert!(
+            notes.truncated,
+            "narrow terminal must shorten a cell: {out}"
+        );
+        assert!(
+            notes.hidden_columns.is_empty(),
+            "only one column exists to begin with: {out}"
+        );
+        assert!(out.contains("..."), "{out}");
+    }
+
+    #[test]
+    fn narrow_terminal_hides_columns_before_truncating_any_of_the_survivors() {
+        // Three equally-competing columns: at this width, showing all three
+        // (or even two) would require truncating every survivor a little.
+        // Hide-before-truncate should instead cascade down to the single
+        // highest-priority column and show it in full.
+        let items = vec![json!({ "a": "x".repeat(5), "b": "x".repeat(5), "c": "x".repeat(5) })];
+        let columns = vec![
+            TableColumn::new("a", "A"),
+            TableColumn::new("b", "B"),
+            TableColumn::new("c", "C"),
+        ];
+
+        let (out, notes) = render_array_with_columns(&items, &columns, 10);
+
+        assert!(
+            !notes.truncated,
+            "hiding B and C should leave A fully shown, untruncated: {out}"
+        );
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["B".to_owned(), "C".to_owned()],
+            "should cascade down to the single highest-priority column: {out}"
+        );
+        assert!(!out.contains("..."), "{out}");
+    }
+
+    #[test]
+    fn overflow_hides_lowest_priority_columns_first() {
+        let items = vec![json!({
+            "id": "1",
+            "name": "acme",
+            "status": "active",
+            "created_at": "2026-01-01",
+        })];
+        let columns = vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
+            TableColumn::new("created_at", "Created At"),
+        ];
+
+        let (out, notes) = render_array_with_columns(&items, &columns, 10);
+
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["Status".to_owned(), "Created At".to_owned()],
+            "lowest-priority (trailing) columns are dropped first: {out}"
+        );
+        let header_line = out.lines().next().expect("header line");
+        assert!(header_line.contains("ID"), "{out}");
+        assert!(header_line.contains("NAME"), "{out}");
+        assert!(!header_line.contains("STATUS"), "{out}");
+        assert!(!header_line.contains("CREATED"), "{out}");
+    }
+
+    #[test]
+    fn render_human_with_view_reports_hidden_columns_in_footer() {
+        let envelope = Envelope::success(
+            json!([{
+                "id": "1",
+                "name": "acme",
+                "status": "active",
+                "region": "us-west",
+                "created_at": "2026-01-01",
+                "updated_at": "2026-01-02",
+                "notes": "irrelevant, lowest priority",
+            }]),
+            "resource",
+        );
+        let columns = vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
+            TableColumn::new("region", "Region"),
+            TableColumn::new("created_at", "Created At"),
+            TableColumn::new("updated_at", "Updated At"),
+            // Deliberately long enough that, combined with the columns above,
+            // it can't fit alongside them at the fallback 80-column width.
+            TableColumn::new("notes", "This Is An Extremely Long Trailing Column Header"),
+        ];
+
+        // In test runs stdout is not a TTY, so `terminal_width()` deterministically
+        // falls back to 80 — these headers don't all fit at that width.
+        let out = render_human_with_view(&envelope, Some(&columns), "");
+
+        assert!(out.contains("hidden to fit the display width"), "{out}");
+        assert!(
+            out.contains("This Is An Extremely Long Trailing Column Header"),
+            "{out}"
+        );
+        assert!(out.contains("--fields"), "{out}");
+        assert!(out.contains("--json"), "{out}");
+    }
+
+    #[test]
+    fn select_columns_orders_by_requested_fields_not_declared_order() {
+        let columns = vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
+        ];
+
+        let selected = select_columns(&columns, "status,id");
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|c| c.field.as_str())
+                .collect::<Vec<_>>(),
+            vec!["status", "id"],
+            "order should follow the requested fields, not declaration order"
+        );
+    }
+
+    #[test]
+    fn select_columns_dedupes_and_skips_unknown_fields() {
+        let columns = vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
+        ];
+
+        let selected = select_columns(&columns, "status,bogus,status,id");
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|c| c.field.as_str())
+                .collect::<Vec<_>>(),
+            vec!["status", "id"],
+            "duplicates collapse to first occurrence; unknown fields are dropped"
+        );
+    }
+
+    #[test]
+    fn dynamic_columns_orders_by_requested_fields() {
+        let columns = dynamic_columns("price1Year,domain", || {
+            vec![
+                "domain".to_owned(),
+                "currency".to_owned(),
+                "price1Year".to_owned(),
+            ]
+        });
+
+        assert_eq!(
+            columns.iter().map(|c| c.field.as_str()).collect::<Vec<_>>(),
+            vec!["price1Year", "domain"]
+        );
+    }
+
+    #[test]
+    fn dynamic_columns_falls_back_to_alphabetical_without_fields() {
+        let columns = dynamic_columns("", || vec!["currency".to_owned(), "domain".to_owned()]);
+
+        assert_eq!(
+            columns.iter().map(|c| c.field.as_str()).collect::<Vec<_>>(),
+            vec!["currency", "domain"],
+            "no fields signal at all: alphabetical is the only order available"
+        );
+    }
+
+    #[test]
+    fn no_view_array_rendering_follows_requested_field_order() {
+        // Reproduces the real-world `domain suggest` symptom: a command with
+        // no registered view whose default_fields lists `domain` first must
+        // not silently reorder it after `currency` just because "c" < "d".
+        let envelope = Envelope::success(
+            json!([{ "domain": "example.com", "currency": "USD", "price1Year": "12.99" }]),
+            "domain:suggest",
+        );
+        let registry = HumanViewRegistry::new();
+
+        let rendered = render_human_with_registry_selected(
+            &envelope,
+            &registry,
+            "domain:suggest",
+            "domain,price1Year,currency",
+        );
+
+        let header_line = rendered.lines().next().expect("header line");
+        assert!(header_line.contains("DOMAIN"), "{rendered}");
+        let domain_pos = header_line.find("DOMAIN").expect("domain header");
+        let price_pos = header_line.find("PRICE1YEAR").expect("price1Year header");
+        let currency_pos = header_line.find("CURRENCY").expect("currency header");
+        assert!(
+            domain_pos < price_pos && price_pos < currency_pos,
+            "expected DOMAIN, PRICE1YEAR, CURRENCY in that order: {header_line}"
+        );
+    }
+
+    #[test]
+    fn registered_view_rendering_follows_requested_field_order() {
+        let mut registry = HumanViewRegistry::new();
+        registry.register(HumanViewDef::new(
+            "things",
+            vec![
+                TableColumn::new("id", "ID"),
+                TableColumn::new("name", "Name"),
+                TableColumn::new("status", "Status"),
+            ],
+        ));
+        let envelope = Envelope::success(
+            json!([{ "id": "1", "name": "acme", "status": "active" }]),
+            "things",
+        );
+
+        let rendered =
+            render_human_with_registry_selected(&envelope, &registry, "things", "status,id");
+
+        let header_line = rendered.lines().next().expect("header line");
+        assert!(!header_line.contains("NAME"), "{rendered}");
+        let status_pos = header_line.find("STATUS").expect("status header");
+        let id_pos = header_line.find("ID").expect("id header");
+        assert!(
+            status_pos < id_pos,
+            "expected STATUS before ID per the requested field order: {header_line}"
+        );
+    }
+
+    #[test]
+    fn fit_column_widths_gives_small_wants_priority_over_larger_ones() {
+        // Regression: a naive `leftover / remaining` split can floor a small
+        // want to zero (denying a column that needed only 1 more char)
+        // while a much larger want absorbs that same unit and stays
+        // truncated anyway — net truncation is identical, but a column that
+        // could have been fully satisfied wasn't.
+        let headers = [1, 1, 1];
+        let natural = [2, 2, 6]; // wants: 1, 1, 5
+        let no_truncate = [false, false, false];
+
+        let (widths, truncated) = fit_column_widths(&headers, &natural, &no_truncate, 8);
+
+        assert_eq!(
+            widths[0], natural[0],
+            "a column that only wanted 1 more char should get it in full: {widths:?}"
+        );
+        assert!(truncated, "budget is still too small overall: {widths:?}");
+    }
+
+    #[test]
+    fn overflow_hiding_accounts_for_no_truncate_columns_true_width() {
+        // Regression: deciding what to hide from header length alone
+        // under-counts a `no_truncate` column (it never shrinks below its
+        // natural width), which could keep a short-header trailing column
+        // that would never have fit anyway — overflowing when hiding it
+        // would have let the row fit.
+        let url = "x".repeat(40);
+        let items = vec![json!({ "url": url, "notes": "irrelevant, lowest priority" })];
+        let columns = vec![
+            TableColumn::new("url", "URL").no_truncate(true),
+            TableColumn::new("notes", "X"),
+        ];
+
+        // Exactly enough room for the URL alone (40 chars), not enough for
+        // the URL plus even a 1-char trailing column and its gutter (43).
+        let (out, notes) = render_array_with_columns(&items, &columns, 42);
+
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["X".to_owned()],
+            "the trailing column must be hidden so the no_truncate URL column fits: {out}"
+        );
+        let header_line = out.lines().next().expect("header line");
+        assert!(
+            header_line.len() <= 42,
+            "must not overflow once the trailing column is hidden: {out}"
+        );
+    }
+
+    #[test]
+    fn render_array_with_columns_handles_no_columns_gracefully() {
+        // A view's `--fields` filtered out every declared column: nothing to
+        // build a table from, so this must report "no results" rather than
+        // a blank header/rows table.
+        let items = vec![json!({ "a": "1" })];
+        let (out, notes) = render_array_with_columns(&items, &[], 80);
+
+        assert_eq!(out, "(no results)\n");
+        assert!(!notes.truncated, "{out}");
+        assert!(notes.hidden_columns.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn no_view_array_of_empty_objects_reports_no_results() {
+        // Every item is `{}`, so the dynamic (no-view) column catalog has no
+        // keys to derive columns from — same "no columns" case as above,
+        // reached through the no-view path instead.
+        let items = vec![json!({}), json!({})];
+        let (out, notes) = render_array(&items, "", 80);
+
+        assert_eq!(out, "(no results)\n");
+        assert!(notes.hidden_columns.is_empty(), "{out}");
     }
 }
