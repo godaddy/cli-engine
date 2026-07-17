@@ -681,7 +681,10 @@ fn render_array_with_columns(
         .map(|column| column.header.clone())
         .collect::<Vec<_>>();
     let columns = &columns[..kept];
-    let rows: Vec<Vec<String>> = rows.into_iter().map(|row| row[..kept].to_vec()).collect();
+    let rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|row| row.into_iter().take(kept).collect())
+        .collect();
 
     let table = render_table(
         &columns
