@@ -172,11 +172,14 @@ async fn conflicting_output_format_flags_error_instead_of_silently_picking_one()
     // DEVEX-888 repro: `--json --human` together used to resolve silently
     // (human won); it must now be a usage error, end to end.
     //
-    // Holds the lock even though it never mutates an env var itself:
-    // `build_cli()` calls `Cli::new`, which reads `XDG_CONFIG_HOME` via
-    // `ConfigFile::load` regardless, so it must still serialize against the
-    // other tests in this file that mutate it.
     let _guard = lock();
+    // The assertion doesn't depend on config/env content — the flag conflict
+    // is rejected by clap before any of that is consulted — but isolate it
+    // anyway, matching every other test in this file, rather than reading
+    // whatever real XDG_CONFIG_HOME/env state the host happens to have.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _xdg = EnvGuard::set("XDG_CONFIG_HOME", Some(&dir.path().to_string_lossy()));
+    let _env = EnvGuard::set(ENV_VAR, None);
     let out = build_cli()
         .run(["outfmt-itest", "widget", "list", "--json", "--human"])
         .await;
