@@ -301,6 +301,14 @@ pub fn output_env_var(app_id: &str) -> String {
 /// `${APP_ID}_OUTPUT` env override, the `[output].format` key in
 /// `config.toml`, and whether stdout is an interactive terminal. Used as the
 /// fallback when no explicit `--output`/`--json`/`--toon`/`--human` is given.
+///
+/// **Blocking**: this loads `config.toml` (see
+/// [`ConfigFile::load`](crate::config::ConfigFile::load)), performing
+/// synchronous filesystem I/O. `Cli` itself never calls this — it resolves
+/// the default from the config already loaded once at `Cli::new` time
+/// instead — but a consumer calling this function directly should avoid
+/// doing so from a hot path or within an async executor without
+/// `spawn_blocking`.
 #[must_use]
 pub fn default_output_format(app_id: &str) -> String {
     let env = std::env::var(output_env_var(app_id)).ok();

@@ -1381,10 +1381,10 @@ impl Cli {
         use std::io::IsTerminal;
 
         let env = std::env::var(output_env_var(&self.config.app_id)).ok();
-        let config_format = self.middleware.config.engine().output.format.clone();
+        let engine_config = self.middleware.config.engine();
         resolve_default_output_format(
             env.as_deref(),
-            config_format.as_deref(),
+            engine_config.output.format.as_deref(),
             std::io::stdout().is_terminal(),
         )
     }

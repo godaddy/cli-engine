@@ -398,8 +398,9 @@ impl ConfigFile {
     /// a version like `"1.0"`), this API does not currently support quoting —
     /// wrap the value in the config file by hand.
     ///
-    /// The engine-reserved `[credentials]` table is validated: only the known
-    /// key `credentials.store` is accepted; unknown keys in that table are
+    /// The engine-reserved `[credentials]` and `[output]` tables are
+    /// validated: only their known keys (`credentials.store`,
+    /// `output.format`) are accepted; unknown keys in those tables are
     /// rejected. Existing comments and formatting elsewhere in the file are
     /// preserved. Call [`save`](ConfigFile::save) to persist.
     ///
