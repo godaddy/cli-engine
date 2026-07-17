@@ -555,10 +555,14 @@ Human output is designed for readable terminal display:
 - `TableColumn::no_truncate` opts a column out of shrinking entirely (still
   bounded by a large pathological-value safety cap) — use it for values that
   are useless when cut short, such as URLs.
-- When the terminal is too narrow for every column, the lowest-priority
-  (trailing) columns are hidden — see "Column order is priority" below — and
-  a footer names them and suggests `--fields`/`--json`. A similar footer
-  appears when a cell's value had to be shortened.
+- When the terminal is too narrow for every column, hiding a column is
+  preferred over truncating a cell: the lowest-priority (trailing) columns —
+  see "Column order is priority" below — are hidden one at a time until the
+  survivors fit in full, or only one column remains. A footer names whatever
+  got hidden and suggests `--fields`/`--json`. A similar footer appears if a
+  cell still had to be shortened (only possible once hiding can't help
+  further — e.g. a single remaining column whose value alone exceeds the
+  display width).
 
 Views can be assigned to commands. There are two ways to do it.
 

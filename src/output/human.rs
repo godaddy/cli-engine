@@ -412,12 +412,12 @@ fn dynamic_columns(fields: &str, natural_keys: impl FnOnce() -> Vec<String>) -> 
 fn append_render_notes(out: &mut String, notes: &RenderNotes) {
     if notes.truncated {
         out.push_str(
-            "\nOutput truncated to fit the terminal — use --fields to show fewer columns, or --json for full values.\n",
+            "\nOutput truncated to fit the display width — use --fields to show fewer columns, or --json for full values.\n",
         );
     }
     if !notes.hidden_columns.is_empty() {
         out.push_str(&format!(
-            "\n{} column{} hidden to fit the terminal ({}) — use --fields to choose columns, or --json for full output.\n",
+            "\n{} column{} hidden to fit the display width ({}) — use --fields to choose columns, or --json for full output.\n",
             notes.hidden_columns.len(),
             if notes.hidden_columns.len() == 1 { "" } else { "s" },
             notes.hidden_columns.join(", "),
@@ -652,18 +652,32 @@ fn render_array_with_columns(
             }
         })
         .collect();
-    let kept = columns_fitting_width(&min_widths, available_width);
+    let mut kept = columns_fitting_width(&min_widths, available_width);
+
+    // Hiding a column is preferred over truncating a cell: if the survivors
+    // still don't fit their natural width, keep dropping the lowest-priority
+    // one and re-fitting, until either everyone remaining fits in full or
+    // only one column is left (which always stays, however it fits).
+    let (fitted, truncated) = loop {
+        let (fitted, truncated) = fit_column_widths(
+            &header_lens[..kept],
+            &natural[..kept],
+            &no_truncate_all[..kept],
+            available_width,
+        );
+        if !truncated || kept <= 1 {
+            break (fitted, truncated);
+        }
+        kept -= 1;
+    };
+
     let hidden_columns = columns[kept..]
         .iter()
         .map(|column| column.header.clone())
         .collect::<Vec<_>>();
     let columns = &columns[..kept];
-    let header_lens = &header_lens[..kept];
-    let natural = &natural[..kept];
-    let no_truncate = &no_truncate_all[..kept];
     let rows: Vec<Vec<String>> = rows.into_iter().map(|row| row[..kept].to_vec()).collect();
 
-    let (fitted, truncated) = fit_column_widths(header_lens, natural, no_truncate, available_width);
     let table = render_table(
         &columns
             .iter()
@@ -896,22 +910,29 @@ mod tests {
         assert!(long_url.len() > 40, "fixture must exceed the default cap");
         let items = vec![json!({ "title": long_url, "url": long_url })];
         let columns = vec![
-            TableColumn::new("title", "Title"),
+            // Declared first (higher priority) so it survives hide-before-
+            // truncate rather than the lower-priority title column
+            // absorbing truncation instead — with only two columns, any
+            // truncation now cascades to hiding the lower-priority one.
             TableColumn::new("url", "URL").no_truncate(true),
+            TableColumn::new("title", "Title"),
         ];
 
-        // Just enough room for the URL in full plus a somewhat-shrunk title.
         let (out, notes) = render_array_with_columns(&items, &columns, 80);
 
-        assert!(
-            out.contains("..."),
-            "default column should still truncate: {out}"
-        );
         assert!(
             out.contains(long_url),
             "no_truncate column must keep the full value: {out}"
         );
-        assert!(notes.truncated, "title column was shortened: {out}");
+        assert!(
+            !out.contains("..."),
+            "hiding the lower-priority column avoided any truncation: {out}"
+        );
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["Title".to_owned()],
+            "the lower-priority truncatable column is hidden rather than shown truncated: {out}"
+        );
     }
 
     #[test]
@@ -978,14 +999,15 @@ mod tests {
 
     #[test]
     fn narrow_terminal_truncates_and_reports_it() {
+        // A single column whose value is far longer than the terminal
+        // allows: there's nothing else to hide (hide-before-truncate has no
+        // lower-priority column to drop), so truncation is the only option
+        // and it must still be reported.
         let description = "a description that is well past the old forty-character cap";
-        let items = vec![json!({ "id": "1", "description": description })];
-        let columns = vec![
-            TableColumn::new("id", "ID"),
-            TableColumn::new("description", "Description"),
-        ];
+        let items = vec![json!({ "description": description })];
+        let columns = vec![TableColumn::new("description", "Description")];
 
-        let (out, notes) = render_array_with_columns(&items, &columns, 30);
+        let (out, notes) = render_array_with_columns(&items, &columns, 20);
 
         assert!(
             notes.truncated,
@@ -993,9 +1015,36 @@ mod tests {
         );
         assert!(
             notes.hidden_columns.is_empty(),
-            "both columns still fit: {out}"
+            "only one column exists to begin with: {out}"
         );
         assert!(out.contains("..."), "{out}");
+    }
+
+    #[test]
+    fn narrow_terminal_hides_columns_before_truncating_any_of_the_survivors() {
+        // Three equally-competing columns: at this width, showing all three
+        // (or even two) would require truncating every survivor a little.
+        // Hide-before-truncate should instead cascade down to the single
+        // highest-priority column and show it in full.
+        let items = vec![json!({ "a": "x".repeat(5), "b": "x".repeat(5), "c": "x".repeat(5) })];
+        let columns = vec![
+            TableColumn::new("a", "A"),
+            TableColumn::new("b", "B"),
+            TableColumn::new("c", "C"),
+        ];
+
+        let (out, notes) = render_array_with_columns(&items, &columns, 10);
+
+        assert!(
+            !notes.truncated,
+            "hiding B and C should leave A fully shown, untruncated: {out}"
+        );
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["B".to_owned(), "C".to_owned()],
+            "should cascade down to the single highest-priority column: {out}"
+        );
+        assert!(!out.contains("..."), "{out}");
     }
 
     #[test]
@@ -1057,7 +1106,7 @@ mod tests {
         // falls back to 80 — these headers don't all fit at that width.
         let out = render_human_with_view(&envelope, Some(&columns), "");
 
-        assert!(out.contains("hidden to fit the terminal"), "{out}");
+        assert!(out.contains("hidden to fit the display width"), "{out}");
         assert!(
             out.contains("This Is An Extremely Long Trailing Column Header"),
             "{out}"
