@@ -605,7 +605,12 @@ fn render_array_with_columns(
     columns: &[TableColumn],
     available_width: usize,
 ) -> (String, RenderNotes) {
-    if items.is_empty() {
+    if items.is_empty() || columns.is_empty() {
+        // Empty columns happens when every item is `{}` (the no-view
+        // dynamic catalog has no keys to show) or a view's `--fields`
+        // filtered out every declared column — either way there's nothing
+        // to build a table from, so fall back to the same message used for
+        // no items at all rather than rendering a blank header/rows table.
         return ("(no results)\n".to_owned(), RenderNotes::default());
     }
     if !items.iter().all(Value::is_object) {
@@ -1288,5 +1293,30 @@ mod tests {
             header_line.len() <= 42,
             "must not overflow once the trailing column is hidden: {out}"
         );
+    }
+
+    #[test]
+    fn render_array_with_columns_handles_no_columns_gracefully() {
+        // A view's `--fields` filtered out every declared column: nothing to
+        // build a table from, so this must report "no results" rather than
+        // a blank header/rows table.
+        let items = vec![json!({ "a": "1" })];
+        let (out, notes) = render_array_with_columns(&items, &[], 80);
+
+        assert_eq!(out, "(no results)\n");
+        assert!(!notes.truncated, "{out}");
+        assert!(notes.hidden_columns.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn no_view_array_of_empty_objects_reports_no_results() {
+        // Every item is `{}`, so the dynamic (no-view) column catalog has no
+        // keys to derive columns from — same "no columns" case as above,
+        // reached through the no-view path instead.
+        let items = vec![json!({}), json!({})];
+        let (out, notes) = render_array(&items, "", 80);
+
+        assert_eq!(out, "(no results)\n");
+        assert!(notes.hidden_columns.is_empty(), "{out}");
     }
 }
