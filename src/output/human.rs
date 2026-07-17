@@ -508,7 +508,9 @@ struct RenderNotes {
     /// Whether any cell was shortened to fit the terminal.
     truncated: bool,
     /// Headers of columns dropped entirely because there wasn't room for
-    /// them, in the order they were dropped (lowest priority first).
+    /// them, in their original declared/requested order (the order they
+    /// would have appeared in the table, had they fit) — not reverse
+    /// priority order.
     hidden_columns: Vec<String>,
 }
 
