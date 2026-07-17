@@ -411,7 +411,9 @@ fn dynamic_columns(fields: &str, natural_keys: impl FnOnce() -> Vec<String>) -> 
 /// directly into `out` rather than building a separate string.
 fn append_render_notes(out: &mut String, notes: &RenderNotes) {
     if notes.truncated {
-        out.push_str("\nOutput truncated to fit the terminal — use --json for full values.\n");
+        out.push_str(
+            "\nOutput truncated to fit the terminal — use --fields to show fewer columns, or --json for full values.\n",
+        );
     }
     if !notes.hidden_columns.is_empty() {
         out.push_str(&format!(
@@ -510,16 +512,21 @@ struct RenderNotes {
     hidden_columns: Vec<String>,
 }
 
-/// Chooses how many leading `headers` (priority order, most important first)
-/// fit in `available_width`, so lower-priority trailing columns can be
-/// dropped when the terminal is too narrow for all of them. Always keeps at
-/// least one column, even if it alone exceeds `available_width`.
-fn columns_fitting_width(headers: &[usize], available_width: usize) -> usize {
+/// Chooses how many leading columns (priority order, most important first),
+/// each contributing at least `min_widths[i]`, fit in `available_width` — so
+/// lower-priority trailing columns can be dropped when the terminal is too
+/// narrow for all of them. `min_widths[i]` should be the column's header
+/// length for a column that can still shrink, or its full natural width for
+/// one that can't (e.g. `no_truncate`) — using a shrinkable column's header
+/// length here lets it still be counted as fitting even though its eventual
+/// rendered width may be larger. Always keeps at least one column, even if
+/// it alone exceeds `available_width`.
+fn columns_fitting_width(min_widths: &[usize], available_width: usize) -> usize {
     let mut used = 0_usize;
     let mut kept = 0_usize;
-    for (index, &header_len) in headers.iter().enumerate() {
+    for (index, &min_width) in min_widths.iter().enumerate() {
         let gutter = if index == 0 { 0 } else { COLUMN_GUTTER };
-        let next_used = used + gutter + header_len;
+        let next_used = used + gutter + min_width;
         if next_used > available_width && kept > 0 {
             break;
         }
@@ -572,11 +579,16 @@ fn fit_column_widths(
         .filter(|&index| natural[index] > headers[index])
         .collect();
     needy.sort_by_key(|&index| natural[index] - headers[index]);
-    for (position, &index) in needy.iter().enumerate() {
-        let left = needy.len() - position;
-        let share = leftover / left;
+    // Smallest-need-first, take exactly what's wanted or whatever's left,
+    // whichever is less. Deliberately not an even split of `leftover` across
+    // the remaining columns: dividing first and taking `min(wants, share)`
+    // can floor a small want to zero when `leftover < remaining columns`,
+    // denying it entirely while a later, greedier column absorbs the
+    // remainder — worse than just letting small wants claim what they need
+    // outright before anyone larger gets a turn.
+    for &index in &needy {
         let wants = natural[index] - headers[index];
-        let take = wants.min(share);
+        let take = wants.min(leftover);
         widths[index] += take;
         leftover -= take;
     }
@@ -597,18 +609,16 @@ fn render_array_with_columns(
     if !items.iter().all(Value::is_object) {
         return (render_array_lines(items), RenderNotes::default());
     }
+    // Natural widths (and rows) are computed for every original column
+    // before deciding what to hide: a `no_truncate` column never shrinks
+    // below its natural width, so the hiding decision has to know that real
+    // requirement — using just its header length here could keep a
+    // low-priority trailing column that would never have fit anyway,
+    // producing an overflow that hiding it would have avoided.
     let header_lens: Vec<usize> = columns.iter().map(|column| column.header.len()).collect();
-    let kept = columns_fitting_width(&header_lens, available_width);
-    let hidden_columns = columns[kept..]
-        .iter()
-        .map(|column| column.header.clone())
-        .collect::<Vec<_>>();
-    let columns = &columns[..kept];
-    let header_lens = &header_lens[..kept];
-
-    let mut widths = header_lens.to_vec();
-    let no_truncate: Vec<bool> = columns.iter().map(|column| column.no_truncate).collect();
-    let rows = items
+    let no_truncate_all: Vec<bool> = columns.iter().map(|column| column.no_truncate).collect();
+    let mut natural = header_lens.clone();
+    let rows: Vec<Vec<String>> = items
         .iter()
         .map(|item| {
             columns
@@ -624,15 +634,34 @@ fn render_array_with_columns(
                     } else {
                         usize::MAX
                     };
-                    widths[index] = widths[index].max(value.len().min(cap));
+                    natural[index] = natural[index].max(value.len().min(cap));
                     value
                 })
                 .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    let (fitted, truncated) =
-        fit_column_widths(header_lens, &widths, &no_truncate, available_width);
+    let min_widths: Vec<usize> = (0..columns.len())
+        .map(|index| {
+            if no_truncate_all[index] {
+                natural[index]
+            } else {
+                header_lens[index]
+            }
+        })
+        .collect();
+    let kept = columns_fitting_width(&min_widths, available_width);
+    let hidden_columns = columns[kept..]
+        .iter()
+        .map(|column| column.header.clone())
+        .collect::<Vec<_>>();
+    let columns = &columns[..kept];
+    let header_lens = &header_lens[..kept];
+    let natural = &natural[..kept];
+    let no_truncate = &no_truncate_all[..kept];
+    let rows: Vec<Vec<String>> = rows.into_iter().map(|row| row[..kept].to_vec()).collect();
+
+    let (fitted, truncated) = fit_column_widths(header_lens, natural, no_truncate, available_width);
     let table = render_table(
         &columns
             .iter()
@@ -1157,6 +1186,56 @@ mod tests {
         assert!(
             status_pos < id_pos,
             "expected STATUS before ID per the requested field order: {header_line}"
+        );
+    }
+
+    #[test]
+    fn fit_column_widths_gives_small_wants_priority_over_larger_ones() {
+        // Regression: a naive `leftover / remaining` split can floor a small
+        // want to zero (denying a column that needed only 1 more char)
+        // while a much larger want absorbs that same unit and stays
+        // truncated anyway — net truncation is identical, but a column that
+        // could have been fully satisfied wasn't.
+        let headers = [1, 1, 1];
+        let natural = [2, 2, 6]; // wants: 1, 1, 5
+        let no_truncate = [false, false, false];
+
+        let (widths, truncated) = fit_column_widths(&headers, &natural, &no_truncate, 8);
+
+        assert_eq!(
+            widths[0], natural[0],
+            "a column that only wanted 1 more char should get it in full: {widths:?}"
+        );
+        assert!(truncated, "budget is still too small overall: {widths:?}");
+    }
+
+    #[test]
+    fn overflow_hiding_accounts_for_no_truncate_columns_true_width() {
+        // Regression: deciding what to hide from header length alone
+        // under-counts a `no_truncate` column (it never shrinks below its
+        // natural width), which could keep a short-header trailing column
+        // that would never have fit anyway — overflowing when hiding it
+        // would have let the row fit.
+        let url = "x".repeat(40);
+        let items = vec![json!({ "url": url, "notes": "irrelevant, lowest priority" })];
+        let columns = vec![
+            TableColumn::new("url", "URL").no_truncate(true),
+            TableColumn::new("notes", "X"),
+        ];
+
+        // Exactly enough room for the URL alone (40 chars), not enough for
+        // the URL plus even a 1-char trailing column and its gutter (43).
+        let (out, notes) = render_array_with_columns(&items, &columns, 42);
+
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["X".to_owned()],
+            "the trailing column must be hidden so the no_truncate URL column fits: {out}"
+        );
+        let header_line = out.lines().next().expect("header line");
+        assert!(
+            header_line.len() <= 42,
+            "must not overflow once the trailing column is hidden: {out}"
         );
     }
 }
