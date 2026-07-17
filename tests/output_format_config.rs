@@ -171,6 +171,12 @@ async fn invalid_config_format_falls_through_to_tty_default() {
 async fn conflicting_output_format_flags_error_instead_of_silently_picking_one() {
     // DEVEX-888 repro: `--json --human` together used to resolve silently
     // (human won); it must now be a usage error, end to end.
+    //
+    // Holds the lock even though it never mutates an env var itself:
+    // `build_cli()` calls `Cli::new`, which reads `XDG_CONFIG_HOME` via
+    // `ConfigFile::load` regardless, so it must still serialize against the
+    // other tests in this file that mutate it.
+    let _guard = lock();
     let out = build_cli()
         .run(["outfmt-itest", "widget", "list", "--json", "--human"])
         .await;
