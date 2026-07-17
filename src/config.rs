@@ -151,9 +151,10 @@ pub struct OutputConfig {
     /// when the key is absent. Kept as a plain string rather than
     /// [`crate::output::OutputFormat`] so validation stays in one place —
     /// [`crate::flags::resolve_default_output_format`] — with the same
-    /// "invalid value is logged and ignored" treatment already applied to
-    /// the `${PREFIX}_OUTPUT` env override, rather than `OutputFormat`'s
-    /// permissive `FromStr` (which silently maps unknown strings to `Json`).
+    /// silently-ignored-if-invalid treatment already applied to the
+    /// `${PREFIX}_OUTPUT` env override (falls through to the next tier, no
+    /// log line), rather than `OutputFormat`'s permissive `FromStr` (which
+    /// silently maps unknown strings to `Json`).
     pub format: Option<String>,
 }
 
