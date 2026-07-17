@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.5...cli-engine-v0.4.6) (2026-07-17)
+
+
+### Features
+
+* **output:** terminal-width-aware tables, field-order rendering, config-driven format ([#54](https://github.com/godaddy/cli-engine/issues/54)) ([5ca753f](https://github.com/godaddy/cli-engine/commit/5ca753faf397979731ea7a43d79d65ad9e095ac2))
+
 ## [0.4.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.4...cli-engine-v0.4.5) (2026-07-16)
 
 
