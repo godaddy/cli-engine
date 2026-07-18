@@ -31,6 +31,10 @@ pub type ValueMap = Map<String, Value>;
 pub struct CommandMeta {
     /// Whether `--dry-run` should short-circuit command business logic.
     pub dry_run_prompt: bool,
+    /// Whether the command handles `--dry-run` itself instead of being
+    /// generically short-circuited. See
+    /// [`CommandSpec::handles_dry_run`](crate::CommandSpec::handles_dry_run).
+    pub handles_dry_run: bool,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// OAuth-style scopes derived from `auth_metadata["scopes"]`.
@@ -691,7 +695,7 @@ impl Middleware {
             return Ok(output);
         }
 
-        if self.dry_run && meta.dry_run_prompt {
+        if self.dry_run && meta.dry_run_prompt && !meta.handles_dry_run {
             let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
             self.write_audit(command_path, &args, identity, "dry-run")
                 .await;
@@ -788,21 +792,31 @@ impl Middleware {
         };
         // The handler may have resolved the credential; surface its identity.
         let identity = resolver.peek().map_or("", |cred| cred.identity.as_str());
-        self.write_audit(command_path, &args, identity, "ok").await;
+        let CommandResult { data, metadata } = result;
+        // A `handles_dry_run` handler that tagged its result via
+        // `CommandResult::with_dry_run` reports a `dry-run` outcome instead of
+        // `ok`, matching the generic short-circuit's audit/activity tagging.
+        let outcome = if metadata.dry_run { "dry-run" } else { "ok" };
+        self.write_audit(command_path, &args, identity, outcome)
+            .await;
         self.emit_activity(
             command_path,
             &args,
             resolver.peek(),
-            "ok",
+            outcome,
             &command_system,
             "",
             start,
         )
         .await;
 
-        let CommandResult { data, metadata } = result;
+        let mut envelope =
+            Envelope::success(data, command_system).with_next_actions(metadata.next_actions);
+        if metadata.dry_run {
+            envelope = envelope.with_dry_run();
+        }
         self.render_envelope(
-            Envelope::success(data, command_system).with_next_actions(metadata.next_actions),
+            envelope,
             default_fields,
             view_id.unwrap_or_default(),
             command_path,

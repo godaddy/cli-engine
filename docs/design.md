@@ -226,6 +226,8 @@ Command metadata should be explicit:
 - `with_tier` and `mutates` mark risk and dry-run behavior.
 - `with_json_schema::<T>()` publishes JSON Schema for output.
 - `with_arg` adds typed `clap::Arg` values.
+- `handles_dry_run` opts a mutating command out of the generic `--dry-run` short-circuit so its
+  handler runs instead (see [Dry-Run](#dry-run) below).
 
 ## Global Flags
 
@@ -271,6 +273,23 @@ Command handlers should not print directly. They return data or an error; middle
 output envelope and renderer output. This keeps stdout machine-friendly and stderr reserved for
 diagnostics in executable paths.
 
+## Dry-Run
+
+By default, `--dry-run` short-circuits any command with `dry_run_prompt` set (from `with_tier` or `mutates`) generically: the handler never runs, and the engine renders a fixed `{"command": ..., "action": "dry-run: would execute"}` envelope. This is cheap and side-effect free, but gives no command-specific preview — a command that would validate input (a token format, a file path, an environment name) can't run that validation under `--dry-run` either.
+
+A command that wants a real preview instead calls `CommandSpec::handles_dry_run(true)`. This skips the generic short-circuit for that command only; the handler runs as normal (still subject to its declared `AuthRequirement` — a `Required` command still resolves its credential before the handler runs, even under `--dry-run`, once it opts in). The handler is expected to:
+
+1. Run its real validation unconditionally (so bad input is still rejected under `--dry-run`).
+2. Check `CommandContext::dry_run()` and skip only the mutating step (the write, the API call).
+3. Return a `CommandResult` tagged with `CommandResult::with_dry_run()` when it took the preview branch, so middleware records a `dry-run` audit/activity outcome (instead of `ok`) and marks the envelope accordingly.
+
+A handler that opts in but doesn't call `.with_dry_run()` on its result is treated as a normal `ok` outcome — the tagging is the handler's contract, not something middleware infers.
+
+**Auth requirement stays as declared.** `handles_dry_run` only skips the generic short-circuit; it does not change the command's `AuthRequirement`. A `Required` command still resolves its credential *before the handler runs*, dry-run or not — so if the dry-run branch never needs a credential, `Required` forces an unnecessary (possibly interactive) auth flow purely to render a preview. Two cases:
+
+- The dry-run branch itself needs a live authenticated call to build an accurate preview (e.g. fetching current state to diff against). Here `Required` and `Optional` behave identically — the handler needs the credential regardless of `dry_run()` — so keep the simpler, fail-closed `Required`.
+- The dry-run branch can complete from validation alone, with no network call. Here call `CommandSpec::auth_optional()` and check `CommandContext::dry_run()` *before* calling `CommandContext::credential()`/`credential_with_scopes()`, so resolution — and any interactive login it might trigger — only happens on the paths that actually need it.
+
 ## Auth And Authorization
 
 Auth providers implement `AuthProvider` and are registered with the CLI or during dependency
@@ -285,14 +304,7 @@ authorization, audit, and activity.
 The provider process contract and transport injectors are described in
 [Authentication and Transport](auth.md).
 
-Authorization is optional and supplied by an `Authorizer` attached to middleware. The authorizer
-receives command path, effective args, a `CredentialResolver`, reason, and tier. Authentication
-policy is declared per command via `AuthRequirement` and defaults to `Required` (fail-closed): the
-engine resolves the credential before the handler runs and renders an `auth-error` if it cannot, so
-a command that should be gated cannot execute unauthenticated. The `CredentialResolver` memoizes a
-single resolution shared by the engine, the authorizer, and the handler. `Optional` commands defer
-resolution to the handler, `None` commands never authenticate, and `--schema`/`--dry-run`
-short-circuit before resolution so they never trigger an auth flow.
+Authorization is optional and supplied by an `Authorizer` attached to middleware. The authorizer receives command path, effective args, a `CredentialResolver`, reason, and tier. Authentication policy is declared per command via `AuthRequirement` and defaults to `Required` (fail-closed): the engine resolves the credential before the handler runs and renders an `auth-error` if it cannot, so a command that should be gated cannot execute unauthenticated. The `CredentialResolver` memoizes a single resolution shared by the engine, the authorizer, and the handler. `Optional` commands defer resolution to the handler, `None` commands never authenticate, and `--schema`/`--dry-run` short-circuit before resolution so they never trigger an auth flow — except for a command that opted into `handles_dry_run`, which runs its handler (and any `Required` credential resolution) under `--dry-run` just as it would without the flag; see [Dry-Run](#dry-run).
 
 Auditors and activity emitters are also pluggable traits. They receive enough context to record
 success, auth failures, authorization denials, dry-runs, command errors, and command duration.

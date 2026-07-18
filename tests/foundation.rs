@@ -2966,6 +2966,43 @@ async fn cli_runtime_optional_value_flags_before_command_do_not_consume_command_
 }
 
 #[tokio::test]
+async fn cli_runtime_handles_dry_run_lets_handler_preview_instead_of_generic_short_circuit() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("mutate", "Mutate safely")
+            .no_auth(true)
+            .mutates(true)
+            .handles_dry_run(true),
+        async |ctx| {
+            if ctx.dry_run() {
+                Ok(CommandResult::new(json!({"would": "execute"})).with_dry_run())
+            } else {
+                Ok(CommandResult::new(json!({"executed": true})))
+            }
+        },
+    ));
+
+    let output = cli
+        .run(["my-cli", "--dry-run", "mutate", "--output", "json"])
+        .await;
+
+    assert_eq!(output.exit_code, 0);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!({"would": "execute"}));
+
+    let output = cli.run(["my-cli", "mutate", "--output", "json"]).await;
+
+    assert_eq!(output.exit_code, 0);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!({"executed": true}));
+}
+
+#[tokio::test]
 async fn cli_runtime_optional_string_flags_use_no_opt_default_and_do_not_consume_positionals_like_optional_flag_parser()
  {
     let mut cli = Cli::new(CliConfig {
@@ -3381,6 +3418,22 @@ fn command_spec_metadata_matches_legacy_annotation_resolver_behavior() {
     assert_eq!(meta.auth_metadata["provider"], "oauth");
     assert_eq!(meta.auth_metadata["tier"], "mutate");
     assert_eq!(meta.scopes, vec!["read:apps", "write:apps"]);
+}
+
+#[test]
+fn command_spec_handles_dry_run_flows_into_metadata() {
+    let spec = CommandSpec::new("init", "Init")
+        .with_tier(Tier::Mutate)
+        .mutates(true)
+        .handles_dry_run(true);
+
+    let meta = spec.metadata();
+
+    assert!(meta.dry_run_prompt);
+    assert!(meta.handles_dry_run);
+
+    let default_spec = CommandSpec::new("deploy", "Deploy").with_tier(Tier::Mutate);
+    assert!(!default_spec.metadata().handles_dry_run);
 }
 
 #[test]
@@ -6861,6 +6914,7 @@ async fn middleware_fixed_env_overrides_only_auth_env_preserves_legacy() {
             middleware_request(
                 CommandMeta {
                     dry_run_prompt: false,
+                    handles_dry_run: false,
                     auth_metadata: BTreeMap::from([
                         ("provider".to_owned(), "primary".to_owned()),
                         ("fixed_env".to_owned(), "auth-prod".to_owned()),
@@ -7591,6 +7645,7 @@ async fn middleware_dry_run_short_circuits_mutating_command() {
     auth_metadata.insert("tier".to_owned(), "mutate".to_owned());
     let meta = CommandMeta {
         dry_run_prompt: true,
+        handles_dry_run: false,
         auth_metadata,
         scopes: Vec::new(),
     };
@@ -7613,6 +7668,78 @@ async fn middleware_dry_run_short_circuits_mutating_command() {
     );
     assert!(output.envelope.metadata.expect("metadata").dry_run);
     assert_eq!(audit.results().await, vec!["dry-run"]);
+}
+
+#[tokio::test]
+async fn middleware_handler_driven_dry_run_runs_handler_and_tags_outcome() {
+    let audit = Arc::new(CaptureAudit::default());
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(FakeProvider::new("primary", "tester")));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.dry_run = true;
+    middleware.verbose = "all".to_owned();
+    middleware.auditor = Some(audit.clone());
+
+    let mut auth_metadata = BTreeMap::new();
+    auth_metadata.insert("tier".to_owned(), "mutate".to_owned());
+    let meta = CommandMeta {
+        dry_run_prompt: true,
+        handles_dry_run: true,
+        auth_metadata,
+        scopes: Vec::new(),
+    };
+
+    let output = middleware
+        .run(
+            middleware_request(meta, "things:set", value_map([]), value_map([]), "", false),
+            async |_credential| {
+                Ok(CommandResult::new(json!({"would": "do the thing"})).with_dry_run())
+            },
+        )
+        .await
+        .expect("handler-driven dry-run should render the handler's result");
+
+    assert_eq!(output.envelope.data, Some(json!({"would": "do the thing"})));
+    assert!(output.envelope.metadata.expect("metadata").dry_run);
+    assert_eq!(audit.results().await, vec!["dry-run"]);
+}
+
+#[tokio::test]
+async fn middleware_handler_driven_dry_run_without_with_dry_run_tag_is_ok() {
+    let audit = Arc::new(CaptureAudit::default());
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(FakeProvider::new("primary", "tester")));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.dry_run = true;
+    middleware.verbose = "all".to_owned();
+    middleware.auditor = Some(audit.clone());
+
+    let mut auth_metadata = BTreeMap::new();
+    auth_metadata.insert("tier".to_owned(), "mutate".to_owned());
+    let meta = CommandMeta {
+        dry_run_prompt: true,
+        handles_dry_run: true,
+        auth_metadata,
+        scopes: Vec::new(),
+    };
+
+    let output = middleware
+        .run(
+            middleware_request(meta, "things:set", value_map([]), value_map([]), "", false),
+            async |_credential| Ok(CommandResult::new(json!({"executed": true}))),
+        )
+        .await
+        .expect("handler-driven, non-dry-run-tagged result should render as ok");
+
+    assert_eq!(output.envelope.data, Some(json!({"executed": true})));
+    assert!(!output.envelope.metadata.expect("metadata").dry_run);
+    assert_eq!(audit.results().await, vec!["ok"]);
 }
 
 #[tokio::test]

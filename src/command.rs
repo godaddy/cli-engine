@@ -66,6 +66,20 @@ impl CommandResult {
         self.metadata.next_actions = actions;
         self
     }
+
+    /// Marks this result as a dry-run preview outcome.
+    ///
+    /// Call only when the handler actually skipped its mutating step because
+    /// [`CommandContext::dry_run`] was `true`. This requires the command to
+    /// have opted in via [`CommandSpec::handles_dry_run`] — otherwise
+    /// middleware never invokes the handler under `--dry-run` in the first
+    /// place. Middleware tags the audit/activity outcome as `dry-run` instead
+    /// of `ok` and marks the rendered envelope accordingly.
+    #[must_use]
+    pub fn with_dry_run(mut self) -> Self {
+        self.metadata.dry_run = true;
+        self
+    }
 }
 
 impl From<Value> for CommandResult {
@@ -80,6 +94,11 @@ impl From<Value> for CommandResult {
 pub struct CommandResultMetadata {
     /// Suggested follow-up actions for the caller.
     pub next_actions: Vec<NextAction>,
+    /// Set by [`CommandResult::with_dry_run`] when a
+    /// [`handles_dry_run`](CommandSpec::handles_dry_run) handler skipped its
+    /// mutating step. Middleware tags the audit/activity outcome and envelope
+    /// as `dry-run` instead of `ok` when this is `true`.
+    pub dry_run: bool,
 }
 
 /// Runtime context passed to advanced command handlers.
@@ -125,6 +144,19 @@ impl CommandContext {
     #[must_use]
     pub fn config(&self) -> &crate::config::ConfigFile {
         &self.middleware.config
+    }
+
+    /// Returns whether `--dry-run` was passed for this invocation.
+    ///
+    /// Only meaningful for commands that opted in via
+    /// [`CommandSpec::handles_dry_run`] — other mutating commands never reach
+    /// their handler under `--dry-run` at all, so there's nothing to branch
+    /// on. An opted-in handler should run its real validation unconditionally
+    /// and use this only to skip the actual mutating I/O, returning a preview
+    /// result tagged with [`CommandResult::with_dry_run`].
+    #[must_use]
+    pub fn dry_run(&self) -> bool {
+        self.middleware.dry_run
     }
 
     /// Resolves the active [`Environment`](crate::environments::Environment) for
@@ -253,6 +285,16 @@ pub struct CommandSpec {
     pub tier: Option<Tier>,
     /// Explicit dry-run prompt marker for commands without a tier.
     pub mutates: bool,
+    /// Opts this command into handler-driven `--dry-run`.
+    ///
+    /// Set with [`handles_dry_run`](CommandSpec::handles_dry_run). When
+    /// `true`, the engine skips its generic `--dry-run` short-circuit for
+    /// this command and invokes the handler as normal (still respecting the
+    /// command's [`AuthRequirement`]). The handler is responsible for
+    /// running its real validation unconditionally, checking
+    /// [`CommandContext::dry_run`] to skip only the mutating I/O, and tagging
+    /// its preview result with [`CommandResult::with_dry_run`].
+    pub handles_dry_run: bool,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// Command-specific `clap` arguments.
@@ -506,6 +548,17 @@ impl CommandSpec {
         self
     }
 
+    /// Opts this command into handler-driven `--dry-run` instead of the
+    /// engine's generic short-circuit.
+    ///
+    /// See [`handles_dry_run`](CommandSpec::handles_dry_run) (the field) for
+    /// the contract a handler must follow once it opts in.
+    #[must_use]
+    pub fn handles_dry_run(mut self, handles: bool) -> Self {
+        self.handles_dry_run = handles;
+        self
+    }
+
     /// Builds middleware metadata from the spec.
     #[must_use]
     pub fn metadata(&self) -> CommandMeta {
@@ -532,6 +585,7 @@ impl CommandSpec {
 
         CommandMeta {
             dry_run_prompt: self.mutates || self.tier.is_some_and(Tier::is_mutating),
+            handles_dry_run: self.handles_dry_run,
             auth_metadata,
             scopes,
         }
