@@ -7813,6 +7813,49 @@ async fn middleware_ignores_with_dry_run_tag_when_invocation_was_not_dry_run() {
     assert_eq!(audit.results().await, vec!["ok"]);
 }
 
+/// A command that never opted into handler-driven dry-run (e.g. a
+/// `Tier::Read` handler, which always runs regardless of `--dry-run`) must
+/// not be mis-tagged as a dry-run outcome even if its handler buggily
+/// returns `.with_dry_run()` while the user did pass `--dry-run`.
+#[tokio::test]
+async fn middleware_ignores_with_dry_run_tag_when_command_did_not_opt_in() {
+    let audit = Arc::new(CaptureAudit::default());
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(FakeProvider::new("primary", "tester")));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.dry_run = true;
+    middleware.verbose = "all".to_owned();
+    middleware.auditor = Some(audit.clone());
+
+    // Not dry-run-promptable at all (like a `Tier::Read` command), and did
+    // not opt into `handles_dry_run` — the handler always runs.
+    let meta = CommandMeta {
+        dry_run_prompt: false,
+        handles_dry_run: false,
+        auth_metadata: BTreeMap::new(),
+        scopes: Vec::new(),
+    };
+
+    let output = middleware
+        .run(
+            middleware_request(meta, "things:get", value_map([]), value_map([]), "", false),
+            async |_credential| {
+                // Buggy handler: tags its result as dry-run even though this
+                // command was never gated by --dry-run in the first place.
+                Ok(CommandResult::new(json!({"executed": true})).with_dry_run())
+            },
+        )
+        .await
+        .expect("a non-opted-in command must render as ok regardless of the handler's tag");
+
+    assert_eq!(output.envelope.data, Some(json!({"executed": true})));
+    assert!(!output.envelope.metadata.expect("metadata").dry_run);
+    assert_eq!(audit.results().await, vec!["ok"]);
+}
+
 #[tokio::test]
 async fn middleware_no_auth_still_runs_authorizer() {
     let audit = Arc::new(CaptureAudit::default());

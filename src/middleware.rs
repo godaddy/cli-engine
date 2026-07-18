@@ -796,10 +796,13 @@ impl Middleware {
         // A `handles_dry_run` handler that tagged its result via
         // `CommandResult::with_dry_run` reports a `dry-run` outcome instead of
         // `ok`, matching the generic short-circuit's audit/activity tagging.
-        // Gated on `self.dry_run` too: the tag is handler-supplied, untrusted
-        // input, so a handler bug that sets it on a real (non-dry-run) run
-        // must not mis-tag that execution as a dry-run in the audit trail.
-        let is_dry_run = self.dry_run && metadata.dry_run;
+        // Gated on `self.dry_run` and `meta.handles_dry_run` too: the tag is
+        // handler-supplied, untrusted input, so a handler bug that sets it on
+        // a real (non-dry-run) run — or on a command that never opted into
+        // handler-driven dry-run at all (e.g. a `Tier::Read` handler that
+        // always runs, dry-run or not) — must not mis-tag that execution as a
+        // dry-run in the audit trail.
+        let is_dry_run = self.dry_run && meta.handles_dry_run && metadata.dry_run;
         let outcome = if is_dry_run { "dry-run" } else { "ok" };
         self.write_audit(command_path, &args, identity, outcome)
             .await;
