@@ -3436,6 +3436,36 @@ fn command_spec_handles_dry_run_flows_into_metadata() {
     assert!(!default_spec.metadata().handles_dry_run);
 }
 
+/// `RuntimeCommandSpec::new`'s handler shape has no `CommandContext`, so it
+/// can never check `CommandContext::dry_run()` — pairing it with
+/// `handles_dry_run` would silently run real side effects under `--dry-run`.
+/// This must be caught at registration time, not left as a silent footgun.
+#[test]
+#[should_panic(expected = "has no CommandContext")]
+fn runtime_command_spec_new_panics_when_paired_with_handles_dry_run() {
+    let _unused = RuntimeCommandSpec::new(
+        CommandSpec::new("bad", "Bad")
+            .mutates(true)
+            .handles_dry_run(true),
+        async |_credential, _args| Ok(CommandResult::new(json!({}))),
+    );
+}
+
+/// Same footgun as above, for the typed-args constructor.
+#[test]
+#[should_panic(expected = "has no CommandContext")]
+fn runtime_command_spec_new_typed_panics_when_paired_with_handles_dry_run() {
+    #[derive(Debug, Clone, clap::Args)]
+    struct EmptyArgs {}
+
+    let _unused = RuntimeCommandSpec::new_typed::<EmptyArgs, _, _, _>(
+        CommandSpec::new("bad", "Bad")
+            .mutates(true)
+            .handles_dry_run(true),
+        async |_credential: CredentialResolver, _args: EmptyArgs| Ok(CommandResult::new(json!({}))),
+    );
+}
+
 #[test]
 fn command_spec_with_scopes_round_trips_through_metadata() {
     let spec = CommandSpec::new("get", "Get").with_scopes(&["commerce.business:read", "x:y"]);
@@ -7736,6 +7766,47 @@ async fn middleware_handler_driven_dry_run_without_with_dry_run_tag_is_ok() {
         )
         .await
         .expect("handler-driven, non-dry-run-tagged result should render as ok");
+
+    assert_eq!(output.envelope.data, Some(json!({"executed": true})));
+    assert!(!output.envelope.metadata.expect("metadata").dry_run);
+    assert_eq!(audit.results().await, vec!["ok"]);
+}
+
+/// `metadata.dry_run` is handler-supplied, untrusted input: a handler bug
+/// that calls `.with_dry_run()` on a real (non-`--dry-run`) invocation must
+/// not mis-tag that execution as a dry-run in the audit trail or envelope.
+#[tokio::test]
+async fn middleware_ignores_with_dry_run_tag_when_invocation_was_not_dry_run() {
+    let audit = Arc::new(CaptureAudit::default());
+    let mut middleware = Middleware::new();
+    middleware
+        .auth
+        .register(Arc::new(FakeProvider::new("primary", "tester")));
+    middleware.default_auth_provider = "primary".to_owned();
+    middleware.output_format = "json".to_owned();
+    middleware.dry_run = false;
+    middleware.verbose = "all".to_owned();
+    middleware.auditor = Some(audit.clone());
+
+    let mut auth_metadata = BTreeMap::new();
+    auth_metadata.insert("tier".to_owned(), "mutate".to_owned());
+    let meta = CommandMeta {
+        dry_run_prompt: true,
+        handles_dry_run: true,
+        auth_metadata,
+        scopes: Vec::new(),
+    };
+
+    let output = middleware
+        .run(
+            middleware_request(meta, "things:set", value_map([]), value_map([]), "", false),
+            async |_credential| {
+                // Buggy handler: tags a real execution as dry-run anyway.
+                Ok(CommandResult::new(json!({"executed": true})).with_dry_run())
+            },
+        )
+        .await
+        .expect("a real run must render as ok regardless of the handler's tag");
 
     assert_eq!(output.envelope.data, Some(json!({"executed": true})));
     assert!(!output.envelope.metadata.expect("metadata").dry_run);
