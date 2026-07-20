@@ -665,8 +665,11 @@ impl PkceAuthProvider {
 
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
-        self.exchange_code_for_token(&oauth, &code, &code_verifier, scopes)
-            .await
+        let token = self
+            .exchange_code_for_token(&oauth, &code, &code_verifier, scopes)
+            .await?;
+        emit_auth_complete_message();
+        Ok(token)
     }
 
     /// Builds a POST to an OAuth token endpoint on the provider's shared client.
@@ -831,6 +834,14 @@ fn emit_browser_login_prompt(url: &url::Url) {
         stderr,
         "If the browser does not open, visit:\n  {url}"
     ));
+}
+
+// Printed once the OAuth token is in hand, so a caller who goes on to run a
+// long-running command (e.g. a purchase) doesn't mistake that work for the
+// browser flow still being pending. See DEVEX-892 / GDDEVPLAT-64.
+fn emit_auth_complete_message() {
+    let mut stderr = std::io::stderr().lock();
+    drop(writeln!(stderr, "Authentication complete."));
 }
 
 /// Generates a PKCE code verifier and SHA-256 code challenge.
