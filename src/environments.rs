@@ -125,6 +125,21 @@ impl EnvironmentDef {
     }
 }
 
+/// On-disk shape of `environments.toml`. The recommended (and only documented)
+/// shape is a flat top-level table per environment (`[prod]`), captured by
+/// `top_level`'s flatten. `environments` is an undocumented compatibility shim
+/// accepting a nested top-level `[environments.prod]` table, so files written
+/// against that shape keep working without being rewritten. The named
+/// `environments` field claims that key before `top_level`'s flatten catches
+/// everything else, so the two shapes never conflict.
+#[derive(Debug, Default, Deserialize)]
+struct FileShape {
+    #[serde(default)]
+    environments: BTreeMap<String, EnvironmentDef>,
+    #[serde(flatten, default)]
+    top_level: BTreeMap<String, EnvironmentDef>,
+}
+
 /// Engine-owned environment system: definitions + resolution + active-env state.
 #[derive(Clone, Debug)]
 pub struct Environments {
@@ -282,6 +297,11 @@ impl Environments {
     }
 
     /// Parses the environments file into a name -> def map. Missing file = empty.
+    ///
+    /// Also accepts a legacy, undocumented nested top-level `[environments.prod]`
+    /// table alongside the recommended flat `[prod]` shape, so files already
+    /// written against that shape keep parsing without being rewritten. When a
+    /// name appears under both, the nested entry's fields win.
     fn file_defs(&self) -> Result<BTreeMap<String, EnvironmentDef>> {
         let Some(path) = self.effective_file_path() else {
             return Ok(BTreeMap::new());
@@ -295,9 +315,19 @@ impl Environments {
                 )));
             }
         };
-        toml_edit::de::from_str::<BTreeMap<String, EnvironmentDef>>(&text).map_err(|err| {
+        let shape = toml_edit::de::from_str::<FileShape>(&text).map_err(|err| {
             CliCoreError::message(format!("parsing environments file {path:?}: {err}"))
-        })
+        })?;
+        let mut defs = shape.top_level;
+        for (name, def) in shape.environments {
+            match defs.get_mut(&name) {
+                Some(existing) => merge_into(existing, &def),
+                None => {
+                    defs.insert(name, def);
+                }
+            }
+        }
+        Ok(defs)
     }
 
     /// Config-file key under which the sticky active environment is stored.
@@ -747,6 +777,89 @@ api_url = "https://api.custom.example.com"
         let custom = envs.resolve("custom").expect("custom");
         assert_eq!(custom.oauth.unwrap().client_id, "custom-client");
         assert!(envs.list().contains(&"custom".to_owned()));
+    }
+
+    /// gddy's already-distributed `environments.toml` nests every entry under
+    /// a top-level `[environments]` table (mirroring its own hand-rolled
+    /// `EnvironmentsFile { environments: BTreeMap<..> }`), unlike cli-engine's
+    /// flat `[<name>]` shape. Those files must parse with zero edits.
+    #[test]
+    fn nested_environments_table_shape_parses_like_flat_shape() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("environments.toml");
+        std::fs::write(
+            &file,
+            r#"
+[environments.dev]
+api_url = "https://api.dev-godaddy.com"
+client_id = "94488449-5769-4ecf-8bf4-9f8aa83859a3"
+
+[environments.test]
+api_url = "https://api.test-godaddy.com"
+client_id = "e710d8b9-f4e5-4178-b1bf-98dfcd15d4ed"
+"#,
+        )
+        .expect("write file");
+
+        let envs = Environments::new("prod")
+            .with_config_file(true)
+            .with_config_file_path_override(file);
+
+        let dev = envs.resolve("dev").expect("dev");
+        assert_eq!(
+            dev.oauth.unwrap().client_id,
+            "94488449-5769-4ecf-8bf4-9f8aa83859a3"
+        );
+        assert_eq!(
+            dev.extra.get("api_url").map(String::as_str),
+            Some("https://api.dev-godaddy.com")
+        );
+
+        let test = envs.resolve("test").expect("test");
+        assert_eq!(
+            test.oauth.unwrap().client_id,
+            "e710d8b9-f4e5-4178-b1bf-98dfcd15d4ed"
+        );
+        assert!(envs.list().contains(&"dev".to_owned()));
+        assert!(envs.list().contains(&"test".to_owned()));
+    }
+
+    /// When a name appears in both the flat top-level shape and the nested
+    /// `[environments.<name>]` shape, the nested entry's fields win, and
+    /// fields it doesn't set still fall back to the flat entry.
+    #[test]
+    fn nested_environments_table_wins_over_flat_entry_for_same_name() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("environments.toml");
+        std::fs::write(
+            &file,
+            r#"
+[prod]
+client_id = "flat-client"
+api_url = "https://api.flat.example.com"
+
+[environments.prod]
+client_id = "nested-client"
+"#,
+        )
+        .expect("write file");
+
+        let envs = Environments::new("prod")
+            .with_config_file(true)
+            .with_config_file_path_override(file);
+
+        let prod = envs.resolve("prod").expect("prod");
+        assert_eq!(prod.oauth.unwrap().client_id, "nested-client");
+        assert_eq!(
+            prod.extra.get("api_url").map(String::as_str),
+            Some("https://api.flat.example.com")
+        );
     }
 
     #[test]
