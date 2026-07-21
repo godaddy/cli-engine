@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.7](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.6...cli-engine-v0.4.7) (2026-07-21)
+
+
+### Features
+
+* **auth:** announce OAuth token receipt after the PKCE callback ([#57](https://github.com/godaddy/cli-engine/issues/57)) ([e09160e](https://github.com/godaddy/cli-engine/commit/e09160e0bdc9351e7bc904d6f7b78d22d0d19cb2))
+* **command:** let commands opt in to handler-driven --dry-run ([#56](https://github.com/godaddy/cli-engine/issues/56)) ([a89c16c](https://github.com/godaddy/cli-engine/commit/a89c16c2d1b5877c9e721e81cdabeddeb012ca6a))
+
 ## [0.4.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.5...cli-engine-v0.4.6) (2026-07-17)
 
 
