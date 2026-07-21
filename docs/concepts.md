@@ -303,6 +303,8 @@ Command metadata includes:
 - `auth_metadata`: provider-specific key/value data.
 - `tier`: risk classification.
 - `mutates`: dry-run prompt behavior.
+- `handles_dry_run`: opts a mutating command out of the generic `--dry-run` short-circuit so its
+  handler runs the preview itself; see [Risk Tiers](#risk-tiers).
 - `default_fields`: default field projection.
 
 Applications can attach `CliConfig::meta_resolver` to adjust metadata globally after command
@@ -425,6 +427,10 @@ Risk tiers classify command impact:
 | `destructive` | Irreversibly removes or compromises state | Short-circuited by `--dry-run`. |
 
 `CommandSpec::mutates(true)` also marks a command as dry-run promptable.
+
+By default, a dry-run-promptable command is short-circuited generically: the handler never runs, and the engine renders a fixed `{"command": ..., "action": "dry-run: would execute"}` envelope, without triggering an auth flow. A command that wants a real, command-specific preview instead calls `CommandSpec::handles_dry_run(true)`, which skips that short-circuit and lets the handler run as normal (still subject to its declared `AuthRequirement` — e.g. a `Required` command now resolves its credential under `--dry-run` too). The handler should run its real validation unconditionally, check `CommandContext::dry_run()` to skip only the mutating step, and tag its preview result with `CommandResult::with_dry_run()` so middleware records a `dry-run` (not `ok`) audit/activity outcome and envelope.
+
+If the dry-run branch never needs a credential (no live API call to build the preview), prefer `CommandSpec::auth_optional()` over the default `Required` and check `dry_run()` before calling `credential()`/`credential_with_scopes()` — otherwise `Required` resolves the credential (and may trigger an interactive login) before the handler even runs, purely to render a preview that never uses it. If the preview itself needs a live call to build an accurate diff, `Required` and `Optional` behave identically, so the simpler fail-closed `Required` is fine.
 
 ## Feature Flags & Stages
 

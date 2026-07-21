@@ -66,6 +66,20 @@ impl CommandResult {
         self.metadata.next_actions = actions;
         self
     }
+
+    /// Marks this result as a dry-run preview outcome.
+    ///
+    /// Call only when the handler actually skipped its mutating step because
+    /// [`CommandContext::dry_run`] was `true`. This requires the command to
+    /// have opted in via [`CommandSpec::handles_dry_run`] — otherwise
+    /// middleware never invokes the handler under `--dry-run` in the first
+    /// place. Middleware tags the audit/activity outcome as `dry-run` instead
+    /// of `ok` and marks the rendered envelope accordingly.
+    #[must_use]
+    pub fn with_dry_run(mut self) -> Self {
+        self.metadata.dry_run = true;
+        self
+    }
 }
 
 impl From<Value> for CommandResult {
@@ -80,6 +94,11 @@ impl From<Value> for CommandResult {
 pub struct CommandResultMetadata {
     /// Suggested follow-up actions for the caller.
     pub next_actions: Vec<NextAction>,
+    /// Set by [`CommandResult::with_dry_run`] when a
+    /// [`handles_dry_run`](CommandSpec::handles_dry_run) handler skipped its
+    /// mutating step. Middleware tags the audit/activity outcome and envelope
+    /// as `dry-run` instead of `ok` when this is `true`.
+    pub dry_run: bool,
 }
 
 /// Runtime context passed to advanced command handlers.
@@ -125,6 +144,19 @@ impl CommandContext {
     #[must_use]
     pub fn config(&self) -> &crate::config::ConfigFile {
         &self.middleware.config
+    }
+
+    /// Returns whether `--dry-run` was passed for this invocation.
+    ///
+    /// Only meaningful for commands that opted in via
+    /// [`CommandSpec::handles_dry_run`] — other mutating commands never reach
+    /// their handler under `--dry-run` at all, so there's nothing to branch
+    /// on. An opted-in handler should run its real validation unconditionally
+    /// and use this only to skip the actual mutating I/O, returning a preview
+    /// result tagged with [`CommandResult::with_dry_run`].
+    #[must_use]
+    pub fn dry_run(&self) -> bool {
+        self.middleware.dry_run
     }
 
     /// Resolves the active [`Environment`](crate::environments::Environment) for
@@ -253,6 +285,29 @@ pub struct CommandSpec {
     pub tier: Option<Tier>,
     /// Explicit dry-run prompt marker for commands without a tier.
     pub mutates: bool,
+    /// Opts this command into handler-driven `--dry-run`.
+    ///
+    /// Set with [`handles_dry_run`](CommandSpec::handles_dry_run). When
+    /// `true`, the engine skips its generic `--dry-run` short-circuit for
+    /// this command and invokes the handler as normal (still respecting the
+    /// command's [`AuthRequirement`]). The handler is responsible for
+    /// running its real validation unconditionally, checking
+    /// [`CommandContext::dry_run`] to skip only the mutating I/O, and tagging
+    /// its preview result with [`CommandResult::with_dry_run`].
+    ///
+    /// **Requires a context-aware handler.** Only handlers built with
+    /// [`RuntimeCommandSpec::new_with_context`] (or
+    /// [`new_streaming`](RuntimeCommandSpec::new_streaming)) receive a
+    /// [`CommandContext`] and can call [`CommandContext::dry_run`]. A handler
+    /// built with [`RuntimeCommandSpec::new`]/[`new_typed`](RuntimeCommandSpec::new_typed)
+    /// only receives `(CredentialResolver, args)` — it has no way to observe
+    /// `--dry-run` at all, so opting it into `handles_dry_run` would silently
+    /// execute the handler's real side effects under `--dry-run` instead of
+    /// skipping them. `RuntimeCommandSpec::new`/`new_typed` debug-assert
+    /// against this misuse; release builds do not, so treat the assert as a
+    /// development-time safety net, not the actual guarantee — only pair this
+    /// field with `new_with_context`.
+    pub handles_dry_run: bool,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// Command-specific `clap` arguments.
@@ -506,6 +561,21 @@ impl CommandSpec {
         self
     }
 
+    /// Opts this command into handler-driven `--dry-run` instead of the
+    /// engine's generic short-circuit.
+    ///
+    /// See [`handles_dry_run`](CommandSpec::handles_dry_run) (the field) for
+    /// the contract a handler must follow once it opts in — in particular,
+    /// **only use this with a context-aware handler**
+    /// ([`RuntimeCommandSpec::new_with_context`]); a `new`/`new_typed`
+    /// handler can't observe `--dry-run` and would execute its real side
+    /// effects under it regardless of this flag.
+    #[must_use]
+    pub fn handles_dry_run(mut self, handles: bool) -> Self {
+        self.handles_dry_run = handles;
+        self
+    }
+
     /// Builds middleware metadata from the spec.
     #[must_use]
     pub fn metadata(&self) -> CommandMeta {
@@ -532,6 +602,7 @@ impl CommandSpec {
 
         CommandMeta {
             dry_run_prompt: self.mutates || self.tier.is_some_and(Tier::is_mutating),
+            handles_dry_run: self.handles_dry_run,
             auth_metadata,
             scopes,
         }
@@ -708,6 +779,10 @@ impl RuntimeCommandSpec {
     /// Call `resolver.resolve().await?` only when the command actually needs a
     /// credential; commands that ignore it never trigger an auth flow. The
     /// handler returns [`CommandResult`], where `data` must be JSON-serializable.
+    ///
+    /// This handler shape has no [`CommandContext`], so it can never call
+    /// [`CommandContext::dry_run`] — do not pair this with
+    /// [`CommandSpec::handles_dry_run`] (debug-asserted; see that field's docs).
     #[must_use]
     pub fn new<F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
     where
@@ -715,6 +790,14 @@ impl RuntimeCommandSpec {
         Fut: Future<Output = Result<Output>> + Send + 'static,
         Output: Into<CommandResult> + Send + 'static,
     {
+        debug_assert!(
+            !spec.handles_dry_run,
+            "command {:?} sets handles_dry_run but RuntimeCommandSpec::new's handler \
+             (CredentialResolver, args) has no CommandContext and can never check \
+             CommandContext::dry_run(), so it would silently run its real side effects \
+             under --dry-run; use RuntimeCommandSpec::new_with_context instead",
+            spec.name
+        );
         Self {
             spec,
             streaming_handler: None,
@@ -774,6 +857,10 @@ impl RuntimeCommandSpec {
     /// If the handler also needs the command path, middleware, or user-supplied
     /// args, use [`RuntimeCommandSpec::new_with_context`] with
     /// [`CommandContext::typed_args`] instead.
+    ///
+    /// This handler shape has no [`CommandContext`], so it can never call
+    /// [`CommandContext::dry_run`] — do not pair this with
+    /// [`CommandSpec::handles_dry_run`] (debug-asserted; see that field's docs).
     #[must_use]
     pub fn new_typed<T, F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
     where
@@ -782,6 +869,14 @@ impl RuntimeCommandSpec {
         Fut: Future<Output = Result<Output>> + Send + 'static,
         Output: Into<CommandResult> + Send + 'static,
     {
+        debug_assert!(
+            !spec.handles_dry_run,
+            "command {:?} sets handles_dry_run but RuntimeCommandSpec::new_typed's handler \
+             (CredentialResolver, args) has no CommandContext and can never check \
+             CommandContext::dry_run(), so it would silently run its real side effects \
+             under --dry-run; use RuntimeCommandSpec::new_with_context instead",
+            spec.name
+        );
         let handler = Arc::new(handler);
         Self {
             spec,
