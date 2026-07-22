@@ -447,7 +447,7 @@ CommandSpec::new("preview", "Preview an upcoming feature")
 
 `Cli::add_module`/`add_module_group` resolve the cascading flag for every node while building the command tree, record each flagged node into a `FlagRegistry`, and prune any node whose effective flag isn't visible under the active `FlagPolicy`. Pruning removes the node from the tree entirely — help, `--schema`, search, and dispatch — not just from a listing.
 
-`FlagPolicy` has two fields: `min_stage` (the floor a node's stage must meet or exceed) and `overrides` (per-key stage substitutions, checked before `min_stage`). The policy is assembled from `CliConfig::with_min_stage`/`CliConfig::with_feature_override`, layered with the active environment's own `min_stage`/`feature_overrides` when `with_environments` is configured; see [Environments](environments.md) for the environment-layer precedence and TOML shape.
+`FlagPolicy` has two fields: `min_stage` (the floor a node's stage must meet or exceed) and `overrides` (per-key stage substitutions, checked before `min_stage`). The policy is assembled from `CliConfig::with_min_stage`/`CliConfig::with_feature_override`, then the global `${APP_ID}_MIN_STAGE` env var override when set, then layered with the active environment's own `min_stage`/`feature_overrides` when `with_environments` is configured — each layer can loosen or tighten beyond the one before it; see [Environments](environments.md) for the environment-layer precedence and TOML shape.
 
 The built-in `flags` command group exposes:
 

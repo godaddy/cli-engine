@@ -297,6 +297,13 @@ pub fn output_env_var(app_id: &str) -> String {
     format!("{}_OUTPUT", app_id_env_prefix(app_id))
 }
 
+/// Derives the per-application global minimum-stage override env var from an
+/// app id, e.g. `godaddy` -> `GODADDY_MIN_STAGE`, `gdx` -> `GDX_MIN_STAGE`.
+#[must_use]
+pub fn min_stage_env_var(app_id: &str) -> String {
+    format!("{}_MIN_STAGE", app_id_env_prefix(app_id))
+}
+
 /// Computes the default output format for `app_id`, consulting the
 /// `${APP_ID}_OUTPUT` env override, the `[output].format` key in
 /// `config.toml`, and whether stdout is an interactive terminal. Used as the
@@ -613,7 +620,7 @@ mod tests {
     use clap::Command;
 
     use super::{
-        debug_component_enabled, output_env_var, register_global_flags,
+        debug_component_enabled, min_stage_env_var, output_env_var, register_global_flags,
         resolve_default_output_format,
     };
 
@@ -711,6 +718,13 @@ mod tests {
         assert_eq!(output_env_var("godaddy"), "GODADDY_OUTPUT");
         assert_eq!(output_env_var("gdx"), "GDX_OUTPUT");
         assert_eq!(output_env_var("my-cli"), "MY_CLI_OUTPUT");
+    }
+
+    #[test]
+    fn min_stage_env_var_is_derived_from_app_id() {
+        assert_eq!(min_stage_env_var("godaddy"), "GODADDY_MIN_STAGE");
+        assert_eq!(min_stage_env_var("gdx"), "GDX_MIN_STAGE");
+        assert_eq!(min_stage_env_var("my-cli"), "MY_CLI_MIN_STAGE");
     }
 
     #[test]

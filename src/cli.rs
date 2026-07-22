@@ -29,8 +29,8 @@ use crate::{
     flags::{
         GlobalFlags, derive_bool_flags, derive_value_flags, extract_command_path,
         extract_output_format, extract_search_query, global_flags_from_matches,
-        has_true_schema_flag, output_env_var, register_global_flags, register_reason_flag,
-        resolve_default_output_format,
+        has_true_schema_flag, min_stage_env_var, output_env_var, register_global_flags,
+        register_reason_flag, resolve_default_output_format,
     },
     guide::{guide_content, render_guide_human},
     module::{Module, ModuleContext},
@@ -948,17 +948,24 @@ impl Cli {
             middleware.environments = Some(Arc::clone(environments));
         }
         // Seed the merged flag policy before any module/group is registered so
-        // pruning during `add_module`/`add_module_group` below sees it. The active
-        // environment's fully-resolved (compiled + file + env-var) min_stage/
-        // feature_overrides, when present, take precedence over the consumer-level
-        // CliConfig policy — an environment can loosen or tighten visibility beyond
-        // what the binary set in code. Environment resolution failure (e.g. an
-        // unknown active environment name) is tolerated here and falls back to the
-        // consumer-level policy only: this is just flag-policy computation, not full
-        // environment validation, and must not make `Cli::new` fail in a new way.
-        // The normal lazy paths (`env get`/`env info`, `ctx.environment()?`) still
-        // surface a real resolution error to the user when a command needs it.
+        // pruning during `add_module`/`add_module_group` below sees it. Precedence,
+        // lowest to highest: the consumer-level `CliConfig` policy, then the global
+        // `${APP_ID}_MIN_STAGE` env override (app-wide, independent of the
+        // environments system), then the active environment's fully-resolved
+        // (compiled + file + env-var) min_stage/feature_overrides — each layer can
+        // loosen or tighten visibility beyond the one before it. Environment
+        // resolution failure (e.g. an unknown active environment name) is tolerated
+        // here and falls back to the layers below it only: this is just flag-policy
+        // computation, not full environment validation, and must not make
+        // `Cli::new` fail in a new way. The normal lazy paths (`env get`/`env info`,
+        // `ctx.environment()?`) still surface a real resolution error to the user
+        // when a command needs it. A malformed `${APP_ID}_MIN_STAGE` is handled the
+        // same way: `global_min_stage_override` logs a warning and is ignored
+        // rather than failing `Cli::new` or any later run.
         let mut flag_policy = config.flag_policy();
+        if let Some(min_stage) = global_min_stage_override(&config.app_id) {
+            flag_policy.min_stage = min_stage;
+        }
         if let Some(environments) = &middleware.environments
             && let Ok(env) = environments.resolve(&middleware.env)
         {
@@ -2556,6 +2563,24 @@ fn parse_duration_seconds(raw: &str) -> Option<f64> {
     None
 }
 
+/// Reads the global `${APP_ID}_MIN_STAGE` override (see [`min_stage_env_var`]).
+///
+/// Best-effort, like [`crate::config::ConfigFile::load`]'s handling of a
+/// malformed config file: returns `None` when the var is unset, and also
+/// `None` (after logging a warning) when it is set but fails to parse as a
+/// [`Stage`], so a typo'd value cannot take the CLI down.
+fn global_min_stage_override(app_id: &str) -> Option<Stage> {
+    let var = min_stage_env_var(app_id);
+    let value = std::env::var(&var).ok()?;
+    value.parse::<Stage>().map_or_else(
+        |err| {
+            tracing::warn!(var = %var, value = %value, error = %err, "ignoring invalid min-stage override");
+            None
+        },
+        Some,
+    )
+}
+
 fn render_cli_error(
     middleware: &Middleware,
     err: &(dyn std::error::Error + 'static),
@@ -3861,6 +3886,63 @@ mod feature_flag_pruning_tests {
 
         assert!(cli.commands.contains_key("gated-mod-3:list"));
         assert!(has_subcommand(&cli.root, "gated-mod-3"));
+    }
+
+    static GLOBAL_MIN_STAGE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that removes an env var on drop, even if a test panics.
+    struct GlobalMinStageEnvGuard(&'static str);
+    impl Drop for GlobalMinStageEnvGuard {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: test holds GLOBAL_MIN_STAGE_ENV_LOCK; clean up on any exit
+            // including panic.
+            unsafe { std::env::remove_var(self.0) }
+        }
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn global_min_stage_override_is_a_noop_when_unset() {
+        let _g = GLOBAL_MIN_STAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Not set by this test, and vanishingly unlikely to be set in any real
+        // environment (it does not correspond to a real app id).
+        assert_eq!(global_min_stage_override("unset-min-stage-app"), None);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn global_min_stage_override_parses_a_valid_value() {
+        let _g = GLOBAL_MIN_STAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        const VAR: &str = "VALID_MIN_STAGE_APP_MIN_STAGE";
+        // SAFETY: serialized by GLOBAL_MIN_STAGE_ENV_LOCK; guard removes the var
+        // on any exit including panic.
+        unsafe { std::env::set_var(VAR, "beta") };
+        let _guard = GlobalMinStageEnvGuard(VAR);
+
+        assert_eq!(
+            global_min_stage_override("valid-min-stage-app"),
+            Some(Stage::Beta)
+        );
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn global_min_stage_override_ignores_a_malformed_value() {
+        let _g = GLOBAL_MIN_STAGE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        const VAR: &str = "BAD_MIN_STAGE_APP_MIN_STAGE";
+        // SAFETY: serialized by GLOBAL_MIN_STAGE_ENV_LOCK; guard removes the var
+        // on any exit including panic.
+        unsafe { std::env::set_var(VAR, "nightly") };
+        let _guard = GlobalMinStageEnvGuard(VAR);
+
+        assert_eq!(global_min_stage_override("bad-min-stage-app"), None);
     }
 }
 

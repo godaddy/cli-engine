@@ -347,6 +347,123 @@ async fn env_var_min_stage_override_reaches_dispatch_end_to_end() {
     assert_eq!(dispatch.exit_code, 0, "{}", dispatch.rendered);
 }
 
+// A distinctive, test-scoped app id so its derived `GLOBALMINSTAGE_MIN_STAGE`
+// env var cannot collide with a real app id a developer/CI might have set.
+const GLOBAL_MIN_STAGE_APP_ID: &str = "globalminstage";
+const GLOBAL_MIN_STAGE_VAR: &str = "GLOBALMINSTAGE_MIN_STAGE";
+
+#[tokio::test]
+async fn global_min_stage_env_var_reveals_previously_pruned_subtree_end_to_end() {
+    // Confirms the full `${APP_ID}_MIN_STAGE` env var -> `Cli::new` ->
+    // `FlagPolicy` -> tree-pruning -> clap chain works with no `with_environments`
+    // configured at all: the global override is independent of the environments
+    // system.
+    let _lock = lock();
+    let _guard = EnvGuard::set(GLOBAL_MIN_STAGE_VAR, "experimental");
+
+    let cli = Cli::new(
+        CliConfig::new(
+            "globalminstage",
+            "Global min-stage test",
+            GLOBAL_MIN_STAGE_APP_ID,
+        )
+        .with_module(gated_module()),
+    );
+
+    let help = cli.run(["globalminstage", "devkit"]).await;
+    assert_eq!(help.exit_code, 0, "{}", help.rendered);
+    assert!(help.rendered.contains("sandbox"), "{}", help.rendered);
+
+    let dispatch = cli
+        .run([
+            "globalminstage",
+            "devkit",
+            "sandbox",
+            "peek",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(dispatch.exit_code, 0, "{}", dispatch.rendered);
+}
+
+const GLOBAL_MIN_STAGE_ENV_APP_ID: &str = "globalminstageenv";
+const GLOBAL_MIN_STAGE_ENV_VAR: &str = "GLOBALMINSTAGEENV_MIN_STAGE";
+
+#[tokio::test]
+async fn active_environment_tightens_beyond_global_min_stage_env_var_end_to_end() {
+    // The global env var loosens the consumer's Ga default to Experimental, but
+    // the active environment's own compiled `min_stage` (Ga) re-tightens it —
+    // proving the global override is folded in *before* the environment layer,
+    // which can still loosen or tighten beyond it.
+    let _lock = lock();
+    let _guard = EnvGuard::set(GLOBAL_MIN_STAGE_ENV_VAR, "experimental");
+
+    let cli = Cli::new(
+        CliConfig::new(
+            "globalminstageenv",
+            "Global min-stage + environment test",
+            GLOBAL_MIN_STAGE_ENV_APP_ID,
+        )
+        .with_environments(Arc::new(
+            Environments::new("globalminstageenv-env").with_environment(
+                "globalminstageenv-env",
+                EnvironmentDef::new().with_min_stage(Stage::Ga),
+            ),
+        ))
+        .with_module(gated_module()),
+    );
+
+    let help = cli.run(["globalminstageenv", "devkit"]).await;
+    assert_eq!(help.exit_code, 0, "{}", help.rendered);
+    assert!(help.rendered.contains("status"), "{}", help.rendered);
+    assert!(!help.rendered.contains("sandbox"), "{}", help.rendered);
+
+    let dispatch = cli
+        .run([
+            "globalminstageenv",
+            "devkit",
+            "sandbox",
+            "peek",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_ne!(dispatch.exit_code, 0, "{}", dispatch.rendered);
+    assert!(
+        dispatch.rendered.contains("unknown command"),
+        "{}",
+        dispatch.rendered
+    );
+}
+
+const MALFORMED_GLOBAL_MIN_STAGE_APP_ID: &str = "malformedminstage";
+const MALFORMED_GLOBAL_MIN_STAGE_VAR: &str = "MALFORMEDMINSTAGE_MIN_STAGE";
+
+#[tokio::test]
+async fn malformed_global_min_stage_env_var_is_ignored_end_to_end() {
+    // A malformed `${APP_ID}_MIN_STAGE` is best-effort, like a malformed
+    // config.toml: it is ignored (with a warning logged) rather than failing
+    // the run, so the Ga default stays in force and the Experimental subgroup
+    // stays pruned.
+    let _lock = lock();
+    let _guard = EnvGuard::set(MALFORMED_GLOBAL_MIN_STAGE_VAR, "nightly");
+
+    let cli = Cli::new(
+        CliConfig::new(
+            "malformedminstage",
+            "Malformed global min-stage test",
+            MALFORMED_GLOBAL_MIN_STAGE_APP_ID,
+        )
+        .with_module(gated_module()),
+    );
+
+    let help = cli.run(["malformedminstage", "devkit"]).await;
+    assert_eq!(help.exit_code, 0, "{}", help.rendered);
+    assert!(help.rendered.contains("status"), "{}", help.rendered);
+    assert!(!help.rendered.contains("sandbox"), "{}", help.rendered);
+}
+
 /// Builds a module whose group carries its own feature flag (so it, and its
 /// unflagged `list` command, both cascade to `key`/`stage`).
 fn flagged_module(group_name: &'static str, key: &'static str, stage: Stage) -> Module {
