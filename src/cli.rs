@@ -3890,14 +3890,46 @@ mod feature_flag_pruning_tests {
 
     static GLOBAL_MIN_STAGE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// RAII guard that removes an env var on drop, even if a test panics.
-    struct GlobalMinStageEnvGuard(&'static str);
+    /// RAII guard that restores (or removes) an env var on drop, even if a
+    /// test panics.
+    struct GlobalMinStageEnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl GlobalMinStageEnvGuard {
+        /// Sets `key` to `value`. Caller must hold [`GLOBAL_MIN_STAGE_ENV_LOCK`]
+        /// for the guard's entire lifetime.
+        #[allow(unsafe_code)]
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: serialized by GLOBAL_MIN_STAGE_ENV_LOCK; guard
+            // restores/removes on any exit incl. panic.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+
+        /// Removes `key` (if set). Caller must hold
+        /// [`GLOBAL_MIN_STAGE_ENV_LOCK`] for the guard's entire lifetime.
+        #[allow(unsafe_code)]
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            // SAFETY: serialized by GLOBAL_MIN_STAGE_ENV_LOCK; guard restores
+            // on any exit incl. panic.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prev }
+        }
+    }
     impl Drop for GlobalMinStageEnvGuard {
         #[allow(unsafe_code)]
         fn drop(&mut self) {
-            // SAFETY: test holds GLOBAL_MIN_STAGE_ENV_LOCK; clean up on any exit
-            // including panic.
-            unsafe { std::env::remove_var(self.0) }
+            // SAFETY: test holds GLOBAL_MIN_STAGE_ENV_LOCK; restore/clean up
+            // on any exit including panic.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
         }
     }
 
@@ -3907,8 +3939,12 @@ mod feature_flag_pruning_tests {
         let _g = GLOBAL_MIN_STAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Not set by this test, and vanishingly unlikely to be set in any real
-        // environment (it does not correspond to a real app id).
+        const VAR: &str = "UNSET_MIN_STAGE_APP_MIN_STAGE";
+        // Explicitly unset (and restored on drop) rather than assumed absent,
+        // so the test is hermetic even if a developer/CI happens to have this
+        // var set.
+        let _guard = GlobalMinStageEnvGuard::unset(VAR);
+
         assert_eq!(global_min_stage_override("unset-min-stage-app"), None);
     }
 
@@ -3919,10 +3955,7 @@ mod feature_flag_pruning_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         const VAR: &str = "VALID_MIN_STAGE_APP_MIN_STAGE";
-        // SAFETY: serialized by GLOBAL_MIN_STAGE_ENV_LOCK; guard removes the var
-        // on any exit including panic.
-        unsafe { std::env::set_var(VAR, "beta") };
-        let _guard = GlobalMinStageEnvGuard(VAR);
+        let _guard = GlobalMinStageEnvGuard::set(VAR, "beta");
 
         assert_eq!(
             global_min_stage_override("valid-min-stage-app"),
@@ -3937,10 +3970,7 @@ mod feature_flag_pruning_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         const VAR: &str = "BAD_MIN_STAGE_APP_MIN_STAGE";
-        // SAFETY: serialized by GLOBAL_MIN_STAGE_ENV_LOCK; guard removes the var
-        // on any exit including panic.
-        unsafe { std::env::set_var(VAR, "nightly") };
-        let _guard = GlobalMinStageEnvGuard(VAR);
+        let _guard = GlobalMinStageEnvGuard::set(VAR, "nightly");
 
         assert_eq!(global_min_stage_override("bad-min-stage-app"), None);
     }
