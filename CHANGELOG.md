@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.8](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.7...cli-engine-v0.4.8) (2026-07-21)
+
+
+### Bug Fixes
+
+* **environments:** accept gddy's nested environments.toml shape ([#59](https://github.com/godaddy/cli-engine/issues/59)) ([e9209b4](https://github.com/godaddy/cli-engine/commit/e9209b424e07b897250abe03fe313c10387e358d))
+
 ## [0.4.7](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.6...cli-engine-v0.4.7) (2026-07-21)
 
 
