@@ -536,6 +536,13 @@ mod tests {
     /// (mentioning `app_id`) rather than a misleading config-path failure.
     #[test]
     fn persist_active_without_app_id_errors_clearly() {
+        // `persist_active` resolves "prod" internally, which reads the same
+        // PROD_* env vars the tests above mutate; take ENV_LOCK so a
+        // concurrently-running test can't inject a value (e.g. an invalid
+        // PROD_MIN_STAGE) that fails resolution for an unrelated reason.
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let err = sample()
             .persist_active("prod")
             .expect_err("persist without app_id should fail");

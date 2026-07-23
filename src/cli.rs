@@ -2446,6 +2446,28 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
     middleware.search = flags.search.clone();
 }
 
+/// Builds the transport debug logger implied by a parsed `--debug` pattern,
+/// without publishing it anywhere.
+///
+/// Pure so tests can assert on the decision (`--debug` pattern -> enabled or
+/// not) without touching the process-wide default logger, which every
+/// [`Cli::run`] call republishes — including the many unrelated tests that
+/// exercise `cli.run(...)` with no `--debug` flag and would otherwise race
+/// with an assertion on the shared global.
+fn debug_transport_logger_for(
+    debug: &str,
+    extra_redacted: &[String],
+) -> Arc<dyn crate::transport::TransportLogger> {
+    if crate::debug_component_enabled(debug, "transport") {
+        Arc::new(
+            crate::transport::StderrTransportLogger::new()
+                .with_redacted_headers(extra_redacted.iter().cloned()),
+        )
+    } else {
+        Arc::new(crate::transport::NoopTransportLogger)
+    }
+}
+
 /// Installs (or clears) the process-wide transport debug logger from the parsed
 /// `--debug` pattern.
 ///
@@ -2457,16 +2479,10 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
 /// `transport` is not selected so the explicit setting always reflects the
 /// current invocation rather than a stale process-global from an earlier one.
 fn install_debug_transport_logger(debug: &str, extra_redacted: &[String]) {
-    let logger: Arc<dyn crate::transport::TransportLogger> =
-        if crate::debug_component_enabled(debug, "transport") {
-            Arc::new(
-                crate::transport::StderrTransportLogger::new()
-                    .with_redacted_headers(extra_redacted.iter().cloned()),
-            )
-        } else {
-            Arc::new(crate::transport::NoopTransportLogger)
-        };
-    crate::transport::set_default_transport_logger(logger);
+    crate::transport::set_default_transport_logger(debug_transport_logger_for(
+        debug,
+        extra_redacted,
+    ));
 }
 
 async fn run_with_timeout<F, T>(
@@ -3511,23 +3527,20 @@ mod user_agent_tests {
 
     #[test]
     fn install_debug_transport_logger_tracks_the_debug_pattern() {
-        let _guard = crate::transport::client::TRANSPORT_LOGGER_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = crate::transport::client::RestoreDefaultTransportLogger;
+        // Asserts on `debug_transport_logger_for`'s decision directly rather
+        // than publishing to and reading back the process-wide default
+        // logger, which `Cli::run` republishes on every call — including the
+        // many unrelated tests that call `cli.run(...)` with no `--debug`
+        // flag and would otherwise race with this assertion.
 
-        // `transport` selected -> an active (enabled) logger is published.
-        install_debug_transport_logger("transport", &[]);
-        assert!(crate::transport::default_transport_logger().enabled());
+        // `transport` selected -> an active (enabled) logger is built.
+        assert!(debug_transport_logger_for("transport", &[]).enabled());
 
-        // Wildcard with transport excluded -> back to a disabled (noop) logger.
-        install_debug_transport_logger("*,-transport", &[]);
-        assert!(!crate::transport::default_transport_logger().enabled());
+        // Wildcard with transport excluded -> a disabled (noop) logger.
+        assert!(!debug_transport_logger_for("*,-transport", &[]).enabled());
 
         // Empty pattern -> disabled (noop).
-        install_debug_transport_logger("transport", &[]);
-        install_debug_transport_logger("", &[]);
-        assert!(!crate::transport::default_transport_logger().enabled());
+        assert!(!debug_transport_logger_for("", &[]).enabled());
     }
 }
 

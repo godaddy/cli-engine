@@ -155,26 +155,6 @@ pub fn debug_log_reqwest_response(status: StatusCode, headers: &header::HeaderMa
     });
 }
 
-/// Serializes unit tests that mutate the process-wide default transport logger
-/// so they cannot observe one another's writes. Integration tests in
-/// `tests/foundation.rs` run in a separate binary and use their own lock.
-#[cfg(test)]
-pub(crate) static TRANSPORT_LOGGER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Restores the process-wide default transport logger to the noop on drop, so a
-/// panicking assertion in a test that installs a logger cannot leak it into
-/// later tests. Declare it after acquiring [`TRANSPORT_LOGGER_TEST_LOCK`] so the
-/// reset runs while the lock is still held.
-#[cfg(test)]
-pub(crate) struct RestoreDefaultTransportLogger;
-
-#[cfg(test)]
-impl Drop for RestoreDefaultTransportLogger {
-    fn drop(&mut self) {
-        set_default_transport_logger(Arc::new(NoopTransportLogger));
-    }
-}
-
 #[derive(serde::Deserialize)]
 struct GraphQlError {
     message: String,
