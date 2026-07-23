@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.9](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.8...cli-engine-v0.4.9) (2026-07-23)
+
+
+### Features
+
+* **cli:** add global ${APP_ID}_MIN_STAGE env var override ([#62](https://github.com/godaddy/cli-engine/issues/62)) ([6f22980](https://github.com/godaddy/cli-engine/commit/6f2298094262f4fbfce4ca3e52845d37a267fbba))
+
 ## [0.4.8](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.7...cli-engine-v0.4.8) (2026-07-21)
 
 
