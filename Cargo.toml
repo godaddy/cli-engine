@@ -1,6 +1,6 @@
 [package]
 name = "cli-engine"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2024"
 description = "Rust CLI framework for consistent command modules"
 repository = "https://github.com/godaddy/cli-engine"
