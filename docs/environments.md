@@ -11,14 +11,15 @@ When `CliConfig::with_environments` is called, the engine:
 
 ## Resolution Layers
 
-`Environments::resolve(name)` builds a fully-merged `Environment` by applying three layers in order.
+`Environments::resolve(name)` builds a fully-merged `Environment` by applying layers in order.
 Later layers win over earlier ones.
 
+0. **`Environments::with_init(fn(&str) -> EnvironmentDef)`**: callback for creating a scaffolded environment structure. This is where you'll define field validators/defaults.
 1. **Compiled-in defaults** — `EnvironmentDef` values registered with `Environments::with_environment` in the application source code.
 2. **`environments.toml`** — the file at `<config-dir>/<app-id>/environments.toml`, when enabled with `Environments::with_config_file(true)`.
-3. **Environment-variable overrides** — `<ENV>_OAUTH_CLIENT_ID`, `<ENV>_OAUTH_AUTH_URL`, `<ENV>_OAUTH_TOKEN_URL`, and `<ENV>_<KEY>` for each bag key already present in the merged record.
+3. **Environment-variable overrides** — `<ENV>_OAUTH_CLIENT_ID`, `<ENV>_OAUTH_AUTH_URL`, `<ENV>_OAUTH_TOKEN_URL`, and `<ENV>_<FIELD>` for custom config fields. A custom field is only env-var-eligible once some earlier layer has set it (in `extra`) or registered a `with_field_default` for it — an env var alone cannot introduce a brand-new field name.
 
-A name that is unknown to all three layers — not in compiled defaults, not in the file, and not resolvable — returns an error listing the known names.
+A name unknown to layers 1–2 can still resolve via `Environments::with_fallback(fn(&str) -> Option<EnvironmentDef>)`, consulted only when both are silent; `with_init`'s scaffold still applies to a fallback-defined name too.
 
 ## environments.toml Schema
 
@@ -56,7 +57,7 @@ The `extra` bag is printed verbatim by `env info`, so it must not hold secrets.
 The prefix is the environment name uppercased with `-` replaced by `_` (`ote` → `OTE`, `prod-us` → `PROD_US`).
 Names that differ only by `-` vs `_` map to the same prefix and will collide; avoid such names.
 
-The three OAuth fields are always overridable:
+The three OAuth fields are always overridable (subject to a registered validator, see below):
 
 | Variable | Field overridden |
 | --- | --- |
@@ -64,10 +65,15 @@ The three OAuth fields are always overridable:
 | `<ENV>_OAUTH_AUTH_URL` | `oauth.auth_url` |
 | `<ENV>_OAUTH_TOKEN_URL` | `oauth.token_url` |
 
-Scopes are **not** env-var overridable; set them in the compiled-in layer or `environments.toml`.
+CLI-specific config bag keys are overridable via `<ENV>_<KEY>` as well, subject to the eligibility rule noted under [Resolution Layers](#resolution-layers) (the key must already be set or have a registered default).
 
-Bag keys in `Environment::extra` are overridable via `<ENV>_<KEY>` only when the key is already present in the merged record after layers 1 and 2.
-For example, `api_url` must exist in either the compiled defaults or the file before `PROD_API_URL` has any effect.
+## Per-Field Validation and Computed Defaults
+
+`EnvironmentDef::with_field_validator(key, fn(&str) -> bool)` rejects attempted config field overrides when the predicate returns `false`: it logs a warning and keeps the pre-override value rather than failing resolution outright (unlike a malformed `<ENV>_MIN_STAGE`/`<ENV>_FEATURE_<KEY>`, which has no validator concept and does fail resolution — see below).
+
+`EnvironmentDef::with_field_default(key, fn(&Environment) -> String)` computes a value for `key` at the end of resolution, but only when every layer left it absent or blank. Reach for this specifically when `key`'s fallback depends on *another* field that a later layer could still override.
+
+`key` may be any config key, built-in (like the OAuth `"client_id"`/`"auth_url"`/`"token_url"`) or custom.
 
 ## Feature-Flag Layering
 
@@ -112,7 +118,7 @@ env var for a specific key            (<ENV>_FEATURE_<KEY>)
 
 The environment layer is applied only when environment resolution succeeds: if resolving the active environment errors — a malformed `<ENV>_MIN_STAGE` value, an unparsable `environments.toml`, or an active-environment name unknown to every layer — the engine silently falls back to the layers below it (the global `${APP_ID}_MIN_STAGE` override, if set, then the consumer-level `CliConfig` policy) rather than failing the run. In the intended usage pattern (the consumer ships a `Ga` default and an environment *loosens* it for dev/experimental builds) this fails **closed**: a resolution error simply leaves the stricter compiled default in force. But the reverse pattern is unsafe: if a consumer ships a *permissive* compiled `min_stage` (or feature override) and relies on an environment to *tighten* it for a public/production build, a resolution error fails **open** — the gated nodes the environment would have re-hidden are mounted under the permissive compiled policy instead. A security model that depends on an environment tightening a permissive compiled default must therefore validate that environment resolution succeeds (for example via `env info`, or by not caching a build whose active environment cannot resolve) rather than assuming resolution errors cannot occur in practice; do not rely on this crate to fail closed for that direction.
 
-Unlike the OAuth/bag-key layers, this resolved `FlagPolicy` is fixed for the life of the `Cli`: `Cli::new` computes it once from the environment seeded at startup (the sticky/persisted active environment, or the compiled default) and uses it immediately afterward to prune the command tree that `--help`, `--schema`, and dispatch all read from. Passing `--env <name>` on the command line (`apply_env_flag`) updates `middleware.env` for that invocation — which does change which environment other commands such as `env info` or an OAuth provider resolve against — but it does not recompute `flag_policy` or re-prune the already-built tree, so it has no effect on feature-flag visibility for that run, including what `flags list`/`flags info` report, since they read the same startup-fixed policy; the visible/hidden set is fixed to whichever environment was active when the process started, and `--env` cannot widen or narrow it.
+Feature-flag *pruning* (which nodes exist in the command tree at all) happens once, at `Cli::new` construction time — `Cli::new` prescans startup argv for `--env` (falling back to real process argv, or overridden via `CliConfig::with_startup_args`) specifically so a startup `--env` can affect which flagged commands get mounted, not just which environment's OAuth/config a later invocation dispatches against. A later per-invocation `--env` (parsed for real by clap once the tree already exists) changes dispatch but cannot re-prune an already-built tree. For a normal one-shot process (`Cli::execute`/`execute()`), these two `--env` values are identical (both come from the same real argv), so this distinction doesn't matter in practice — it only matters for a caller that builds one `Cli` and later runs it with a synthetic argv (see `CliConfig::with_startup_args`'s doc).
 
 ## Active Environment
 
@@ -124,8 +130,8 @@ The active environment controls which environment is targeted when no `--env` fl
 2. The `environment.active` key in the per-application config file (persisted by `env set`).
 3. The default set in `Environments::new(default_env)`.
 
-`env set <name>` validates that the environment is defined — by a compiled default or `environments.toml` — and then writes `environment.active` to the config file.
-Environment variables override fields of a defined environment but cannot define a new, selectable environment on their own, so a name known only through `<ENV>_*` variables is rejected.
+`env set <name>` validates that the environment is defined — by a compiled default, `environments.toml`, or a consumer-registered `Environments::with_fallback` — and then writes `environment.active` to the config file.
+An `<ENV>_*` env var alone cannot define a new, selectable environment unless the consumer registered a `with_fallback` that recognizes it (see [Resolution Layers](#resolution-layers)); absent that, a name known only through env vars is rejected.
 The next invocation (without `--env`) picks it up from layer 2.
 
 The built-in commands are:
