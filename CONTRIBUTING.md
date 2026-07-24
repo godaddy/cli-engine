@@ -47,6 +47,9 @@ cargo test --all-targets
 cargo test --doc
 ```
 
+Some human-output tests assume width 80 (non-TTY). On a wide interactive terminal they
+can fail; pipe so stdout is not a TTY: `cargo test --all-targets 2>&1 | cat`
+
 ## Release Process
 
 Releases are automated via [release-please](https://github.com/googleapis/release-please).

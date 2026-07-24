@@ -24,6 +24,9 @@ pub struct Envelope {
     /// Suggested follow-up actions for the caller (agent or human).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<NextAction>,
+    /// Optional recovery guidance for failed commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
     #[serde(default, skip)]
     serialization_error: Option<String>,
 }
@@ -180,6 +183,7 @@ impl Envelope {
             error: None,
             warnings: Vec::new(),
             next_actions: Vec::new(),
+            fix: None,
             serialization_error,
         }
     }
@@ -203,6 +207,7 @@ impl Envelope {
             }),
             warnings: Vec::new(),
             next_actions: Vec::new(),
+            fix: None,
             serialization_error: None,
         }
     }
@@ -231,6 +236,7 @@ impl Envelope {
             }),
             warnings: Vec::new(),
             next_actions: Vec::new(),
+            fix: None,
             serialization_error: None,
         }
     }
@@ -239,6 +245,16 @@ impl Envelope {
     #[must_use]
     pub fn with_next_actions(mut self, actions: Vec<NextAction>) -> Self {
         self.next_actions = actions;
+        self
+    }
+
+    /// Attaches recovery guidance for a failed command (no-op on success envelopes).
+    #[must_use]
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        if self.error.is_some() {
+            let fix = fix.into();
+            self.fix = (!fix.is_empty()).then_some(fix);
+        }
         self
     }
 
@@ -354,6 +370,7 @@ impl Metadata {
 /// Builds an error envelope, preserving structured details from known error types.
 #[must_use]
 pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &str) -> Envelope {
+    let fix = find_error_fix(err);
     if let Some((code, mut sys, request_id)) = find_detailed_error(err) {
         if sys.is_empty() {
             sys = system.to_owned();
@@ -376,10 +393,25 @@ pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &st
             }),
             warnings: Vec::new(),
             next_actions: Vec::new(),
+            fix,
             serialization_error: None,
         };
     }
-    Envelope::error("ERROR", err.to_string(), system)
+    Envelope::error("ERROR", err.to_string(), system).with_fix(fix.unwrap_or_default())
+}
+
+fn find_error_fix(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(crate::CliCoreError::Fix { fix, .. }) =
+            error.downcast_ref::<crate::CliCoreError>()
+            && !fix.is_empty()
+        {
+            return Some(fix.clone());
+        }
+        current = error.source();
+    }
+    None
 }
 
 fn find_detailed_error(
@@ -432,6 +464,7 @@ fn find_detailed_error(
                     | crate::CliCoreError::System { .. }
                     | crate::CliCoreError::Detailed { .. }
                     | crate::CliCoreError::ExitCode { .. }
+                    | crate::CliCoreError::Fix { .. }
                     | crate::CliCoreError::Io(_)
                     | crate::CliCoreError::Json(_),
                 )
@@ -486,6 +519,10 @@ pub fn build_detailed_error_envelope(err: &dyn DetailedError, system: &str) -> E
         }),
         warnings: Vec::new(),
         next_actions: Vec::new(),
+        fix: err
+            .error_fix()
+            .map(std::borrow::Cow::into_owned)
+            .filter(|fix| !fix.is_empty()),
         serialization_error: None,
     }
 }
@@ -601,5 +638,64 @@ mod tests {
             "Application name"
         );
         assert_eq!(parsed["next_actions"][0]["params"]["app"]["required"], true);
+    }
+
+    #[test]
+    fn fix_appears_in_serialized_error_envelope() {
+        let envelope = Envelope::error("AUTH_REQUIRED", "not logged in", "auth")
+            .with_fix("Run `auth login` and retry.");
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
+        let parsed: Value =
+            serde_json::from_str(&serialized).expect("serialized envelope is valid JSON");
+
+        assert_eq!(parsed["error"]["code"], "AUTH_REQUIRED");
+        assert_eq!(parsed["fix"], "Run `auth login` and retry.");
+    }
+
+    #[test]
+    fn fix_omitted_from_json_when_empty() {
+        let envelope = Envelope::error("ERROR", "boom", "domain");
+
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
+        let parsed: Value =
+            serde_json::from_str(&serialized).expect("serialized envelope is valid JSON");
+
+        assert!(
+            parsed.get("fix").is_none(),
+            "empty fix must not appear in JSON output"
+        );
+    }
+
+    #[test]
+    fn build_error_envelope_preserves_fix_wrapper() {
+        let err = crate::CliCoreError::with_fix(
+            "Run `auth login` and retry.",
+            crate::CliCoreError::message("not logged in"),
+        );
+        let envelope = build_error_envelope(&err, "auth");
+
+        assert_eq!(envelope.fix.as_deref(), Some("Run `auth login` and retry."));
+        assert_eq!(
+            envelope.error.as_ref().map(|e| e.message.as_str()),
+            Some("not logged in")
+        );
+    }
+
+    #[test]
+    fn success_envelope_ignores_with_fix() {
+        let envelope = Envelope::success(json!({"ok": true}), "api").with_fix("should not stick");
+
+        assert!(
+            envelope.fix.is_none(),
+            "fix is error-only and must not attach to success"
+        );
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes to JSON");
+        let parsed: Value =
+            serde_json::from_str(&serialized).expect("serialized envelope is valid JSON");
+        assert!(
+            parsed.get("fix").is_none(),
+            "fix must not appear on success"
+        );
     }
 }

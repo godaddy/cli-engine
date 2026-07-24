@@ -485,6 +485,24 @@ Ok(CommandResult::new(json!({ "id": "app-1", "name": "my-app" }))
 `description` fields. This is the primary mechanism for agent-first CLIs to tell callers what
 command to run next.
 
+### fix
+
+Failed commands can attach recovery guidance as a top-level `fix` on the error envelope
+(omitted when absent; human output prints a `Fix:` line). Prefer this over embedding guidance in
+`error.message`.
+
+```rust
+use cli_engine::CliCoreError;
+
+Err(CliCoreError::with_fix(
+    "Run `auth login` and retry.",
+    CliCoreError::message("not logged in"),
+))
+```
+
+Typed errors can override `DetailedError::error_fix`; `CliCoreError::with_detailed_error` preserves
+it.
+
 The output pipeline runs in this order:
 
 1. **Filtering**: `--filter` evaluates a JMESPath predicate against each item in list data.
@@ -512,9 +530,11 @@ to process exit codes by category. Callers that need a specific process status c
 `CliCoreError::with_exit_code(code, source)` so the code survives normal error wrapping. Callers
 with backend-structured errors can implement `DetailedError` and wrap them with
 `CliCoreError::with_detailed_error(source)` before passing them through framework chains; this
-preserves error code, system, and request id in the rendered envelope. Command execution wraps
-generic business errors with the command's configured system, or the top-level command path when no
-system is configured, so error envelopes preserve the same backend attribution as success envelopes.
+preserves error code, system, and request id in the rendered envelope. Recovery guidance belongs in
+the top-level `fix` field (`CliCoreError::with_fix`, `DetailedError::error_fix`, or
+`Envelope::with_fix`). Command execution wraps generic business errors with the command's configured
+system, or the top-level command path when no system is configured, so error envelopes preserve the
+same backend attribution as success envelopes.
 
 ## Schemas
 
