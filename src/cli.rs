@@ -2668,6 +2668,13 @@ fn global_min_stage_override(app_id: &str) -> Option<Stage> {
 fn prescan_env_flag(mut args: impl Iterator<Item = String>) -> Option<String> {
     let mut result = None;
     while let Some(arg) = args.next() {
+        // clap's end-of-options sentinel: everything after a bare `--` is a
+        // positional argument, never a flag, no matter what it looks like.
+        // This scan must agree, or `app cmd -- --env dev` would be
+        // misread as a real `--env` override.
+        if arg == "--" {
+            break;
+        }
         let value = if let Some(v) = arg.strip_prefix("--env=") {
             Some(v.to_owned())
         } else if arg == "--env" {
@@ -3777,6 +3784,21 @@ mod prescan_env_flag_tests {
         assert_eq!(
             prescan_env_flag(argv(&["--env=-foo"])),
             Some("-foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn stops_at_the_end_of_options_sentinel() {
+        // Everything after a bare `--` is positional to clap, never a flag —
+        // `app cmd -- --env dev` must not be read as a real `--env` override.
+        assert_eq!(prescan_env_flag(argv(&["cmd", "--", "--env", "dev"])), None);
+    }
+
+    #[test]
+    fn a_real_flag_before_the_sentinel_is_still_found() {
+        assert_eq!(
+            prescan_env_flag(argv(&["--env", "dev", "--", "positional"])),
+            Some("dev".to_owned())
         );
     }
 }
