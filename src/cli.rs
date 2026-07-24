@@ -386,8 +386,7 @@ impl CliConfig {
     }
 
     /// Overrides the argv [`Cli::new`] prescans for `--env` before pruning the
-    /// command tree, instead of the real process argv. Mainly present for
-    /// tests.
+    /// command tree, instead of the real process argv.
     ///
     /// Only meaningful alongside [`with_environments`](Self::with_environments)
     /// — otherwise `Cli::new` never registers `--env` or does the prescan at
@@ -395,9 +394,19 @@ impl CliConfig {
     /// name and skipped, the same convention [`Cli::run`]/[`Cli::execute_from`]
     /// use for their own `args` parameter.
     ///
-    /// A test that configures `with_environments` should call this (even with
-    /// an empty iterator) to keep construction hermetic; without it, `Cli::new`
-    /// reads whatever real argv the test binary itself was invoked with.
+    /// This matters beyond tests: tree pruning is decided once, at `Cli::new`
+    /// time, from either this override or real process argv — never from the
+    /// `args` a later [`Cli::run`]/[`Cli::execute_from`] call receives. Any
+    /// caller that builds the `Cli` once and later runs it with a synthetic
+    /// argv (e.g. a wrapper binary invoking it programmatically, or a fixed
+    /// argument list unrelated to `std::env::args_os()`) should pass the same
+    /// `--env` here too, or an environment named only in the later call's
+    /// argv won't have been consulted for pruning, and a flagged command that
+    /// environment would reveal (or hide) can disagree with what actually
+    /// dispatches. A test that configures `with_environments` should call
+    /// this (even with an empty iterator) to keep construction hermetic;
+    /// without it, `Cli::new` reads whatever real argv the test binary itself
+    /// was invoked with.
     #[must_use]
     pub fn with_startup_args<I, S>(mut self, args: I) -> Self
     where
@@ -1128,6 +1137,11 @@ impl Cli {
     }
 
     /// Executes the CLI with caller-provided args and output writers.
+    ///
+    /// If `args` carries a synthetic `--env` unrelated to real process argv
+    /// (or to whatever [`CliConfig::with_startup_args`] this `Cli` was built
+    /// with), command-tree pruning — decided once, at construction time —
+    /// won't reflect it; see `with_startup_args`'s doc for why.
     pub async fn execute_from<I, S, O, E>(
         &self,
         args: I,
@@ -1553,6 +1567,9 @@ impl Cli {
     }
 
     /// Runs the CLI with provided args and captures the rendered result.
+    ///
+    /// Same `--env`/tree-pruning caveat as [`Cli::execute_from`]: see
+    /// [`CliConfig::with_startup_args`].
     pub async fn run<I, S>(&self, args: I) -> CliRunOutput
     where
         I: IntoIterator<Item = S>,

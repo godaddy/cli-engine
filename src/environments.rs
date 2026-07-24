@@ -564,21 +564,36 @@ fn merge_into(name: &str, dst: &mut EnvironmentDef, src: &EnvironmentDef) {
         if dst.field_validators.get("client_id").is_none_or(|f| f(v)) {
             dst.client_id = Some(v.clone());
         } else {
-            tracing::warn!(env = name, key = "client_id", value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(
+                env = name,
+                key = "client_id",
+                value_len = v.len(),
+                "rejecting invalid override; keeping prior value"
+            );
         }
     }
     if let Some(v) = &src.auth_url {
         if dst.field_validators.get("auth_url").is_none_or(|f| f(v)) {
             dst.auth_url = Some(v.clone());
         } else {
-            tracing::warn!(env = name, key = "auth_url", value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(
+                env = name,
+                key = "auth_url",
+                value_len = v.len(),
+                "rejecting invalid override; keeping prior value"
+            );
         }
     }
     if let Some(v) = &src.token_url {
         if dst.field_validators.get("token_url").is_none_or(|f| f(v)) {
             dst.token_url = Some(v.clone());
         } else {
-            tracing::warn!(env = name, key = "token_url", value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(
+                env = name,
+                key = "token_url",
+                value_len = v.len(),
+                "rejecting invalid override; keeping prior value"
+            );
         }
     }
     if src.scopes.is_some() {
@@ -611,7 +626,7 @@ fn merge_into(name: &str, dst: &mut EnvironmentDef, src: &EnvironmentDef) {
         if accepted {
             dst.extra.insert(k.clone(), v.clone());
         } else {
-            tracing::warn!(env = name, key = %k, value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(env = name, key = %k, value_len = v.len(), "rejecting invalid override; keeping prior value");
         }
     }
     for (k, f) in &src.field_validators {
@@ -654,7 +669,7 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
         if def.field_validators.get("client_id").is_none_or(|f| f(&v)) {
             def.client_id = Some(v);
         } else {
-            tracing::warn!(var = %client_id_var, value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(var = %client_id_var, value_len = v.len(), "rejecting invalid override; keeping prior value");
         }
     }
     let auth_url_var = format!("{prefix}_OAUTH_AUTH_URL");
@@ -662,7 +677,7 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
         if def.field_validators.get("auth_url").is_none_or(|f| f(&v)) {
             def.auth_url = Some(v);
         } else {
-            tracing::warn!(var = %auth_url_var, value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(var = %auth_url_var, value_len = v.len(), "rejecting invalid override; keeping prior value");
         }
     }
     let token_url_var = format!("{prefix}_OAUTH_TOKEN_URL");
@@ -670,7 +685,7 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
         if def.field_validators.get("token_url").is_none_or(|f| f(&v)) {
             def.token_url = Some(v);
         } else {
-            tracing::warn!(var = %token_url_var, value = %v, "rejecting invalid override; keeping prior value");
+            tracing::warn!(var = %token_url_var, value_len = v.len(), "rejecting invalid override; keeping prior value");
         }
     }
     // A key with a registered default is eligible even if no layer has set
@@ -704,7 +719,7 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
             if accepted {
                 def.extra.insert(key, v);
             } else {
-                tracing::warn!(%var, value = %v, "rejecting invalid override; keeping prior value");
+                tracing::warn!(%var, value_len = v.len(), "rejecting invalid override; keeping prior value");
             }
         }
     }
@@ -727,16 +742,24 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
 }
 
 /// Turns a fully-merged declaration into a resolved [`Environment`]. OAuth is
-/// present when a client id was set by any layer. Any [`FieldDefault`]s
-/// registered by a layer are then computed, but only for a key left empty
-/// or absent by every layer — computed against the `Environment` as merged
-/// so far, so two defaults never see each other's computed values.
+/// present when a client id was set by any layer. [`FieldDefault`]s are then
+/// computed in two phases, only for a key left empty or absent by every
+/// layer:
 ///
-/// `"auth_url"`/`"token_url"` defaults apply to [`OAuthConfig`]'s fields
-/// (only when `oauth` is present at all — i.e. some layer set `client_id`),
-/// not to the bag; a `"client_id"` default is not supported (there is no
-/// sensible fallback for a missing credential) and is silently a no-op if
-/// registered, same as any other key nothing ever consults.
+/// 1. Bag-key defaults are computed together against the same pre-phase
+///    snapshot of `env.extra` (via `.collect()` before any are inserted), so
+///    no bag-key default sees another bag-key default's computed value.
+/// 2. `"auth_url"`/`"token_url"` defaults (applied to [`OAuthConfig`]'s
+///    fields, only when `oauth` is present — i.e. some layer set
+///    `client_id` — never to the bag) are computed *after* phase 1's results
+///    are inserted into `env.extra`, so they *can* observe a bag-key
+///    default's computed value — deliberately, since a URL default
+///    typically derives from a bag field like `api_url` that may itself
+///    only be a default.
+///
+/// A `"client_id"` default is not supported (there is no sensible fallback
+/// for a missing credential) and is silently a no-op if registered, same as
+/// any other key nothing ever consults.
 fn finalize(name: &str, def: EnvironmentDef) -> Environment {
     let EnvironmentDef {
         client_id,
