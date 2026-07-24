@@ -19,6 +19,10 @@ pub trait DetailedError: std::error::Error {
     fn error_system(&self) -> Option<Cow<'static, str>>;
     /// Optional backend request id.
     fn error_request_id(&self) -> Option<Cow<'static, str>>;
+    /// Optional recovery hint for the envelope's top-level `fix` (defaults to [`None`]).
+    fn error_fix(&self) -> Option<Cow<'static, str>> {
+        None
+    }
 }
 
 /// Framework error type.
@@ -85,6 +89,15 @@ pub enum CliCoreError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Wrapped source error with a recovery hint for the output envelope.
+    #[error("{source}")]
+    Fix {
+        /// Recovery guidance shown as the envelope's top-level `fix`.
+        fix: String,
+        /// Source error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// IO error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -138,6 +151,28 @@ impl CliCoreError {
         }
     }
 
+    /// Wraps a source error with a recovery hint for the output envelope.
+    ///
+    /// Empty hints do not wrap: a [`CliCoreError`] source is returned as-is.
+    #[must_use]
+    pub fn with_fix(
+        fix: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        let fix = fix.into();
+        if fix.is_empty() {
+            let source: Box<dyn std::error::Error + Send + Sync> = Box::new(source);
+            return match source.downcast::<Self>() {
+                Ok(inner) => *inner,
+                Err(source) => Self::Message(source.to_string()),
+            };
+        }
+        Self::Fix {
+            fix,
+            source: Box::new(source),
+        }
+    }
+
     /// Captures structured metadata from a detailed source error.
     #[must_use]
     pub fn with_detailed_error(source: impl DetailedError + Send + Sync + 'static) -> Self {
@@ -148,30 +183,41 @@ impl CliCoreError {
         let request_id = source
             .error_request_id()
             .map_or_else(String::new, Cow::into_owned);
-        Self::Detailed {
-            code,
-            system,
-            request_id,
-            source: Box::new(source),
-        }
+        let fix = source.error_fix().map_or_else(String::new, Cow::into_owned);
+        Self::with_fix(
+            fix,
+            Self::Detailed {
+                code,
+                system,
+                request_id,
+                source: Box::new(source),
+            },
+        )
     }
 
     /// Reports whether this error originates from credential resolution.
     ///
     /// True for [`MissingAuthProvider`](Self::MissingAuthProvider) and
-    /// [`AuthProvider`](Self::AuthProvider). The engine uses this to classify a
-    /// command outcome as `auth-error` rather than a generic command error, based
-    /// on the error a handler actually returns — so a handler that swallows a
-    /// resolution failure and then fails for another reason is not misclassified.
+    /// [`AuthProvider`](Self::AuthProvider), including when those variants are
+    /// wrapped by [`Fix`](Self::Fix) or [`ExitCode`](Self::ExitCode). The engine
+    /// uses this to classify a command outcome as `auth-error` rather than a
+    /// generic command error, based on the error a handler actually returns — so
+    /// a handler that swallows a resolution failure and then fails for another
+    /// reason is not misclassified.
     #[must_use]
     pub fn is_auth(&self) -> bool {
-        matches!(
-            self,
-            Self::MissingAuthProvider(_) | Self::AuthProvider { .. }
-        )
+        match self {
+            Self::MissingAuthProvider(_) | Self::AuthProvider { .. } => true,
+            Self::ExitCode { source, .. } | Self::Fix { source, .. } => {
+                source.downcast_ref::<Self>().is_some_and(Self::is_auth)
+            }
+            _ => false,
+        }
     }
 
     /// Returns backend/system attribution when the error carries one.
+    ///
+    /// [`Fix`](Self::Fix) / [`ExitCode`](Self::ExitCode) wrappers delegate to their source.
     #[must_use]
     pub fn system(&self) -> Option<&str> {
         match self {
@@ -182,6 +228,9 @@ impl CliCoreError {
             {
                 Some(system)
             }
+            Self::ExitCode { source, .. } | Self::Fix { source, .. } => {
+                source.downcast_ref::<Self>().and_then(Self::system)
+            }
             Self::MissingAuthProvider(_)
             | Self::AuthProvider { .. }
             | Self::InvalidOutputFormat(_)
@@ -189,7 +238,6 @@ impl CliCoreError {
             | Self::SystemMessage { .. }
             | Self::System { .. }
             | Self::Detailed { .. }
-            | Self::ExitCode { .. }
             | Self::Io(_)
             | Self::Json(_)
             | Self::Transport(_) => None,
@@ -231,6 +279,7 @@ pub fn exit_code_for_error(err: &(dyn std::error::Error + 'static)) -> i32 {
                 CliCoreError::System { .. }
                 | CliCoreError::Detailed { .. }
                 | CliCoreError::ExitCode { .. }
+                | CliCoreError::Fix { .. }
                 | CliCoreError::Message(_)
                 | CliCoreError::SystemMessage { .. }
                 | CliCoreError::Io(_)
@@ -254,5 +303,73 @@ pub fn exit_code_for_error(err: &(dyn std::error::Error + 'static)) -> i32 {
         6
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_walks_through_fix_and_exit_code_wrappers() {
+        let err = CliCoreError::with_exit_code(
+            2,
+            CliCoreError::with_fix(
+                "Run auth login",
+                CliCoreError::message_for_system("auth", "not logged in"),
+            ),
+        );
+        assert_eq!(err.system(), Some("auth"));
+    }
+
+    #[test]
+    fn with_detailed_error_fix_preserves_system() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("not logged in")]
+        struct AuthRequired;
+
+        impl DetailedError for AuthRequired {
+            fn error_code(&self) -> Cow<'static, str> {
+                Cow::Borrowed("AUTH_REQUIRED")
+            }
+
+            fn error_system(&self) -> Option<Cow<'static, str>> {
+                Some(Cow::Borrowed("auth"))
+            }
+
+            fn error_request_id(&self) -> Option<Cow<'static, str>> {
+                None
+            }
+
+            fn error_fix(&self) -> Option<Cow<'static, str>> {
+                Some(Cow::Borrowed("Run auth login"))
+            }
+        }
+
+        let err = CliCoreError::with_detailed_error(AuthRequired);
+        assert!(matches!(err, CliCoreError::Fix { .. }));
+        assert_eq!(err.system(), Some("auth"));
+    }
+
+    #[test]
+    fn empty_with_fix_does_not_wrap() {
+        let inner = CliCoreError::message_for_system("auth", "not logged in");
+        let err = CliCoreError::with_fix("", inner);
+        assert!(matches!(err, CliCoreError::SystemMessage { .. }));
+        assert_eq!(err.system(), Some("auth"));
+        assert!(!matches!(err, CliCoreError::Fix { .. }));
+    }
+
+    #[test]
+    fn is_auth_walks_through_fix_and_exit_code_wrappers() {
+        let err = CliCoreError::with_exit_code(
+            2,
+            CliCoreError::with_fix(
+                "Run auth login",
+                CliCoreError::MissingAuthProvider("primary".to_owned()),
+            ),
+        );
+        assert!(err.is_auth());
+        assert!(!CliCoreError::with_fix("hint", CliCoreError::message("boom")).is_auth());
     }
 }

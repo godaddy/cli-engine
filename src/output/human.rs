@@ -328,7 +328,13 @@ pub fn render_human_with_view(
     // present, a "Next steps:" footer built from the envelope's next_actions
     // (these otherwise appear only in JSON/TOON).
     if let Some(error) = &envelope.error {
-        return format!("Error: {}\n", error.message);
+        let mut out = format!("Error: {}\n", error.message);
+        if let Some(fix) = &envelope.fix {
+            out.push_str("Fix: ");
+            out.push_str(fix);
+            out.push('\n');
+        }
+        return out;
     }
     let available_width = terminal_width();
     let (mut body, notes) = match &envelope.data {
@@ -910,6 +916,15 @@ mod tests {
         let out = render_human(&envelope);
         assert!(out.starts_with("Error:"), "{out}");
         assert!(!out.contains("Next steps"), "{out}");
+        assert!(!out.contains("Fix:"), "{out}");
+    }
+
+    #[test]
+    fn error_output_appends_fix_line() {
+        let envelope =
+            Envelope::error("AUTH_REQUIRED", "not logged in", "auth").with_fix("Run auth login");
+        let out = render_human(&envelope);
+        assert_eq!(out, "Error: not logged in\nFix: Run auth login\n");
     }
 
     #[test]

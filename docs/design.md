@@ -318,6 +318,7 @@ Handlers return JSON-serializable data and a system id. Middleware wraps the res
 - `error`
 - `warnings`
 - `next_actions`
+- `fix` (optional recovery guidance on failed commands)
 
 Metadata is omitted unless `--verbose` is requested. Selective metadata is supported with
 comma-separated verbose fields.
@@ -409,6 +410,7 @@ Use:
 - `CliCoreError::with_system` to wrap a source error with backend attribution.
 - `CliCoreError::with_detailed_error` when a source error has structured code/system/request id.
 - `CliCoreError::with_exit_code` when a specific process exit code must survive error wrapping.
+- `CliCoreError::with_fix` when recovery guidance should appear as the envelope's top-level `fix`.
 
 ## Testing Design
 

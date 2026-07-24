@@ -809,6 +809,7 @@ struct InitFailure {
     code: String,
     system: String,
     request_id: String,
+    fix: Option<String>,
     exit_code: i32,
 }
 
@@ -824,19 +825,21 @@ impl InitFailure {
             code,
             system,
             request_id,
+            fix: envelope.fix,
             exit_code: exit_code_for_error(err),
         }
     }
 
     fn into_error(self) -> CliCoreError {
+        let message = CliCoreError::SystemMessage {
+            message: self.message,
+            system: self.system,
+            code: self.code,
+            request_id: self.request_id,
+        };
         CliCoreError::with_exit_code(
             self.exit_code,
-            CliCoreError::SystemMessage {
-                message: self.message,
-                system: self.system,
-                code: self.code,
-                request_id: self.request_id,
-            },
+            CliCoreError::with_fix(self.fix.unwrap_or_default(), message),
         )
     }
 }
