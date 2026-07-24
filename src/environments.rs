@@ -383,10 +383,25 @@ impl Environments {
     }
 
     /// Resolves an environment by name, merging in any file or environment
-    /// variable overrides
+    /// variable overrides.
     ///
-    /// Returns an error when `name` is not known or when the environments file
-    /// exists but cannot be read or parsed.
+    /// When only `client_id` was set on the matching layer(s), the returned
+    /// [`Environment`]'s `oauth.auth_url` / `oauth.token_url` are empty
+    /// strings; treat an empty endpoint as "fall back to the provider's
+    /// default base endpoints".
+    ///
+    /// # Blocking
+    ///
+    /// When the config-file layer is enabled, this performs synchronous
+    /// filesystem I/O to read and parse `environments.toml` (like
+    /// [`list`](Self::list)). Resolve once at startup rather than per
+    /// request inside an async handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `name` is not known to any layer (including a
+    /// registered [`with_fallback`](Self::with_fallback)) or when the
+    /// environments file exists but cannot be read or parsed.
     pub fn resolve(&self, name: &str) -> Result<Environment> {
         let compiled = self.defs.get(name);
         // Parse the file once; reuse for both membership check and merge.

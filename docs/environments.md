@@ -17,7 +17,7 @@ Later layers win over earlier ones.
 0. **`Environments::with_init(fn(&str) -> EnvironmentDef)`**: callback for creating a scaffolded environment structure. This is where you'll define field validators/defaults.
 1. **Compiled-in defaults** — `EnvironmentDef` values registered with `Environments::with_environment` in the application source code.
 2. **`environments.toml`** — the file at `<config-dir>/<app-id>/environments.toml`, when enabled with `Environments::with_config_file(true)`.
-3. **Environment-variable overrides** — `<ENV>_OAUTH_CLIENT_ID`, `<ENV>_OAUTH_AUTH_URL`, `<ENV>_OAUTH_TOKEN_URL`, and `<ENV>_<FIELD>` for custom config fields.
+3. **Environment-variable overrides** — `<ENV>_OAUTH_CLIENT_ID`, `<ENV>_OAUTH_AUTH_URL`, `<ENV>_OAUTH_TOKEN_URL`, and `<ENV>_<FIELD>` for custom config fields. A custom field is only env-var-eligible once some earlier layer has set it (in `extra`) or registered a `with_field_default` for it — an env var alone cannot introduce a brand-new field name.
 
 A name unknown to layers 1–2 can still resolve via `Environments::with_fallback(fn(&str) -> Option<EnvironmentDef>)`, consulted only when both are silent; `with_init`'s scaffold still applies to a fallback-defined name too.
 
@@ -65,13 +65,13 @@ The three OAuth fields are always overridable (subject to a registered validator
 | `<ENV>_OAUTH_AUTH_URL` | `oauth.auth_url` |
 | `<ENV>_OAUTH_TOKEN_URL` | `oauth.token_url` |
 
-CLI-specific config bag keys are overridable via `<ENV>_<KEY>` as well.
+CLI-specific config bag keys are overridable via `<ENV>_<KEY>` as well, subject to the eligibility rule noted under [Resolution Layers](#resolution-layers) (the key must already be set or have a registered default).
 
 ## Per-Field Validation and Computed Defaults
 
 `EnvironmentDef::with_field_validator(key, fn(&str) -> bool)` rejects attempted config field overrides when the predicate returns `false`: it logs a warning and keeps the pre-override value rather than failing resolution outright (unlike a malformed `<ENV>_MIN_STAGE`/`<ENV>_FEATURE_<KEY>`, which has no validator concept and does fail resolution — see below).
 
-`EnvironmentDef::with_field_default(key, fn(&Environment) -> String)` computes a value for `key` at the end of resolution, but only when every layer left it absent or blank. Reach for this specifically when `key`'s fallback depends on *another* field that a later layer could still override
+`EnvironmentDef::with_field_default(key, fn(&Environment) -> String)` computes a value for `key` at the end of resolution, but only when every layer left it absent or blank. Reach for this specifically when `key`'s fallback depends on *another* field that a later layer could still override.
 
 `key` may be any config key, built-in (like the OAuth `"client_id"`/`"auth_url"`/`"token_url"`) or custom.
 
