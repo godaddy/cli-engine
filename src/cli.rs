@@ -283,6 +283,9 @@ pub struct CliConfig {
     /// middleware, and exposes it to handlers through
     /// [`CommandContext::environment`](crate::command::CommandContext::environment).
     pub environments: Option<Arc<crate::environments::Environments>>,
+    /// Explicit argv override for [`Cli::new`]'s startup `--env` prescan,
+    /// mainly used to make tests hermetic.
+    pub startup_args: Option<Vec<std::ffi::OsString>>,
     /// Minimum feature stage required for a flagged command, group, or module
     /// to remain mounted.
     ///
@@ -379,6 +382,29 @@ impl CliConfig {
         environments: Arc<crate::environments::Environments>,
     ) -> Self {
         self.environments = Some(environments);
+        self
+    }
+
+    /// Overrides the argv [`Cli::new`] prescans for `--env` before pruning the
+    /// command tree, instead of the real process argv. Mainly present for
+    /// tests.
+    ///
+    /// Only meaningful alongside [`with_environments`](Self::with_environments)
+    /// — otherwise `Cli::new` never registers `--env` or does the prescan at
+    /// all, so this is silently unused. Element `0` is treated as the program
+    /// name and skipped, the same convention [`Cli::run`]/[`Cli::execute_from`]
+    /// use for their own `args` parameter.
+    ///
+    /// A test that configures `with_environments` should call this (even with
+    /// an empty iterator) to keep construction hermetic; without it, `Cli::new`
+    /// reads whatever real argv the test binary itself was invoked with.
+    #[must_use]
+    pub fn with_startup_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString>,
+    {
+        self.startup_args = Some(args.into_iter().map(Into::into).collect());
         self
     }
 
@@ -940,11 +966,32 @@ impl Cli {
             .human_views
             .merge(&global_human_view_registry_snapshot());
         if let Some(environments) = &config.environments {
-            // Seed the sticky/default active environment now; the global `--env`
-            // flag overrides it per invocation in `run_with_depth`. The same
-            // `Arc` the consumer shared with any `PkceAuthProvider` is reused, so
-            // the file layer and active-env persistence resolve consistently.
-            middleware.env = environments.effective_active(None, &middleware.config);
+            // Seed the sticky/default active environment now, but let a
+            // startup `--env` win over it if one is present: `prescan_env_flag`
+            // scans `startup_args` (or, when unset, the real process argv) the
+            // same way `apply_env_flag` will parse it for real per invocation
+            // — this is what lets a same-invocation `--env <name>` affect the
+            // `flag_policy` computed below (and therefore which flagged
+            // commands get pruned), not just `middleware.env`. The real,
+            // per-invocation value used for dispatch still comes from
+            // `apply_env_flag`'s clap parse in `run_with_depth`; this prescan
+            // only decides tree shape earlier than clap otherwise could,
+            // since that decision can't be revisited once the tree is built.
+            let startup_args = config
+                .startup_args
+                .clone()
+                .unwrap_or_else(|| std::env::args_os().collect());
+            let startup_env_flag = prescan_env_flag(
+                startup_args
+                    .iter()
+                    .skip(1) // argv[0] is the program name, same convention `run`/`execute_from` use
+                    .map(|arg| arg.to_string_lossy().into_owned()),
+            );
+            // The same `Arc` the consumer shared with any `PkceAuthProvider` is
+            // reused, so the file layer and active-env persistence resolve
+            // consistently.
+            middleware.env =
+                environments.effective_active(startup_env_flag.as_deref(), &middleware.config);
             middleware.environments = Some(Arc::clone(environments));
         }
         // Seed the merged flag policy before any module/group is registered so
@@ -2581,6 +2628,49 @@ fn global_min_stage_override(app_id: &str) -> Option<Stage> {
     )
 }
 
+/// Pure scan over an arg iterator for the last `--env <value>`/`--env=<value>`
+/// occurrence — used only to seed [`Cli::new`]'s `flag_policy` (and therefore
+/// which flagged commands get pruned) before the command tree is built, since
+/// that decision can't be revisited once real argv is parsed. The real,
+/// per-invocation `--env` value used for dispatch still comes from
+/// `apply_env_flag`'s clap-based parse, unchanged; this scan never replaces
+/// it, only decides tree shape earlier than clap otherwise could
+/// (clap's own [`clap::Command::ignore_errors`] does not help here — it
+/// still requires the rest of the argv to parse against a *known* subcommand
+/// structure, and at prescan time no domain modules are registered yet, so a
+/// real command path makes it bail on capturing global flags too).
+///
+/// Scans the *entire* argv and keeps the *last* non-empty `--env`/`--env=`
+/// value, rather than stopping at the first match — a global `--env` and a
+/// command-local one sharing the same arg id can both appear in one
+/// invocation, and whichever clap resolves as the effective value
+/// (empirically, the last one) is the one this scan must agree with. An
+/// empty value (`--env=` with nothing after the `=`, or `--env` immediately
+/// followed by another flag with nothing captured) is ignored rather than
+/// becoming a literal empty-string candidate.
+fn prescan_env_flag(mut args: impl Iterator<Item = String>) -> Option<String> {
+    let mut result = None;
+    while let Some(arg) = args.next() {
+        let value = if let Some(v) = arg.strip_prefix("--env=") {
+            Some(v.to_owned())
+        } else if arg == "--env" {
+            // A space-separated value that itself looks like another flag
+            // (starts with `-`) is not a value at all — clap rejects this
+            // outright ("a value is required for '--env <ENV>' but none was
+            // supplied"), so this scan must not treat it as one either. An
+            // explicit `--env=-foo` is unambiguous and still accepted, same
+            // as clap's own disambiguation rule.
+            args.next().filter(|v| !v.starts_with('-'))
+        } else {
+            None
+        };
+        if let Some(v) = value.filter(|v| !v.is_empty()) {
+            result = Some(v);
+        }
+    }
+    result
+}
+
 fn render_cli_error(
     middleware: &Middleware,
     err: &(dyn std::error::Error + 'static),
@@ -3554,11 +3644,13 @@ mod env_config_tests {
         use crate::{CommandResult, CommandSpec, RuntimeCommandSpec};
         use serde_json::json;
         let mut cli = Cli::new(
-            CliConfig::new("envtest", "Env test", "envtest").with_environments(Arc::new(
-                crate::environments::Environments::new("prod")
-                    .with_environment("prod", crate::environments::EnvironmentDef::new())
-                    .with_environment("ote", crate::environments::EnvironmentDef::new()),
-            )),
+            CliConfig::new("envtest", "Env test", "envtest")
+                .with_environments(Arc::new(
+                    crate::environments::Environments::new("prod")
+                        .with_environment("prod", crate::environments::EnvironmentDef::new())
+                        .with_environment("ote", crate::environments::EnvironmentDef::new()),
+                ))
+                .with_startup_args(Vec::<&str>::new()),
         );
         cli.add_command(RuntimeCommandSpec::new_with_context(
             CommandSpec::new("whichenv", "echo env").no_auth(true),
@@ -3579,14 +3671,96 @@ mod env_config_tests {
     #[tokio::test]
     async fn unknown_env_flag_produces_error_envelope() {
         let cli = Cli::new(
-            CliConfig::new("envtest2", "Env test", "envtest2").with_environments(Arc::new(
-                crate::environments::Environments::new("prod")
-                    .with_environment("prod", crate::environments::EnvironmentDef::new()),
-            )),
+            CliConfig::new("envtest2", "Env test", "envtest2")
+                .with_environments(Arc::new(
+                    crate::environments::Environments::new("prod")
+                        .with_environment("prod", crate::environments::EnvironmentDef::new()),
+                ))
+                .with_startup_args(Vec::<&str>::new()),
         );
         let out = cli.run(["envtest2", "tree", "--env", "nope"]).await;
         assert_ne!(out.exit_code, 0);
         assert!(out.rendered.contains("nope"));
+    }
+}
+
+#[cfg(test)]
+mod prescan_env_flag_tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> impl Iterator<Item = String> {
+        args.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn finds_space_separated_value() {
+        assert_eq!(
+            prescan_env_flag(argv(&["--dry-run", "--env", "dev", "list"])),
+            Some("dev".to_owned())
+        );
+    }
+
+    #[test]
+    fn finds_equals_separated_value() {
+        assert_eq!(
+            prescan_env_flag(argv(&["--env=dev", "list"])),
+            Some("dev".to_owned())
+        );
+    }
+
+    #[test]
+    fn is_none_without_the_flag() {
+        assert_eq!(prescan_env_flag(argv(&["env", "list"])), None);
+    }
+
+    #[test]
+    fn trailing_env_flag_with_no_value_is_none() {
+        assert_eq!(prescan_env_flag(argv(&["--env"])), None);
+    }
+
+    #[test]
+    fn keeps_the_last_of_multiple_occurrences() {
+        // A global `--env` and a command-local one sharing the same arg id
+        // can both appear (e.g. `app --env bar sub --env foo ...`); clap
+        // resolves the *last* one as effective, so this scan must too.
+        assert_eq!(
+            prescan_env_flag(argv(&["--env", "bar", "sub", "cmd", "--env", "foo", "arg"])),
+            Some("foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn ignores_an_empty_equals_value() {
+        assert_eq!(prescan_env_flag(argv(&["--env="])), None);
+    }
+
+    #[test]
+    fn empty_occurrence_does_not_clobber_an_earlier_real_value() {
+        assert_eq!(
+            prescan_env_flag(argv(&["--env", "dev", "--env="])),
+            Some("dev".to_owned())
+        );
+    }
+
+    #[test]
+    fn space_separated_value_starting_with_dash_is_not_a_value() {
+        // clap rejects `--env --dry-run` outright ("a value is required for
+        // '--env <ENV>' but none was supplied") rather than treating
+        // `--dry-run` as the value; this scan must agree.
+        assert_eq!(prescan_env_flag(argv(&["--env", "--dry-run"])), None);
+    }
+
+    #[test]
+    fn equals_form_accepts_a_value_starting_with_dash() {
+        // `--env=-foo` is unambiguous (unlike the space-separated form) and
+        // still accepted, matching clap's own disambiguation rule.
+        assert_eq!(
+            prescan_env_flag(argv(&["--env=-foo"])),
+            Some("-foo".to_owned())
+        );
     }
 }
 
@@ -3875,17 +4049,76 @@ mod feature_flag_pruning_tests {
         .with_feature_flag("module-flag-3", Stage::Experimental);
 
         let mut cli = Cli::new(
-            CliConfig::new("modtest3", "Module test", "modtest3").with_environments(Arc::new(
-                crate::environments::Environments::new("prod").with_environment(
-                    "prod",
-                    crate::environments::EnvironmentDef::new().with_min_stage(Stage::Experimental),
-                ),
-            )),
+            CliConfig::new("modtest3", "Module test", "modtest3")
+                .with_environments(Arc::new(
+                    crate::environments::Environments::new("prod").with_environment(
+                        "prod",
+                        crate::environments::EnvironmentDef::new()
+                            .with_min_stage(Stage::Experimental),
+                    ),
+                ))
+                .with_startup_args(Vec::<&str>::new()),
         );
         cli.add_module(module);
 
         assert!(cli.commands.contains_key("gated-mod-3:list"));
         assert!(has_subcommand(&cli.root, "gated-mod-3"));
+    }
+
+    /// The direct proof of the startup `--env` prescan (see `Cli::new`):
+    /// unlike [`active_environment_min_stage_loosens_consumer_level_policy`]
+    /// (which exercises the *default* active environment), here "prod" is
+    /// the default and carries no override, while "dev" loosens `min_stage`.
+    /// A `--env dev` supplied via `with_startup_args` — standing in for real
+    /// process argv — must be consulted before `add_module` prunes the tree,
+    /// in the *same* construction, not just update `middleware.env` for a
+    /// later run.
+    #[test]
+    fn startup_env_flag_reveals_beta_and_experimental_modules_for_the_named_env() {
+        fn gated_module() -> Module {
+            Module::new("Test Category", |_ctx| {
+                RuntimeGroupSpec::new(GroupSpec::new("gated-mod-4", "short"))
+                    .with_command(trivial_command("list"))
+            })
+            .with_feature_flag("module-flag-4", Stage::Experimental)
+        }
+        fn environments() -> Arc<crate::environments::Environments> {
+            Arc::new(
+                crate::environments::Environments::new("prod")
+                    .with_environment("prod", crate::environments::EnvironmentDef::new())
+                    .with_environment(
+                        "dev",
+                        crate::environments::EnvironmentDef::new()
+                            .with_min_stage(Stage::Experimental),
+                    ),
+            )
+        }
+
+        let mut with_dev_flag = Cli::new(
+            CliConfig::new("modtest4a", "Module test", "modtest4a")
+                .with_environments(environments())
+                .with_startup_args(["modtest4a", "--env", "dev"]),
+        );
+        with_dev_flag.add_module(gated_module());
+        assert!(
+            with_dev_flag.commands.contains_key("gated-mod-4:list"),
+            "--env dev in startup_args should reveal the Experimental module"
+        );
+        assert!(has_subcommand(&with_dev_flag.root, "gated-mod-4"));
+
+        // Negative counterpart: with no `--env` at all, the default ("prod",
+        // no override) still governs — nothing changed for the common case.
+        let mut without_flag = Cli::new(
+            CliConfig::new("modtest4b", "Module test", "modtest4b")
+                .with_environments(environments())
+                .with_startup_args(Vec::<&str>::new()),
+        );
+        without_flag.add_module(gated_module());
+        assert!(
+            !without_flag.commands.contains_key("gated-mod-4:list"),
+            "without --env, the default env's Ga policy should still prune the module"
+        );
+        assert!(!has_subcommand(&without_flag.root, "gated-mod-4"));
     }
 
     static GLOBAL_MIN_STAGE_ENV_LOCK: Mutex<()> = Mutex::new(());
