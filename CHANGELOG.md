@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.10](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.9...cli-engine-v0.4.10) (2026-07-24)
+
+
+### Features
+
+* **output:** add optional top-level fix on error envelopes [DEVEX-945] ([#65](https://github.com/godaddy/cli-engine/issues/65)) ([dc8232f](https://github.com/godaddy/cli-engine/commit/dc8232ff5f735b178b4b569cd51cfc19c8ce6458))
+
+
+### Bug Fixes
+
+* **test:** remove two process-global races causing flaky CI panics ([#61](https://github.com/godaddy/cli-engine/issues/61)) ([f4343a2](https://github.com/godaddy/cli-engine/commit/f4343a282e043eec3e6b5277076a448c522a1eef))
+
 ## [0.4.9](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.8...cli-engine-v0.4.9) (2026-07-23)
 
 
