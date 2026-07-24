@@ -576,6 +576,19 @@ fn merge_into(name: &str, dst: &mut EnvironmentDef, src: &EnvironmentDef) {
         dst.feature_overrides.insert(k.clone(), *v);
     }
     for (k, v) in &src.extra {
+        // A reserved OAuth key name can only land in `extra` via a consumer
+        // mistakenly calling `with_field("client_id", ..)` instead of
+        // `with_client_id(..)` — never through normal file/env-var layers
+        // (see `OAUTH_KEYS`'s doc comment). Drop it rather than letting it
+        // sit in the bag alongside the dedicated field it shadows.
+        if OAUTH_KEYS.contains(&k.as_str()) {
+            tracing::warn!(
+                env = name,
+                key = %k,
+                "ignoring with_field override for a reserved OAuth key name; use with_client_id/with_auth_url/with_token_url instead"
+            );
+            continue;
+        }
         let accepted = dst
             .field_validators
             .get(k)
@@ -649,11 +662,15 @@ fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
     // it yet — the default is itself the signal that the consumer cares
     // about this key, so it shouldn't also require a separate blank
     // placeholder in `extra` just to be reachable here. The three named
-    // OAuth fields are excluded: they're handled by the dedicated blocks
-    // above and must never leak into the bag.
+    // OAuth fields are excluded from both `extra` and `field_defaults`:
+    // they're handled by the dedicated blocks above and must never leak
+    // into the bag. `merge_into` already keeps them out of `extra` before
+    // `def` reaches here, so filtering `extra.keys()` too is defense in
+    // depth, not a path reachable through the public builder API today.
     let keys: std::collections::BTreeSet<String> = def
         .extra
         .keys()
+        .filter(|k| !OAUTH_KEYS.contains(&k.as_str()))
         .cloned()
         .chain(
             def.field_defaults
@@ -1682,6 +1699,28 @@ auth_url = "not-a-url"
             env.oauth.unwrap().auth_url,
             "https://api.example.com/authorize"
         );
+    }
+
+    /// A consumer mistakenly calling `with_field("client_id", ..)` instead of
+    /// `with_client_id(..)` must not let the reserved key leak into the
+    /// resolved `extra` bag — it should be dropped, not sit alongside (and
+    /// diverge from) the dedicated `oauth.client_id` field.
+    #[test]
+    fn with_field_override_of_a_reserved_oauth_key_is_dropped_not_merged_into_extra() {
+        let envs = Environments::new("prod").with_environment(
+            "prod",
+            EnvironmentDef::new()
+                .with_client_id("real-client-id")
+                .with_field("client_id", "sneaky-value")
+                .with_field("auth_url", "sneaky-auth-url")
+                .with_field("token_url", "sneaky-token-url"),
+        );
+
+        let env = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(env.oauth.as_ref().unwrap().client_id, "real-client-id");
+        assert!(!env.extra.contains_key("client_id"));
+        assert!(!env.extra.contains_key("auth_url"));
+        assert!(!env.extra.contains_key("token_url"));
     }
 
     /// A `with_field_default` registered for `auth_url`/`token_url` is

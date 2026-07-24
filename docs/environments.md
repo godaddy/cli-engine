@@ -19,6 +19,8 @@ Later layers win over earlier ones.
 2. **`environments.toml`** — the file at `<config-dir>/<app-id>/environments.toml`, when enabled with `Environments::with_config_file(true)`.
 3. **Environment-variable overrides** — `<ENV>_OAUTH_CLIENT_ID`, `<ENV>_OAUTH_AUTH_URL`, `<ENV>_OAUTH_TOKEN_URL`, and `<ENV>_<FIELD>` for custom config fields.
 
+A name unknown to layers 1–2 can still resolve via `Environments::with_fallback(fn(&str) -> Option<EnvironmentDef>)`, consulted only when both are silent; `with_init`'s scaffold still applies to a fallback-defined name too.
+
 ## environments.toml Schema
 
 The file uses one top-level TOML table per environment name:
@@ -63,7 +65,7 @@ The three OAuth fields are always overridable (subject to a registered validator
 | `<ENV>_OAUTH_AUTH_URL` | `oauth.auth_url` |
 | `<ENV>_OAUTH_TOKEN_URL` | `oauth.token_url` |
 
-CLI-specific config bag are overridable via `<ENV>_<KEY>` as well.
+CLI-specific config bag keys are overridable via `<ENV>_<KEY>` as well.
 
 ## Per-Field Validation and Computed Defaults
 
