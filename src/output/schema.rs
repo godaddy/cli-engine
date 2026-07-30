@@ -476,8 +476,21 @@ pub fn global_schema_registry_snapshot() -> SchemaRegistry {
 }
 
 /// Formats compact field summaries for command long help.
+///
+/// `default_fields` lists the field names shown when `--fields` is absent
+/// (see [`CommandSpec::with_default_fields`](crate::CommandSpec::with_default_fields));
+/// each one is marked `(default)` in the listing. The command's `--fields`
+/// flag itself also carries this as a native clap `[default: ...]` (see
+/// `command_clap_command_with_schema_help` in `cli.rs`), so this marker is a
+/// per-field cross-reference rather than the only place the default appears.
+/// Pass an empty slice when the command has no default projection.
+///
+/// `--filter`/`--expr` usage examples used to live in a standalone section
+/// appended here; they now live on the `--filter` and `--expr` flags
+/// themselves (see `apply_filter_and_expr_examples` in `cli.rs`), the same
+/// way `--fields` carries its default natively instead of in prose.
 #[must_use]
-pub fn format_help_section(fields: &[FieldInfo]) -> String {
+pub fn format_help_section(fields: &[FieldInfo], default_fields: &[&str]) -> String {
     if fields.is_empty() {
         return String::new();
     }
@@ -489,37 +502,19 @@ pub fn format_help_section(fields: &[FieldInfo]) -> String {
     let mut out = String::from("Output fields:\n");
     for field in fields {
         let optional = if field.optional { "  (optional)" } else { "" };
+        let default_marker = if default_fields.contains(&field.name.as_str()) {
+            "  (default)"
+        } else {
+            ""
+        };
         out.push_str(&format!(
-            "  {:<width$}  {}{}\n",
+            "  {:<width$}  {}{}{}\n",
             field.name,
             field.field_type,
             optional,
+            default_marker,
             width = max_name
         ));
-    }
-
-    let first_string = fields
-        .iter()
-        .find(|field| field.field_type == "string")
-        .map(|field| field.name.as_str());
-    let first_bool = fields
-        .iter()
-        .find(|field| field.field_type == "bool")
-        .map(|field| field.name.as_str());
-    if first_string.is_some() || first_bool.is_some() {
-        out.push_str("\nFilter examples:\n");
-        if let Some(name) = first_string {
-            out.push_str(&format!("  --filter \"contains({name}, 'example')\"\n"));
-        }
-        if let Some(name) = first_bool {
-            out.push_str(&format!("  --filter '{name}'\n"));
-        }
-    }
-
-    out.push_str("\nExpr examples:\n");
-    out.push_str("  --expr 'length(@)'\n");
-    if let Some(name) = first_string {
-        out.push_str(&format!("  --expr '[].{name}'\n"));
     }
     out
 }

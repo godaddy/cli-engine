@@ -28,21 +28,21 @@ use crate::{
     feature_flags::{FlagEntry, FlagPolicy, FlagRegistry, Stage},
     flags::{
         GlobalFlags, derive_bool_flags, derive_value_flags, extract_command_path,
-        extract_output_format, extract_search_query, global_flags_from_matches,
-        has_true_schema_flag, min_stage_env_var, output_env_var, register_global_flags,
-        register_reason_flag, resolve_default_output_format,
+        extract_output_format, global_flags_from_matches, has_true_schema_flag, min_stage_env_var,
+        output_env_var, register_global_flags, register_reason_flag, resolve_default_output_format,
     },
     guide::{guide_content, render_guide_human},
     module::{Module, ModuleContext},
     output::{
-        HumanViewDef, HumanViewRegistry, NextAction, SchemaRegistry, format_help_section,
-        global_human_view_registry_snapshot, global_schema_registry_snapshot,
+        FieldInfo, HumanViewDef, HumanViewRegistry, NextAction, SchemaRegistry,
+        format_help_section, global_human_view_registry_snapshot, global_schema_registry_snapshot,
     },
     search::{SearchDocument, SearchIndex},
 };
 
 use builtins::{
     completion_args, completion_command, guide_args, guide_command, help_args, help_command,
+    search_args, search_command,
 };
 use help::{GROUP_HELP_TEMPLATE, ROOT_HELP_TEMPLATE};
 pub use help::{ModuleHelpEntry, build_root_long, render_next_actions_human};
@@ -110,7 +110,7 @@ pub type PreRun =
 pub type ResolveMeta = Arc<dyn Fn(&str, CommandMeta) -> CommandMeta + Send + Sync>;
 /// Hook called after a CLI run completes.
 pub type OnShutdown = Arc<dyn Fn() + Send + Sync>;
-/// Hook that contributes extra root-scope `--search` documents.
+/// Hook that contributes extra root-scope `search` documents.
 pub type ExtraSearchDocs = Arc<dyn Fn() -> Vec<SearchDocument> + Send + Sync>;
 /// Hook that supplies the suggested next actions shown when the CLI is invoked
 /// with no subcommand (bare root). The same actions drive a human "Next actions"
@@ -189,7 +189,8 @@ pub enum Argv0LinkMethod {
 /// Top-level subcommand names that are reserved by the engine and must not be
 /// used as module group names.  [`Cli::add_module_group`] rejects a group whose
 /// name matches a reserved name so the engine's built-in command always wins.
-pub(crate) const BUILTIN_COMMAND_NAMES: [&str; 4] = ["help", "guide", "tree", "completion"];
+pub(crate) const BUILTIN_COMMAND_NAMES: [&str; 5] =
+    ["help", "guide", "tree", "completion", "search"];
 
 /// Declarative configuration for a CLI application.
 ///
@@ -894,7 +895,8 @@ impl Cli {
             .subcommand(help_command())
             .subcommand(guide_command())
             .subcommand(Command::new("tree").about("Display full command tree"))
-            .subcommand(completion_command());
+            .subcommand(completion_command())
+            .subcommand(search_command());
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
         }
@@ -915,6 +917,7 @@ impl Cli {
                     .long("env")
                     .global(true)
                     .value_name("ENV")
+                    .display_order(crate::flags::global_flag_order::ENV)
                     .help("Override the active environment (see: env list)"),
             );
         }
@@ -1309,7 +1312,7 @@ impl Cli {
         // The hidden `argv0` meta-command (`<bin> argv0 <name> [args...]`) forces
         // a route without an actual symlink. It is recognized positionally as the
         // first argument after the program name and is never registered with clap,
-        // so it stays absent from `--help`, `tree`, and `--search`.
+        // so it stays absent from `--help`, `tree`, and the `search` command.
         let explicit = text_args.get(1).map(String::as_str) == Some("argv0");
         let (name, rest) = if explicit {
             match text_args.get(2) {
@@ -1550,9 +1553,6 @@ impl Cli {
         if let Some(output) = self.try_run_schema_bypass(&text_args) {
             return output;
         }
-        if let Some(output) = self.try_run_search_bypass(&text_args) {
-            return output;
-        }
         // Resolve the positional command path once and share it between the
         // group-help rewrite and the unknown-command check below.
         let bool_flags = derive_bool_flags(&self.root);
@@ -1662,6 +1662,22 @@ impl Cli {
                 return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
             }
             return self.finish_run(self.render_guide(&matches, &flags.output_format));
+        }
+        if command_path == "search" {
+            let args = search_args(&matches);
+            if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
+                return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
+            }
+            let query = args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let scope_path = args
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let scope = self.resolve_search_scope(scope_path);
+            return self.finish_run(self.render_search(query, &scope, &flags.output_format));
         }
         if command_path == "completion" {
             let args = completion_args(&matches);
@@ -1853,16 +1869,6 @@ impl Cli {
         }
     }
 
-    fn try_run_search_bypass(&self, args: &[String]) -> Option<CliRunOutput> {
-        let query = extract_search_query(args);
-        if query.is_empty() {
-            return None;
-        }
-        let scope = self.search_scope(args);
-        let output_format = extract_output_format(args, &self.resolve_run_output_format());
-        Some(self.render_search(&query, &scope, &output_format))
-    }
-
     fn try_run_schema_bypass(&self, args: &[String]) -> Option<CliRunOutput> {
         if !has_true_schema_flag(args) {
             return None;
@@ -2033,9 +2039,28 @@ impl Cli {
         docs
     }
 
-    fn search_scope(&self, args: &[String]) -> String {
-        let parts = extract_search_scope_parts(args);
-        canonical_path_from_parts(&self.root, &parts).unwrap_or_default()
+    /// Resolves `--scope`'s colon-separated path (e.g. `domain` or
+    /// `domain:list`) to the canonical scope string [`Self::search_documents`]
+    /// expects, matching aliases the same way a real command path would (via
+    /// [`canonical_path_from_parts`]'s `find_subcommand` walk). An empty or
+    /// unresolvable scope falls back to an unscoped (root) search rather than
+    /// erroring — `search` staying permissive here matches how a typo in a
+    /// search *query* just yields fewer results instead of a hard failure.
+    /// An unresolvable (non-empty) scope prints a best-effort stderr hint
+    /// first, so a typo like `--scope doamin` doesn't silently widen the
+    /// search with no explanation for the extra results.
+    fn resolve_search_scope(&self, scope_path: &str) -> String {
+        if scope_path.is_empty() {
+            return String::new();
+        }
+        let parts: Vec<String> = scope_path.split(':').map(str::to_owned).collect();
+        match canonical_path_from_parts(&self.root, &parts) {
+            Some(scope) => scope,
+            None => {
+                warn_unresolvable_search_scope(scope_path);
+                String::new()
+            }
+        }
     }
 
     fn canonical_command_path(&self, command_path: &str) -> String {
@@ -2446,7 +2471,6 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
     middleware.schema = flags.schema;
     middleware.timeout = timeout;
     middleware.debug = flags.debug.clone();
-    middleware.search = flags.search.clone();
 }
 
 /// Builds the transport debug logger implied by a parsed `--debug` pattern,
@@ -2675,26 +2699,24 @@ fn canonical_path_from_parts(root: &Command, parts: &[String]) -> Option<String>
     Some(canonical.join(":"))
 }
 
-fn extract_search_scope_parts(args: &[String]) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--search" || arg.starts_with("--search=") {
-            break;
-        }
-        if arg.starts_with('-') {
-            if !arg.contains('=') && index + 1 < args.len() && !args[index + 1].starts_with('-') {
-                index += 2;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-        parts.push(arg.clone());
-        index += 1;
-    }
-    parts
+/// Best-effort stderr hint for a `--scope` value that didn't resolve to a
+/// known command path — `resolve_search_scope` still searches everything
+/// (matching a bare `search` with no `--scope` at all), so this is the only
+/// signal the user gets that their scope was ignored rather than applied.
+/// Written directly to a locked stderr handle (not `eprintln!`), matching
+/// the transport module's own `StderrTransportLogger` convention for this
+/// kind of side-channel diagnostic: best-effort, so a write failure is
+/// discarded rather than surfaced as a command error.
+fn warn_unresolvable_search_scope(scope_path: &str) {
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(
+            format!(
+                "warning: --scope {scope_path:?} did not match a known command path; searching everything instead\n"
+            )
+            .as_bytes(),
+        )
+        .ok();
 }
 
 fn collect_command_search_documents(
@@ -2763,6 +2785,7 @@ fn append_command_alias_terms(command: &Command, aliases: &mut Vec<String>) {
 fn command_flag_text(command: &Command) -> String {
     command
         .get_arguments()
+        .filter(|arg| !arg.is_hide_set())
         .filter_map(|arg| {
             let mut names = Vec::new();
             if let Some(short) = arg.get_short() {
@@ -3384,26 +3407,163 @@ fn command_clap_command_with_schema_help(
     schemas: &SchemaRegistry,
 ) -> Command {
     let mut command = spec.clap_command();
-    let Some(schema) = schemas.get_by_path(command_path) else {
+    command = apply_dry_run_visibility(command, spec);
+    let schema = schemas.get_by_path(command_path);
+    let default_fields = default_field_names(spec);
+    command = apply_fields_arg(
+        command,
+        spec,
+        schema.as_ref().map(|schema| schema.fields.as_slice()),
+        &default_fields,
+    );
+    let Some(schema) = schema else {
         return command;
     };
-    let schema_help = format_help_section(&schema.fields);
-    if schema_help.is_empty() {
+    apply_filter_and_expr_examples(command, &schema.fields)
+}
+
+/// Hides this command's inherited `--dry-run` flag when the command isn't
+/// mutating (per [`CommandSpec::metadata`]'s `dry_run_prompt` — mirrored
+/// here rather than reused, since that method returns the broader
+/// [`CommandMeta`], not this one bool). `--dry-run` only ever does anything
+/// for a command that opted in via `.mutates(true)`/`.with_tier(...)` (see
+/// `Middleware::render_envelope`'s `meta.dry_run_prompt` gate), so showing
+/// it on every other command is noise. The override still parses `--dry-run`
+/// identically (same value parser, same defaults) in case a caller passes
+/// it anyway — hidden only changes what `--help` shows, never behavior.
+fn apply_dry_run_visibility(command: Command, spec: &CommandSpec) -> Command {
+    let mutates = spec.mutates || spec.tier.is_some_and(crate::Tier::is_mutating);
+    if mutates {
         return command;
     }
-    let base = spec
-        .long
-        .as_ref()
-        .filter(|long| !long.is_empty())
-        .cloned()
-        .unwrap_or_else(|| spec.short.clone());
-    let long = if base.is_empty() {
-        schema_help
-    } else {
-        format!("{base}\n\n{schema_help}")
-    };
-    command = command.long_about(long);
-    command
+    command.arg(
+        clap::Arg::new("dry-run")
+            .long("dry-run")
+            .num_args(0..=1)
+            .require_equals(true)
+            .default_missing_value("true")
+            .default_value("false")
+            .value_parser(crate::flags::compat_bool_value_parser())
+            .display_order(crate::flags::global_flag_order::DRY_RUN)
+            .hide(true)
+            .help("Preview mutations without executing"),
+    )
+}
+
+/// Splits a command's raw `default_fields` string into individual field
+/// names, dropping the `all`/`*` sentinels that mean "every field" rather
+/// than naming a real field.
+fn default_field_names(spec: &CommandSpec) -> Vec<&str> {
+    spec.default_fields
+        .as_deref()
+        .map(|fields| {
+            fields
+                .split(',')
+                .map(str::trim)
+                .filter(|field| !field.is_empty() && *field != "all" && *field != "*")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Overrides this command's `--fields` flag with everything specific to this
+/// command: its own `default_fields` as a native clap default value (so
+/// `--help` shows `[default: ...]` on the flag itself, the same way
+/// `--dry-run` shows `[default: false]`), and, when a schema is registered,
+/// the output-field summary table appended to the flag's own help text
+/// instead of the command's description — a long field table there used to
+/// push `Usage:` far down the page. Global args apply to every subcommand,
+/// but a subcommand-local arg of the same name takes precedence, so this
+/// only affects the one command being built here.
+fn apply_fields_arg(
+    command: Command,
+    spec: &CommandSpec,
+    schema_fields: Option<&[FieldInfo]>,
+    default_fields: &[&str],
+) -> Command {
+    let default_value = spec
+        .default_fields
+        .as_deref()
+        .filter(|fields| !fields.is_empty());
+    let table = schema_fields
+        .filter(|fields| !fields.is_empty())
+        .map(|fields| format_help_section(fields, default_fields));
+    if default_value.is_none() && table.is_none() {
+        return command;
+    }
+
+    let mut help = String::from(
+        "Comma-separated fields to include in output (use 'all' or '*' for everything)",
+    );
+    if let Some(table) = &table {
+        help.push_str("\n\n");
+        help.push_str(table.trim_end());
+    }
+
+    let mut arg = clap::Arg::new("fields")
+        .long("fields")
+        .value_name("FIELDS")
+        // Must match `global_flag_order::FIELDS` — this re-registers the
+        // same flag with contextual help, not a new one, and needs to keep
+        // its place among the other global flags rather than falling back
+        // to this subcommand's own low, command-specific counter value.
+        .display_order(crate::flags::global_flag_order::FIELDS)
+        .help(help);
+    if let Some(default_value) = default_value {
+        arg = arg.default_value(default_value.to_owned());
+    }
+    command.arg(arg)
+}
+
+/// Overrides this command's `--filter` and `--expr` flags with help text
+/// carrying usage examples built from its own output fields, so `--help`
+/// shows them right under the flag instead of in a separate "Filter
+/// examples:"/"Expr examples:" section disconnected from the flags they
+/// demonstrate. Mirrors [`apply_fields_arg`]: a subcommand-local arg of the
+/// same name shadows the framework's global one, and must carry the same
+/// `global_flag_order` value as that global one for the same reason.
+fn apply_filter_and_expr_examples(mut command: Command, fields: &[FieldInfo]) -> Command {
+    if fields.is_empty() {
+        return command;
+    }
+    let first_string = fields
+        .iter()
+        .find(|field| field.field_type == "string")
+        .map(|field| field.name.as_str());
+    let first_bool = fields
+        .iter()
+        .find(|field| field.field_type == "bool")
+        .map(|field| field.name.as_str());
+
+    if first_string.is_some() || first_bool.is_some() {
+        let mut help = String::from("Per-item JMESPath predicate for list data");
+        if let Some(name) = first_string {
+            help.push_str(&format!("\ne.g. --filter \"contains({name}, 'example')\""));
+        }
+        if let Some(name) = first_bool {
+            help.push_str(&format!("\ne.g. --filter '{name}'"));
+        }
+        command = command.arg(
+            clap::Arg::new("filter")
+                .long("filter")
+                .value_name("EXPR")
+                .display_order(crate::flags::global_flag_order::FILTER)
+                .help(help),
+        );
+    }
+
+    let mut expr_help = String::from("JMESPath query applied to the whole result");
+    expr_help.push_str("\ne.g. --expr 'length(@)'");
+    if let Some(name) = first_string {
+        expr_help.push_str(&format!("\ne.g. --expr '[].{name}'"));
+    }
+    command.arg(
+        clap::Arg::new("expr")
+            .long("expr")
+            .value_name("EXPR")
+            .display_order(crate::flags::global_flag_order::EXPR)
+            .help(expr_help),
+    )
 }
 
 fn process_exit_code(code: i32) -> ExitCode {
