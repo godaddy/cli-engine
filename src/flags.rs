@@ -97,12 +97,12 @@ pub(crate) mod global_flag_order {
     pub(crate) const SCHEMA: usize = 1009;
     pub(crate) const TIMEOUT: usize = 1010;
     pub(crate) const DEBUG: usize = 1011;
-    pub(crate) const CREDENTIAL_STORE: usize = 1013;
-    pub(crate) const JSON: usize = 1014;
-    pub(crate) const TOON: usize = 1015;
-    pub(crate) const HUMAN: usize = 1016;
-    pub(crate) const REASON: usize = 1017;
-    pub(crate) const ENV: usize = 1018;
+    pub(crate) const CREDENTIAL_STORE: usize = 1012;
+    pub(crate) const JSON: usize = 1013;
+    pub(crate) const TOON: usize = 1014;
+    pub(crate) const HUMAN: usize = 1015;
+    pub(crate) const REASON: usize = 1016;
+    pub(crate) const ENV: usize = 1017;
 }
 
 /// Registers framework-global flags on a `clap` command.

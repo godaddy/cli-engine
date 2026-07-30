@@ -2489,6 +2489,66 @@ async fn cli_runtime_search_scope_flag_resolves_group_aliases() {
 }
 
 #[tokio::test]
+async fn cli_runtime_search_scope_typo_falls_back_to_full_tree_search() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("noise", "Noise")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("find", "Find projects elsewhere").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    // A `--scope` that doesn't resolve to any real command path (a typo, or
+    // a stale/removed one) still searches everything — same as passing no
+    // `--scope` at all — rather than erroring or silently returning nothing.
+    // `resolve_search_scope` also prints a stderr hint in this case, but
+    // that's a best-effort side channel outside `Cli::run`'s captured
+    // output (see `warn_unresolvable_search_scope`), so it's not asserted
+    // on here; this test only covers the functional fallback.
+    let output = cli
+        .run([
+            "my-cli",
+            "search",
+            "projects",
+            "--scope",
+            "not-a-real-group",
+            "--output",
+            "json",
+        ])
+        .await;
+
+    assert_eq!(output.exit_code, 0);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    let commands = rendered["data"]
+        .as_array()
+        .expect("search results should be an array")
+        .iter()
+        .map(|result| result["command"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        commands.contains(&"noise find"),
+        "an unresolvable --scope should fall back to a full-tree search; got {commands:?}"
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_search_indexes_group_command_and_flag_aliases() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),

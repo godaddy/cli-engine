@@ -2046,12 +2046,21 @@ impl Cli {
     /// unresolvable scope falls back to an unscoped (root) search rather than
     /// erroring — `search` staying permissive here matches how a typo in a
     /// search *query* just yields fewer results instead of a hard failure.
+    /// An unresolvable (non-empty) scope prints a best-effort stderr hint
+    /// first, so a typo like `--scope doamin` doesn't silently widen the
+    /// search with no explanation for the extra results.
     fn resolve_search_scope(&self, scope_path: &str) -> String {
         if scope_path.is_empty() {
             return String::new();
         }
         let parts: Vec<String> = scope_path.split(':').map(str::to_owned).collect();
-        canonical_path_from_parts(&self.root, &parts).unwrap_or_default()
+        match canonical_path_from_parts(&self.root, &parts) {
+            Some(scope) => scope,
+            None => {
+                warn_unresolvable_search_scope(scope_path);
+                String::new()
+            }
+        }
     }
 
     fn canonical_command_path(&self, command_path: &str) -> String {
@@ -2688,6 +2697,26 @@ fn canonical_path_from_parts(root: &Command, parts: &[String]) -> Option<String>
         canonical.push(current.get_name().to_owned());
     }
     Some(canonical.join(":"))
+}
+
+/// Best-effort stderr hint for a `--scope` value that didn't resolve to a
+/// known command path — `resolve_search_scope` still searches everything
+/// (matching a bare `search` with no `--scope` at all), so this is the only
+/// signal the user gets that their scope was ignored rather than applied.
+/// Written directly to a locked stderr handle (not `eprintln!`), matching
+/// the transport module's own `StderrTransportLogger` convention for this
+/// kind of side-channel diagnostic: best-effort, so a write failure is
+/// discarded rather than surfaced as a command error.
+fn warn_unresolvable_search_scope(scope_path: &str) {
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(
+            format!(
+                "warning: --scope {scope_path:?} did not match a known command path; searching everything instead\n"
+            )
+            .as_bytes(),
+        )
+        .ok();
 }
 
 fn collect_command_search_documents(
