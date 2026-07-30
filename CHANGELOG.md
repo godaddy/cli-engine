@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.10...cli-engine-v0.5.0) (2026-07-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** tidy --help output and make search a real command ([#68](https://github.com/godaddy/cli-engine/issues/68))
+
+### Features
+
+* **cli:** tidy --help output and make search a real command ([#68](https://github.com/godaddy/cli-engine/issues/68)) ([8353f96](https://github.com/godaddy/cli-engine/commit/8353f96dfe6efd4fdc8c78a0ca519bf5d0a434e6))
+
+
+### Miscellaneous
+
+* **deps:** bump quinn-proto from 0.11.14 to 0.11.16 ([#67](https://github.com/godaddy/cli-engine/issues/67)) ([e508548](https://github.com/godaddy/cli-engine/commit/e508548329d3b11d9e03cf75c98738024491670f))
+
 ## [0.4.10](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.9...cli-engine-v0.4.10) (2026-07-24)
 
 
