@@ -623,8 +623,13 @@ impl CommandSpec {
         if self.hidden {
             command = command.hide(true);
         }
-        for arg in &self.args {
-            command = command.arg(arg.clone());
+        // Explicit `display_order` (rather than relying on clap's own
+        // implicit per-`Command` counter) guarantees these render first, as
+        // a block, in declaration order — see `flags::global_flag_order`
+        // for why leaving it implicit lets a propagated global flag collide
+        // with a low counter value here and interleave with these instead.
+        for (index, arg) in self.args.iter().enumerate() {
+            command = command.arg(arg.clone().display_order(index));
         }
         command
     }

@@ -33,8 +33,6 @@ pub struct GlobalFlags {
     pub timeout: String,
     /// Debug selector.
     pub debug: String,
-    /// Search query.
-    pub search: String,
     /// Credential storage override from `--credential-store`, if supplied.
     pub credential_store: Option<crate::config::CredentialStore>,
 }
@@ -54,10 +52,49 @@ impl Default for GlobalFlags {
             reason: String::new(),
             timeout: "0s".to_owned(),
             debug: String::new(),
-            search: String::new(),
             credential_store: None,
         }
     }
+}
+
+/// Explicit `--help` display-order values for the engine's own global flags,
+/// numbered in the order they're registered below — which is meant to read
+/// as their relative importance, most-used first.
+///
+/// Without this, every global flag would collide with command-specific
+/// ones: clap auto-assigns each unset `display_order` as "the Nth argument
+/// added to this `Command`," starting the count over at 0 on every
+/// `Command` it's called on — the root (where these are declared) and each
+/// subcommand alike. A subcommand's own `CommandSpec::with_arg` args get
+/// low counter values (0, 1, 2, ... in declaration order) from their own
+/// `Command`; a global flag propagated onto that subcommand keeps the low
+/// counter value it got on the *root*. Mix the two and `--help` interleaves
+/// them instead of showing command-specific flags first, as a block, in the
+/// order they were declared. Parking every global flag comfortably above
+/// any realistic per-command arg count keeps that from happening.
+///
+/// `FIELDS`, `FILTER`, and `EXPR` are `pub(crate)` because `cli.rs`
+/// re-registers those three per-command (see `apply_fields_arg` and
+/// `apply_filter_and_expr_examples`) with contextual help text; they must
+/// reuse these same values or the override would drift out of position.
+pub(crate) mod global_flag_order {
+    pub(crate) const HELP: usize = 1000;
+    pub(crate) const OUTPUT: usize = 1001;
+    pub(crate) const VERBOSE: usize = 1002;
+    pub(crate) const DRY_RUN: usize = 1003;
+    pub(crate) const FIELDS: usize = 1004;
+    pub(crate) const FILTER: usize = 1005;
+    pub(crate) const EXPR: usize = 1006;
+    pub(crate) const LIMIT: usize = 1007;
+    pub(crate) const OFFSET: usize = 1008;
+    pub(crate) const SCHEMA: usize = 1009;
+    pub(crate) const TIMEOUT: usize = 1010;
+    pub(crate) const DEBUG: usize = 1011;
+    pub(crate) const CREDENTIAL_STORE: usize = 1013;
+    pub(crate) const JSON: usize = 1014;
+    pub(crate) const TOON: usize = 1015;
+    pub(crate) const HUMAN: usize = 1016;
+    pub(crate) const REASON: usize = 1017;
 }
 
 /// Registers framework-global flags on a `clap` command.
@@ -74,6 +111,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("help")
                 .action(ArgAction::HelpLong)
                 .global(true)
+                .display_order(global_flag_order::HELP)
                 .help("Print help"),
         )
         .arg(
@@ -81,13 +119,33 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("output")
                 .short('o')
                 .global(true)
+                .display_order(global_flag_order::OUTPUT)
                 .value_name("FORMAT")
-                .default_value("json")
+                // This default is cosmetic, not authoritative: it's never
+                // actually read as a value — `global_flags_from_matches` only
+                // consults this arg when it was given on the command line,
+                // falling back to `resolve_default_output_format`'s full
+                // env/config/TTY precedence the rest of the time. But since
+                // `--help` runs in this same process, this process's own
+                // stdout TTY-ness is already known and stable for the whole
+                // run, so mirroring that one signal here (skipping the
+                // env-var/config-file tiers, which aren't available until a
+                // command actually executes) keeps what `--help` shows honest
+                // in the common case instead of a hardcoded, often-wrong
+                // `[default: json]`.
+                .default_value(if std::io::stdout().is_terminal() {
+                    "human"
+                } else {
+                    "json"
+                })
                 // Only conflicts when *explicitly* given: clap's conflict
                 // checks ignore an arg's default value, so a bare `--json`
                 // with no `--output` at all is unaffected.
                 .conflicts_with_all(["json", "toon", "human"])
-                .help("Output format: toon|json|human"),
+                .help(
+                    "Output format: toon|json|human (shorthand: --json, --toon, --human); \
+                     defaults to human in an interactive terminal, json otherwise",
+                ),
         )
         .arg(
             Arg::new("verbose")
@@ -96,6 +154,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .num_args(0..=1)
                 .default_missing_value("all")
                 .value_name("FIELDS")
+                .display_order(global_flag_order::VERBOSE)
                 .help("Include metadata in output (all, or comma-separated: system,duration,args,env,identity,command,effective_args,timestamp)"),
         )
         .arg(
@@ -107,6 +166,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .default_missing_value("true")
                 .default_value("false")
                 .value_parser(compat_bool_value_parser())
+                .display_order(global_flag_order::DRY_RUN)
                 .help("Preview mutations without executing"),
         )
         .arg(
@@ -114,6 +174,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("fields")
                 .global(true)
                 .value_name("FIELDS")
+                .display_order(global_flag_order::FIELDS)
                 .help("Comma-separated fields to include in output (use 'all' or '*' for everything)"),
         )
         .arg(
@@ -121,6 +182,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("filter")
                 .global(true)
                 .value_name("EXPR")
+                .display_order(global_flag_order::FILTER)
                 .help("Per-item JMESPath predicate for list data"),
         )
         .arg(
@@ -128,6 +190,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .long("expr")
                 .global(true)
                 .value_name("EXPR")
+                .display_order(global_flag_order::EXPR)
                 .help("JMESPath query applied to the whole result"),
         )
         .arg(
@@ -137,6 +200,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .value_parser(value_parser!(i64))
                 .allow_hyphen_values(true)
                 .default_value("0")
+                .display_order(global_flag_order::LIMIT)
                 .help("Max items to return (client-side, 0=all)"),
         )
         .arg(
@@ -146,6 +210,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .value_parser(value_parser!(i64))
                 .allow_hyphen_values(true)
                 .default_value("0")
+                .display_order(global_flag_order::OFFSET)
                 .help("Skip N items before applying limit"),
         )
         .arg(
@@ -157,6 +222,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .default_missing_value("true")
                 .default_value("false")
                 .value_parser(compat_bool_value_parser())
+                .display_order(global_flag_order::SCHEMA)
                 .help("Dump output field metadata instead of running the command"),
         )
         .arg(
@@ -166,6 +232,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .allow_hyphen_values(true)
                 .default_value("0s")
                 .value_name("DURATION")
+                .display_order(global_flag_order::TIMEOUT)
                 .help("Overall command timeout (e.g. 60s, 5m); default 0s = no timeout"),
         )
         .arg(
@@ -175,18 +242,13 @@ pub fn register_global_flags(command: Command) -> Command {
                 .num_args(0..=1)
                 .default_missing_value("*")
                 .value_name("PATTERN")
+                .display_order(global_flag_order::DEBUG)
                 .help("Enable debug logging (comma-separated component patterns, e.g. *, transport, *,-auth)"),
-        )
-        .arg(
-            Arg::new("search")
-                .long("search")
-                .global(true)
-                .value_name("KEYWORD")
-                .help("Search commands and guides by keyword"),
         )
         .arg(
             Arg::new("credential-store")
                 .long("credential-store")
+                .display_order(global_flag_order::CREDENTIAL_STORE)
                 .global(true)
                 .value_name("MODE")
                 .value_parser(|s: &str| s.parse::<crate::config::CredentialStore>())
@@ -201,6 +263,10 @@ pub fn register_global_flags(command: Command) -> Command {
                 // e.g. `--json --human` together is a usage error rather
                 // than one silently overriding the other.
                 .conflicts_with_all(["toon", "human"])
+                // Documented on `--output` instead of taking their own line
+                // in every command's already-long options list.
+                .hide(true)
+                .display_order(global_flag_order::JSON)
                 .help("Shorthand for --output json"),
         )
         .arg(
@@ -209,6 +275,8 @@ pub fn register_global_flags(command: Command) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue)
                 .conflicts_with_all(["json", "human"])
+                .hide(true)
+                .display_order(global_flag_order::TOON)
                 .help("Shorthand for --output toon"),
         )
         .arg(
@@ -217,6 +285,8 @@ pub fn register_global_flags(command: Command) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue)
                 .conflicts_with_all(["json", "toon"])
+                .hide(true)
+                .display_order(global_flag_order::HUMAN)
                 .help("Shorthand for --output human"),
         )
 }
@@ -239,6 +309,7 @@ pub fn register_reason_flag(command: Command) -> Command {
             .long("reason")
             .global(true)
             .value_name("TEXT")
+            .display_order(global_flag_order::REASON)
             .help("Short explanation of why this command is being run (forwarded to your authorizer, auditor, or activity emitter)"),
     )
 }
@@ -384,31 +455,10 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
             .get_one::<String>("debug")
             .cloned()
             .unwrap_or_default(),
-        search: matches
-            .get_one::<String>("search")
-            .cloned()
-            .unwrap_or_default(),
         credential_store: matches
             .get_one::<crate::config::CredentialStore>("credential-store")
             .copied(),
     }
-}
-
-#[must_use]
-/// Extracts `--search` from raw args before normal parsing.
-pub fn extract_search_query(args: &[impl AsRef<str>]) -> String {
-    for index in 0..args.len() {
-        let arg = args[index].as_ref();
-        if arg == "--search" {
-            return args
-                .get(index + 1)
-                .map_or_else(String::new, |value| value.as_ref().to_owned());
-        }
-        if let Some(value) = arg.strip_prefix("--search=") {
-            return value.to_owned();
-        }
-    }
-    String::new()
 }
 
 #[must_use]
@@ -492,7 +542,7 @@ pub fn has_true_schema_flag(args: &[impl AsRef<str>]) -> bool {
     false
 }
 
-fn compat_bool_value_parser() -> ValueParser {
+pub(crate) fn compat_bool_value_parser() -> ValueParser {
     ValueParser::new(parse_compat_bool)
 }
 

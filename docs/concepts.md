@@ -272,7 +272,6 @@ populate middleware:
 | `--reason` | `reason` | empty | Reason passed to authorization, audit, and activity. Only registered when `CliConfig` has an `authz`, `auditor`, or `activity` hook configured directly (not via `init_deps`, which runs after flag registration) — apps with none of those simply don't have the flag. |
 | `--timeout` | `timeout` | `0s` | Command deadline (e.g. `60s`, `5m`); default `0s` = no timeout. |
 | `--debug` | `debug` | empty | Enables debug components (comma-separated patterns). Bare `--debug` enables all; a specific value uses the `=` form: `--debug=transport`, `--debug='*,-auth'`. `transport` dumps HTTP requests/responses to stderr. See [HTTP debug logging](#http-debug-logging). |
-| `--search` | `search` | empty | Searches command and guide documentation before command execution. |
 
 Applications can add additional global flags through `CliConfig::register_flags` and copy parsed
 values into middleware through `CliConfig::apply_flags`.
@@ -659,9 +658,7 @@ The renderer only recognizes `* `-prefixed bullets (with 0–3 leading spaces fo
 
 ## Search
 
-`--search` searches command metadata, aliases, guides, and extra registered search documents. Search
-short-circuits normal command execution so users and agents can find help without satisfying command
-flags.
+`search <query...> [--scope <path>]` is a built-in command (alongside `help`, `guide`, `tree`, and `completion`) that searches command metadata, aliases, guides, and extra registered search documents (`CliConfig::with_extra_search_docs`). `<query...>` accepts multiple words without quoting (`app search deploy pipeline`); quoting still works the same way (`app search "deploy pipeline"`) since both forms are just joined with spaces. `--scope` limits results to one command subtree using the same colon-separated path form as elsewhere (`--scope domain` or `--scope domain:list`), resolving aliases the same way a real command path would; an unresolvable scope falls back to an unscoped (root) search rather than erroring.
 
 ## Transport
 

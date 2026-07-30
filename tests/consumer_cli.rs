@@ -118,7 +118,7 @@ async fn consumer_style_cli_supports_json_human_schema_search_and_dry_run() {
 
     let search = cli
         .run([
-            "my-cli", "project", "--search", "projects", "--output", "json",
+            "my-cli", "search", "projects", "--scope", "project", "--output", "json",
         ])
         .await;
     assert_eq!(search.exit_code, 0);

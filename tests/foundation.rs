@@ -25,8 +25,7 @@ use cli_engine::{
     },
     auth::exec::{ACTION_AUTHENTICATE, AuthnRequest, ExecProvider},
     build_module_group, build_root_long, build_tree_from_clap, derive_bool_flags,
-    derive_value_flags, extract_command_path, extract_output_format, extract_search_query,
-    format_help_section,
+    derive_value_flags, extract_command_path, extract_output_format, format_help_section,
     guide::guide_content,
     has_true_schema_flag,
     output::render_human_with_view,
@@ -435,7 +434,7 @@ async fn cli_runtime_renders_root_help_without_subcommand() {
     assert_eq!(output.exit_code, 0);
     assert!(output.rendered.contains("Developer tooling"));
     assert!(output.rendered.contains("project"));
-    assert!(output.rendered.contains("--search"));
+    assert!(output.rendered.contains("search <keyword>"));
 }
 
 #[tokio::test]
@@ -451,11 +450,11 @@ async fn cli_runtime_root_help_includes_find_commands_without_modules() {
     assert_eq!(output.exit_code, 0);
     assert!(output.rendered.contains("Developer tooling"));
     assert!(output.rendered.contains("Find Commands"));
-    assert!(output.rendered.contains("--search <keyword>"));
+    assert!(output.rendered.contains("search <keyword>"));
     assert!(
         output
             .rendered
-            .contains("tree                Display full command tree")
+            .contains("tree              Display full command tree")
     );
 }
 
@@ -1713,6 +1712,135 @@ async fn command_spec_output_schema_registers_schema_and_help_when_mounted() {
 }
 
 #[tokio::test]
+async fn command_help_marks_default_fields_among_output_fields() {
+    #[derive(Debug)]
+    struct DefaultedThing;
+
+    impl OutputSchema for DefaultedThing {
+        fn fields() -> &'static [OutputField] {
+            &[
+                OutputField {
+                    name: "id",
+                    field_type: "string",
+                    optional: false,
+                },
+                OutputField {
+                    name: "name",
+                    field_type: "string",
+                    optional: false,
+                },
+                OutputField {
+                    name: "internal_note",
+                    field_type: "string",
+                    optional: true,
+                },
+            ]
+        }
+    }
+
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new(
+            "defaulted-things",
+            "Manage defaulted things",
+        ))
+        .with_command(RuntimeCommandSpec::new(
+            CommandSpec::new("list", "List defaulted things")
+                .no_auth(true)
+                .with_default_fields("id,name")
+                .with_output_schema::<DefaultedThing>(),
+            async |_credential, _args| {
+                Ok(CommandResult::new(json!([
+                    {"id": "1", "name": "alpha", "internal_note": "x"}
+                ])))
+            },
+        )),
+    );
+
+    let help = cli
+        .run(["my-cli", "help", "defaulted-things", "list"])
+        .await;
+    assert_eq!(help.exit_code, 0);
+
+    let normalized: Vec<String> = help
+        .rendered
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    assert!(normalized.contains(&"id string (default)".to_owned()));
+    assert!(normalized.contains(&"name string (default)".to_owned()));
+    assert!(normalized.contains(&"internal_note string (optional)".to_owned()));
+    // The `--fields` flag itself carries the same default natively, exactly
+    // like `--dry-run` shows `[default: false]`.
+    assert!(help.rendered.contains("--fields <FIELDS>"));
+    assert!(help.rendered.contains("[default: id,name]"));
+}
+
+#[tokio::test]
+async fn command_help_attaches_filter_and_expr_examples_to_their_own_flags() {
+    #[derive(Debug)]
+    struct Thing;
+
+    impl OutputSchema for Thing {
+        fn fields() -> &'static [OutputField] {
+            &[
+                OutputField {
+                    name: "name",
+                    field_type: "string",
+                    optional: false,
+                },
+                OutputField {
+                    name: "enabled",
+                    field_type: "bool",
+                    optional: false,
+                },
+            ]
+        }
+    }
+
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("things", "Manage things")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List things")
+                    .no_auth(true)
+                    .with_output_schema::<Thing>(),
+                async |_credential, _args| Ok(CommandResult::new(json!([]))),
+            ),
+        ),
+    );
+
+    let help = cli.run(["my-cli", "help", "things", "list"]).await;
+    assert_eq!(help.exit_code, 0);
+
+    // Examples now live on the flags they demonstrate, not in a standalone
+    // "Filter examples:"/"Expr examples:" section.
+    assert!(!help.rendered.contains("Filter examples:"));
+    assert!(!help.rendered.contains("Expr examples:"));
+    assert!(help.rendered.contains("--filter <EXPR>"));
+    assert!(
+        help.rendered
+            .contains("e.g. --filter \"contains(name, 'example')\"")
+    );
+    assert!(help.rendered.contains("e.g. --filter 'enabled'"));
+    assert!(help.rendered.contains("--expr <EXPR>"));
+    assert!(help.rendered.contains("e.g. --expr 'length(@)'"));
+    assert!(help.rendered.contains("e.g. --expr '[].name'"));
+}
+
+#[tokio::test]
 async fn command_spec_can_publish_rust_native_json_schema_with_field_summary() {
     #[derive(Debug, serde::Serialize, JsonSchema)]
     struct NativeThing {
@@ -1780,6 +1908,178 @@ async fn command_spec_can_publish_rust_native_json_schema_with_field_summary() {
 }
 
 #[tokio::test]
+async fn output_format_shorthand_flags_are_hidden_from_help_but_still_parse() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("things", "List things").no_auth(true),
+        async |_credential, _args| Ok(CommandResult::new(json!([{"name": "alpha"}]))),
+    ));
+
+    let help = cli.run(["my-cli", "things", "--help"]).await;
+    assert_eq!(help.exit_code, 0);
+    // `--json`/`--toon`/`--human` no longer take their own line; they're
+    // folded into `--output`'s help text instead. Their old standalone help
+    // text is the unambiguous signal that a row would have rendered.
+    assert!(!help.rendered.contains("Shorthand for --output json"));
+    assert!(!help.rendered.contains("Shorthand for --output toon"));
+    assert!(!help.rendered.contains("Shorthand for --output human"));
+    assert!(help.rendered.contains("--output <FORMAT>"));
+    assert!(help.rendered.contains("shorthand: --json, --toon, --human"));
+
+    // Still fully functional despite being hidden from help.
+    let output = cli.run(["my-cli", "things", "--json"]).await;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.rendered).expect("valid json")["data"],
+        json!([{"name": "alpha"}])
+    );
+}
+
+#[tokio::test]
+async fn output_flag_help_default_reflects_actual_tty_based_default() {
+    use std::io::IsTerminal;
+
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("things", "List things").no_auth(true),
+        async |_credential, _args| Ok(CommandResult::new(json!([{"name": "alpha"}]))),
+    ));
+
+    let help = cli.run(["my-cli", "things", "--help"]).await;
+    assert_eq!(help.exit_code, 0);
+    assert!(
+        help.rendered
+            .contains("defaults to human in an interactive terminal, json otherwise")
+    );
+
+    // The hint clap prints must match what this process would actually get:
+    // both are driven by the same `stdout().is_terminal()` check, one at CLI
+    // construction time and one when a command actually runs (see the same
+    // TTY guard pattern used elsewhere in this suite, e.g. the guide-render
+    // test above — under `--nocapture` on a real terminal this flips to
+    // `[default: human]`, which is the point).
+    if std::io::stdout().is_terminal() {
+        assert!(help.rendered.contains("[default: human]"));
+    } else {
+        assert!(help.rendered.contains("[default: json]"));
+    }
+}
+
+#[tokio::test]
+async fn command_help_lists_command_specific_flags_before_global_ones_in_declared_order() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_command(RuntimeCommandSpec::new(
+        // Declared out of alphabetical order (`zeta` before `alpha`) so the
+        // assertion below can only pass if declaration order — not clap's
+        // implicit per-`Command` counter, which would otherwise collide
+        // with the propagated global flags — is what's driving the sort.
+        CommandSpec::new("things", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("zeta").long("zeta").help("zeta flag"))
+            .with_arg(Arg::new("alpha").long("alpha").help("alpha flag")),
+        async |_credential, _args| Ok(CommandResult::new(json!([{"name": "x"}]))),
+    ));
+
+    let help = cli.run(["my-cli", "things", "--help"]).await;
+    assert_eq!(help.exit_code, 0);
+
+    let pos = |needle: &str| help.rendered.find(needle);
+    let zeta = pos("--zeta");
+    let alpha = pos("--alpha");
+    let help_flag = pos("-h, --help");
+    let output = pos("--output <FORMAT>");
+    let verbose = pos("--verbose");
+
+    assert!(
+        zeta.is_some()
+            && alpha.is_some()
+            && help_flag.is_some()
+            && output.is_some()
+            && verbose.is_some(),
+        "expected all five flags in help text, got: {}",
+        help.rendered
+    );
+    // Command-specific flags render first, as a block, in the order they
+    // were declared (not alphabetically, not interleaved with globals).
+    // `Option<usize>` compares `None < Some(_)`, so these also implicitly
+    // re-check presence, but the assert above gives a clearer failure.
+    assert!(
+        zeta < alpha,
+        "zeta ({zeta:?}) should precede alpha ({alpha:?})"
+    );
+    assert!(
+        alpha < help_flag,
+        "alpha ({alpha:?}) should precede the first global flag, --help ({help_flag:?})"
+    );
+    // Global flags follow, in the engine's own declared order.
+    assert!(
+        help_flag < output,
+        "--help ({help_flag:?}) should precede --output ({output:?})"
+    );
+    assert!(
+        output < verbose,
+        "--output ({output:?}) should precede --verbose ({verbose:?})"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_flag_is_hidden_for_non_mutating_commands_but_still_parses() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("things", "List things").no_auth(true),
+        async |_credential, _args| Ok(CommandResult::new(json!([{"name": "x"}]))),
+    ));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("delete-things", "Delete things")
+            .no_auth(true)
+            .with_tier(Tier::Destructive),
+        async |_credential, _args| Ok(CommandResult::new(json!({"deleted": true}))),
+    ));
+
+    // Non-mutating: `--dry-run` would never short-circuit anything here, so
+    // it's noise — hidden from `--help`.
+    let read_help = cli.run(["my-cli", "things", "--help"]).await;
+    assert_eq!(read_help.exit_code, 0);
+    assert!(!read_help.rendered.contains("dry-run"));
+
+    // Mutating: `--dry-run` is meaningful and stays visible.
+    let mutate_help = cli.run(["my-cli", "delete-things", "--help"]).await;
+    assert_eq!(mutate_help.exit_code, 0);
+    assert!(mutate_help.rendered.contains("--dry-run"));
+
+    // Hidden only changes `--help`, never parsing: still accepted (as a
+    // harmless no-op) on the non-mutating command.
+    let output = cli
+        .run(["my-cli", "things", "--dry-run", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.rendered).expect("valid json")["data"],
+        json!([{"name": "x"}])
+    );
+}
+
+#[tokio::test]
 async fn cli_config_extension_hooks_support_custom_flags_search_and_shutdown() {
     let shutdown_count = Arc::new(AtomicUsize::new(0));
     let shutdown_for_closure = Arc::clone(&shutdown_count);
@@ -1822,12 +2122,15 @@ async fn cli_config_extension_hooks_support_custom_flags_search_and_shutdown() {
     });
 
     let search = cli
-        .run(["my-cli", "--search", "peering", "--output", "json"])
+        .run(["my-cli", "search", "peering", "--output", "json"])
         .await;
     assert_eq!(search.exit_code, 0);
     let rendered: serde_json::Value = serde_json::from_str(&search.rendered).expect("valid json");
     assert_eq!(rendered["data"][0]["command"], "kb network");
-    assert_eq!(shutdown_count.load(Ordering::SeqCst), 0);
+    // `search` goes through the same `finish_run` path as every other
+    // command now (it's a real builtin, not a pre-parse bypass anymore), so
+    // `on_shutdown` fires for it too.
+    assert_eq!(shutdown_count.load(Ordering::SeqCst), 1);
 
     let command = cli
         .run([
@@ -1844,7 +2147,7 @@ async fn cli_config_extension_hooks_support_custom_flags_search_and_shutdown() {
     assert_eq!(command.exit_code, 0);
     let rendered: serde_json::Value = serde_json::from_str(&command.rendered).expect("valid json");
     assert_eq!(rendered["metadata"]["env"], "prod");
-    assert_eq!(shutdown_count.load(Ordering::SeqCst), 1);
+    assert_eq!(shutdown_count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1864,10 +2167,14 @@ async fn cli_config_pre_run_runs_after_init_for_real_commands_only() {
         })),
         pre_run: Some(Arc::new(move |middleware, command_path, args| {
             pre_run_count_for_closure.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(command_path, "whoami");
-            assert_eq!(args.get("name"), Some(&json!("tester")));
-            assert_eq!(middleware.env, "init-env");
-            middleware.reason = "pre-run reason".to_owned();
+            // `search` also runs `pre_run` now (see the other builtins in
+            // `cli_config_pre_run_runs_for_builtins_without_init_deps_preserves_legacy`),
+            // so only assert the "whoami"-specific expectations for that call.
+            if command_path == "whoami" {
+                assert_eq!(args.get("name"), Some(&json!("tester")));
+                assert_eq!(middleware.env, "init-env");
+                middleware.reason = "pre-run reason".to_owned();
+            }
             Ok(())
         })),
         commands: vec![RuntimeCommandSpec::new(
@@ -1880,11 +2187,13 @@ async fn cli_config_pre_run_runs_after_init_for_real_commands_only() {
     });
 
     let search = cli
-        .run(["my-cli", "--search", "whoami", "--output", "json"])
+        .run(["my-cli", "search", "whoami", "--output", "json"])
         .await;
     assert_eq!(search.exit_code, 0);
     assert_eq!(init_count.load(Ordering::SeqCst), 0);
-    assert_eq!(pre_run_count.load(Ordering::SeqCst), 0);
+    // `search` is a builtin, like `help`/`guide`/`tree`/`completion`: it runs
+    // `pre_run` but never `init_deps`.
+    assert_eq!(pre_run_count.load(Ordering::SeqCst), 1);
 
     let output = cli
         .run([
@@ -1901,7 +2210,7 @@ async fn cli_config_pre_run_runs_after_init_for_real_commands_only() {
     assert_eq!(rendered["metadata"]["env"], "init-env");
     assert_eq!(rendered["metadata"]["effective_args"]["name"], "tester");
     assert_eq!(init_count.load(Ordering::SeqCst), 1);
-    assert_eq!(pre_run_count.load(Ordering::SeqCst), 1);
+    assert_eq!(pre_run_count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1987,6 +2296,10 @@ async fn cli_config_pre_run_runs_for_builtins_without_init_deps_preserves_legacy
     assert_eq!(tree.exit_code, 0);
     let guide = cli.run(["my-cli", "guide", "deploy"]).await;
     assert_eq!(guide.exit_code, 0);
+    let search = cli
+        .run(["my-cli", "search", "guide", "--output", "json"])
+        .await;
+    assert_eq!(search.exit_code, 0);
 
     assert_eq!(init_count.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -1995,6 +2308,7 @@ async fn cli_config_pre_run_runs_for_builtins_without_init_deps_preserves_legacy
             ("help".to_owned(), json!({"command": "guide"})),
             ("tree".to_owned(), json!({})),
             ("guide".to_owned(), json!({"topic": "deploy"})),
+            ("search".to_owned(), json!({"query": "guide"})),
         ]
     );
 }
@@ -2096,7 +2410,7 @@ async fn cli_runtime_guide_command_rejects_extra_args_preserves_parser_maximum_o
 }
 
 #[tokio::test]
-async fn cli_runtime_search_bypasses_required_command_flags() {
+async fn cli_runtime_search_command_does_not_require_other_commands_flags() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
@@ -2115,10 +2429,10 @@ async fn cli_runtime_search_bypasses_required_command_flags() {
         ),
     );
 
+    // `search` is a structurally separate top-level command, so it never
+    // needs `project list`'s required `--project` flag to be satisfied.
     let output = cli
-        .run([
-            "my-cli", "project", "list", "--search", "project", "--output", "json",
-        ])
+        .run(["my-cli", "search", "project", "--output", "json"])
         .await;
 
     assert_eq!(output.exit_code, 0);
@@ -2128,7 +2442,7 @@ async fn cli_runtime_search_bypasses_required_command_flags() {
 }
 
 #[tokio::test]
-async fn cli_runtime_search_scope_resolves_group_aliases_preserves_legacy() {
+async fn cli_runtime_search_scope_flag_resolves_group_aliases() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
@@ -2153,8 +2467,13 @@ async fn cli_runtime_search_scope_resolves_group_aliases_preserves_legacy() {
         ),
     );
 
+    // `--scope p` resolves the group alias "p" to "project" the same way a
+    // real command path would, narrowing results to just "project list" and
+    // excluding "noise find".
     let output = cli
-        .run(["my-cli", "p", "--search", "projects", "--output", "json"])
+        .run([
+            "my-cli", "search", "projects", "--scope", "p", "--output", "json",
+        ])
         .await;
 
     assert_eq!(output.exit_code, 0);
@@ -2166,59 +2485,6 @@ async fn cli_runtime_search_scope_resolves_group_aliases_preserves_legacy() {
             "snippet": "List projects",
             "confidence": std::f64::consts::FRAC_1_SQRT_2
         }])
-    );
-}
-
-#[tokio::test]
-async fn cli_runtime_search_scope_preserves_legacy_no_opt_flag_consumption_quirk() {
-    let mut cli = Cli::new(CliConfig {
-        name: "my-cli".to_owned(),
-        short: "Developer tooling".to_owned(),
-        app_id: "my-cli".to_owned(),
-        ..CliConfig::default()
-    });
-    cli.add_module_group(
-        "Platform Systems",
-        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
-            RuntimeCommandSpec::new(
-                CommandSpec::new("list", "List projects").no_auth(true),
-                async |_credential, _args| Ok(CommandResult::new(json!({}))),
-            ),
-        ),
-    );
-    cli.add_module_group(
-        "Platform Systems",
-        RuntimeGroupSpec::new(GroupSpec::new("noise", "Noise")).with_command(
-            RuntimeCommandSpec::new(
-                CommandSpec::new("find", "Find projects elsewhere").no_auth(true),
-                async |_credential, _args| Ok(CommandResult::new(json!({}))),
-            ),
-        ),
-    );
-
-    let output = cli
-        .run([
-            "my-cli",
-            "--verbose",
-            "project",
-            "--search",
-            "projects",
-            "--output",
-            "json",
-        ])
-        .await;
-
-    assert_eq!(output.exit_code, 0);
-    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
-    let commands = rendered["data"]
-        .as_array()
-        .expect("search results should be an array")
-        .iter()
-        .map(|result| result["command"].as_str().unwrap_or_default())
-        .collect::<Vec<_>>();
-    assert!(
-        commands.contains(&"noise find"),
-        "Legacy scope resolution treats --verbose as consuming project before --search, so search falls back to root scope; got {commands:?}"
     );
 }
 
@@ -2249,7 +2515,7 @@ async fn cli_runtime_search_indexes_group_command_and_flag_aliases() {
 
     for query in ["portfolio", "inventory", "domain"] {
         let output = cli
-            .run(["my-cli", "--search", query, "--output", "json"])
+            .run(["my-cli", "search", query, "--output", "json"])
             .await;
         assert_eq!(output.exit_code, 0);
         let rendered: serde_json::Value =
@@ -2280,7 +2546,7 @@ async fn cli_runtime_hidden_commands_run_but_stay_out_of_discovery() {
     assert_eq!(rendered["data"], json!({"ok": true}));
 
     let search = cli
-        .run(["my-cli", "--search", "internal", "--output", "json"])
+        .run(["my-cli", "search", "internal", "--output", "json"])
         .await;
     assert_eq!(search.exit_code, 0);
     let rendered: serde_json::Value = serde_json::from_str(&search.rendered).expect("valid json");
@@ -2337,7 +2603,7 @@ async fn cli_runtime_hidden_groups_run_but_hide_their_subtree_from_discovery() {
     assert_eq!(rendered["data"], json!({"repaired": true}));
 
     let search = cli
-        .run(["my-cli", "--search", "repair", "--output", "json"])
+        .run(["my-cli", "search", "repair", "--output", "json"])
         .await;
     assert_eq!(search.exit_code, 0);
     let rendered: serde_json::Value = serde_json::from_str(&search.rendered).expect("valid json");
@@ -2409,7 +2675,7 @@ async fn cli_runtime_search_includes_guides_at_root_scope() {
     }]);
 
     let output = cli
-        .run(["my-cli", "--search", "rollout", "--output", "json"])
+        .run(["my-cli", "search", "rollout", "--output", "json"])
         .await;
 
     assert_eq!(output.exit_code, 0);
@@ -3214,6 +3480,23 @@ async fn command_spec_system_and_default_fields_builders_drive_runtime_output() 
             {"name": "beta"}
         ])
     );
+
+    // `--fields` is registered per-command with `default_fields` as its own
+    // clap default value (so `--help` can show it natively); an explicit
+    // `--fields` on the command line must still take priority over that
+    // default rather than being shadowed by it.
+    let explicit = cli
+        .run(["my-cli", "things", "--output", "json", "--fields", "all"])
+        .await;
+    assert_eq!(explicit.exit_code, 0);
+    let rendered: serde_json::Value = serde_json::from_str(&explicit.rendered).expect("valid json");
+    assert_eq!(
+        rendered["data"],
+        json!([
+            {"name": "alpha", "ignored": "x"},
+            {"name": "beta", "ignored": "y"}
+        ])
+    );
 }
 
 #[tokio::test]
@@ -3401,8 +3684,8 @@ fn root_long_groups_modules_and_builtin_command_hints() {
     assert!(rendered.contains("release"));
     assert!(rendered.contains("Deploy apps"));
     assert!(rendered.contains("    settings  Manage settings"));
-    assert!(rendered.contains("--search <keyword>"));
-    assert!(rendered.contains("guide               Built-in guides"));
+    assert!(rendered.contains("search <keyword>  Search all commands"));
+    assert!(rendered.contains("guide             Built-in guides"));
 }
 
 #[test]
@@ -3990,23 +4273,13 @@ async fn cli_runtime_command_args_preserve_common_clap_value_types() {
 }
 
 #[test]
-fn raw_search_and_output_extraction_matches_legacy_bypass_helpers() {
+fn raw_output_format_extraction_matches_legacy_bypass_helper() {
     assert_eq!(
-        extract_search_query(&["my-cli", "release", "--search", "promote"]),
-        "promote"
-    );
-    assert_eq!(
-        extract_search_query(&["my-cli", "--search=deploy"]),
-        "deploy"
-    );
-    assert_eq!(extract_search_query(&["my-cli", "--search"]), "");
-
-    assert_eq!(
-        extract_output_format(&["my-cli", "-o", "json", "--search", "foo"], "json"),
+        extract_output_format(&["my-cli", "-o", "json", "--reason", "foo"], "json"),
         "json"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "--output=human", "--search", "foo"], "json"),
+        extract_output_format(&["my-cli", "--output=human", "--reason", "foo"], "json"),
         "human"
     );
     assert_eq!(
@@ -4014,7 +4287,7 @@ fn raw_search_and_output_extraction_matches_legacy_bypass_helpers() {
         "json"
     );
     assert_eq!(
-        extract_output_format(&["my-cli", "--search", "foo"], "json"),
+        extract_output_format(&["my-cli", "--reason", "foo"], "json"),
         "json"
     );
     assert_eq!(
@@ -4039,7 +4312,7 @@ fn raw_search_and_output_extraction_matches_legacy_bypass_helpers() {
     // `--output` with no value behaves the same way.
     assert_eq!(extract_output_format(&["my-cli"], "human"), "human");
     assert_eq!(
-        extract_output_format(&["my-cli", "--search", "foo"], "toon"),
+        extract_output_format(&["my-cli", "--reason", "foo"], "toon"),
         "toon"
     );
     assert_eq!(
@@ -4085,7 +4358,6 @@ fn global_flag_defaults_and_derived_flag_classes_cover_common_clap_actions() {
             reason: String::new(),
             timeout: "0s".to_owned(),
             debug: String::new(),
-            search: String::new(),
             credential_store: None,
         }
     );
@@ -9645,14 +9917,13 @@ fn schema_registry_returns_legacy_compatible_schema_shape_and_help_section() {
     assert_eq!(schema.fields[1].name, "enabled");
     assert!(schema.fields[1].optional);
 
-    let help = format_help_section(&schema.fields);
+    let help = format_help_section(&schema.fields, &[]);
     assert!(help.contains("Output fields:"));
     assert!(help.contains("name     string"));
     assert!(help.contains("enabled  bool  (optional)"));
-    assert!(help.contains("--filter \"contains(name, 'example')\""));
-    assert!(help.contains("--filter 'enabled'"));
-    assert!(help.contains("--expr 'length(@)'"));
-    assert!(help.contains("--expr '[].name'"));
+    // `--filter`/`--expr` usage examples no longer live in this standalone
+    // section; they're attached to the flags themselves (see
+    // `command_help_attaches_filter_and_expr_examples_to_their_own_flags`).
 
     cli_engine::register_global_schema_fields(
         "manual:list",
