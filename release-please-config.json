@@ -15,10 +15,15 @@
     { "type": "build", "section": "Build System" },
     { "type": "ci", "section": "Continuous Integration", "hidden": true }
   ],
+  "plugins": ["cargo-workspace"],
   "packages": {
     ".": {
       "release-type": "rust",
       "component": "cli-engine"
+    },
+    "cli-engine-macros": {
+      "release-type": "rust",
+      "component": "cli-engine-macros"
     }
   }
 }
