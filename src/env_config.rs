@@ -30,17 +30,30 @@
 //!   `Option<toml::Value>`, and a field's `from_env` conversion is always a
 //!   separate function from its `from_toml` conversion.
 //!
-//! The cost of using `toml::Value`/`toml::Table` directly, instead of
-//! hiding them behind a `cli_engine`-owned newtype, is that they become
-//! part of this crate's public API: a consumer writing a custom
-//! `from_toml`/`to_toml` function, or calling [`ValueSource::with`]
-//! directly, needs its *own* `toml` dependency on the same major version as
-//! this crate's — otherwise the two crates' `toml::Value` types are
-//! different, incompatible types despite sharing a name.
+//! Using `toml::Value`/`toml::Table` directly, instead of hiding them behind
+//! a `cli_engine`-owned newtype, means they're part of this crate's public
+//! API — and a consumer whose `toml::Value` came from its *own* direct
+//! dependency, rather than this re-export, would need that dependency on
+//! the same major version as this crate's, or the two crates' `toml::Value`
+//! types are different, incompatible types despite sharing a name.
+//! [`#[derive(EnvConfig)]`](cli_engine_macros::EnvConfig)-generated code
+//! always goes through [`crate::env_config::toml`] rather than a bare
+//! `toml::` path for exactly this reason, so the common case (no custom
+//! `from_toml`/`to_toml`) needs no direct `toml` dependency in the consumer
+//! at all. A consumer writing a custom `from_toml`/`to_toml` function or
+//! calling [`ValueSource::with`] directly should do the same —
+//! `cli_engine::env_config::toml::Value`, not its own `toml` dependency's
+//! `toml::Value` — to get the same guarantee.
 
 use std::fmt;
 
 pub use cli_engine_macros::EnvConfig;
+/// Re-exported so `#[derive(EnvConfig)]`-generated code (and a consumer's
+/// own `from_toml`/`to_toml` functions) can name `toml::Value`/`toml::Table`
+/// through `cli_engine` itself rather than needing a direct `toml`
+/// dependency of their own — see the module-level "Why `toml::Value`" note
+/// above.
+pub use toml;
 
 /// Something a field's assembly instructions can be checked against: "do you
 /// have a TOML-shaped value for this key" and "do you have a string value for

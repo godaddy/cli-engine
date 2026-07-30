@@ -169,7 +169,8 @@ min_stage = "experimental"
 
 ## Environment-variable overrides
 
-Environment variables can override environment config fields when you have configured the fields with with `env = "SUFFIX"`. The engine will look for a variable of the format `<APP_ID_UPPER>_<SUFFIX>`.
+Environment variables can override environment config fields when you have configured the fields with `env = "SUFFIX"`. The engine will look for a variable of the format `<APP_ID_UPPER>_<SUFFIX>`.
+
 ## Active Environment
 
 The active environment controls which environment is targeted when no `--env` flag is passed.

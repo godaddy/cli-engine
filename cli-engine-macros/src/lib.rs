@@ -7,12 +7,16 @@
 //! - `env = "SUFFIX"` — opt-in environment-variable suffix.
 //! - `default = <expr>` — literal fallback of the field's own type.
 //! - `default_fn = <path>` — `fn(&SourceChain<'_>) -> T`, computed lazily.
-//! - `from_toml = <path>` — `fn(&toml::Value) -> Result<T, String>`, replaces
-//!   the default `T: DeserializeOwned` conversion.
+//! - `from_toml = <path>` — `fn(&cli_engine::env_config::toml::Value) -> Result<T, String>`,
+//!   replaces the default `T: DeserializeOwned` conversion. Name the
+//!   parameter type through `cli_engine::env_config::toml` (re-exported)
+//!   rather than a direct `toml` dependency of your own, so your crate
+//!   doesn't need to track cli-engine's `toml` version.
 //! - `from_env = <path>` — `fn(&str) -> Result<T, String>`, replaces the
 //!   default `T: FromStr` conversion.
-//! - `to_toml = <path>` — `fn(T) -> toml::Value`, replaces the default
-//!   `T: Into<toml::Value>` conversion used when building an
+//! - `to_toml = <path>` — `fn(T) -> cli_engine::env_config::toml::Value`,
+//!   replaces the default `T: Into<toml::Value>` conversion used when
+//!   building an
 //!   [`EnvTable`](../cli_engine/environments/struct.EnvTable.html) *from* an
 //!   instance (see `impl From<Self> for EnvTable`, generated alongside
 //!   `EnvConfig` so a compiled-in environment can be registered as a plain
@@ -164,9 +168,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         // bare `fn(&Value) -> _` item to one concrete lifetime and then
         // rejects it. A closure has no such inference wrinkle.
         let from_toml_expr = match &attrs.from_toml {
-            Some(expr) => quote! { |value: &toml::Value| (#expr)(value) },
+            Some(expr) => {
+                quote! { |value: &::cli_engine::env_config::toml::Value| (#expr)(value) }
+            }
             None => {
-                quote! { |value: &toml::Value| ::cli_engine::env_config::default_from_toml::<#ty>(value) }
+                quote! { |value: &::cli_engine::env_config::toml::Value| ::cli_engine::env_config::default_from_toml::<#ty>(value) }
             }
         };
         // Only require `T: FromStr` when the field is actually env-var
@@ -203,7 +209,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         // rather than a bare `fn` item.
         let to_toml_expr = match &attrs.to_toml {
             Some(expr) => quote! { (#expr)(value.#field_ident) },
-            None => quote! { ::core::convert::Into::<::toml::Value>::into(value.#field_ident) },
+            None => {
+                quote! { ::core::convert::Into::<::cli_engine::env_config::toml::Value>::into(value.#field_ident) }
+            }
         };
 
         field_idents.push(field_ident.clone());
