@@ -63,10 +63,26 @@ pub fn build_root_long(intro: &str, entries: &[ModuleHelpEntry], has_guide: bool
         }
     }
     out.push_str("\n\n  Find Commands:");
-    out.push_str("\n    --search <keyword>  Search all commands and guides by keyword");
-    out.push_str("\n    tree                Display full command tree");
+    let mut find_commands: Vec<(&str, &str)> = vec![
+        (
+            "search <keyword>",
+            "Search all commands and guides by keyword",
+        ),
+        ("tree", "Display full command tree"),
+    ];
     if has_guide {
-        out.push_str("\n    guide               Built-in guides for AI agents and developers");
+        find_commands.push(("guide", "Built-in guides for AI agents and developers"));
+    }
+    let find_commands_width = find_commands
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or_default();
+    for (label, description) in find_commands {
+        out.push_str(&format!(
+            "\n    {:<find_commands_width$}  {description}",
+            label
+        ));
     }
     out
 }

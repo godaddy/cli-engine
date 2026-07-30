@@ -265,7 +265,7 @@ async fn argv0_command_is_hidden_from_help_tree_and_search() {
     assert!(!tree.rendered.contains("argv0"), "{}", tree.rendered);
 
     let search = cli
-        .run(["my-cli", "--search", "argv0", "--output", "json"])
+        .run(["my-cli", "search", "argv0", "--output", "json"])
         .await;
     assert!(
         !search.rendered.contains("\"argv0\""),

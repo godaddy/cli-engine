@@ -62,6 +62,38 @@ pub(crate) fn completion_args(matches: &ArgMatches) -> ValueMap {
     map
 }
 
+pub(crate) fn search_command() -> Command {
+    Command::new("search")
+        .about("Search commands and guides by keyword")
+        .long_about("Searches command names, descriptions, aliases, and guide content for the given keyword(s). Narrow results to part of the command tree with --scope, e.g. --scope domain or --scope domain:list.")
+        .arg(
+            Arg::new("query")
+                .value_name("QUERY")
+                .num_args(1..)
+                .required(true)
+                .help("Keyword(s) to search for"),
+        )
+        .arg(
+            Arg::new("scope")
+                .long("scope")
+                .value_name("PATH")
+                .help("Limit results to one command subtree, e.g. domain or domain:list"),
+        )
+}
+
+pub(crate) fn search_args(matches: &ArgMatches) -> ValueMap {
+    let leaf = leaf_matches(matches);
+    let query = leaf
+        .get_many::<String>("query")
+        .map(|values| values.map(String::as_str).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    let mut map = value_map([("query", Value::String(query))]);
+    if let Some(scope) = leaf.get_one::<String>("scope") {
+        map.insert("scope".to_owned(), Value::String(scope.clone()));
+    }
+    map
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -95,5 +127,53 @@ mod tests {
                 .try_get_matches_from(["completion", "--bogusflag"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn search_args_joins_multi_word_query_with_spaces() {
+        let m = search_command()
+            .try_get_matches_from(["search", "deploy", "pipeline"])
+            .unwrap();
+        assert_eq!(
+            search_args(&m).get("query"),
+            Some(&Value::String("deploy pipeline".to_owned()))
+        );
+    }
+
+    #[test]
+    fn search_args_leaves_a_single_quoted_token_unchanged() {
+        let m = search_command()
+            .try_get_matches_from(["search", "deploy pipeline"])
+            .unwrap();
+        assert_eq!(
+            search_args(&m).get("query"),
+            Some(&Value::String("deploy pipeline".to_owned()))
+        );
+    }
+
+    #[test]
+    fn search_args_parses_scope() {
+        let m = search_command()
+            .try_get_matches_from(["search", "foo", "--scope", "domain:list"])
+            .unwrap();
+        let args = search_args(&m);
+        assert_eq!(args.get("query"), Some(&Value::String("foo".to_owned())));
+        assert_eq!(
+            args.get("scope"),
+            Some(&Value::String("domain:list".to_owned()))
+        );
+    }
+
+    #[test]
+    fn search_args_omits_scope_when_absent() {
+        let m = search_command()
+            .try_get_matches_from(["search", "foo"])
+            .unwrap();
+        assert_eq!(search_args(&m).get("scope"), None);
+    }
+
+    #[test]
+    fn search_command_requires_a_query() {
+        assert!(search_command().try_get_matches_from(["search"]).is_err());
     }
 }

@@ -250,7 +250,6 @@ Framework global flags populate middleware and apply consistently to every comma
 | `--reason` | Reason passed to authorization, audit, and activity. Only registered when `CliConfig` has an `authz`, `auditor`, or `activity` hook configured directly (not via `init_deps`, which runs after flag registration). |
 | `--timeout` | Command deadline (e.g. `60s`, `5m`); default is no timeout (`0s`). |
 | `--debug` | Debug selector for integrations that use it. |
-| `--search` | Searches command and guide documentation before command execution. |
 | `--version`, `-v` | Prints version/build metadata. |
 
 Applications can add their own global flags with `CliConfig::with_register_flags` and copy parsed
@@ -377,9 +376,7 @@ available for simple or dynamic cases.
 Guides are markdown documents registered globally or by module. They can come from filesystem paths,
 embedded `(path, bytes)` pairs, or explicit `GuideEntry` values.
 
-`--search` indexes command metadata, aliases, guide content, and extra registered search documents.
-Search bypasses normal command execution so users and agents can discover commands without
-satisfying required command flags.
+`search <query...> [--scope <path>]` is a built-in command that indexes command metadata, aliases, guide content, and extra registered search documents. `<query...>` accepts multiple words without quoting. `--scope` limits results to one command subtree (e.g. `--scope domain:list`).
 
 ## Transport
 

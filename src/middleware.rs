@@ -505,8 +505,6 @@ pub struct Middleware {
     pub timeout: Option<Duration>,
     /// Debug selector, interpreted by applications.
     pub debug: String,
-    /// Search query, interpreted before command execution.
-    pub search: String,
     /// Output schema registry.
     pub schema_registry: SchemaRegistry,
     /// Human output view registry.

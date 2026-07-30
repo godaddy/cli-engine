@@ -61,9 +61,7 @@ my-cli argv0 pl --team platform     # dispatch as if invoked as `pl`
 my-cli argv0 legacy-tool ...        # dispatch the `legacy-tool` personality
 ```
 
-It is recognized as the first argument after the program name, is never registered with `clap`, and
-so never appears in `--help`, `tree`, or `--search`. It is active only when the application has
-registered at least one route.
+It is recognized as the first argument after the program name, is never registered with `clap`, and so never appears in `--help`, `tree`, or the `search` command. It is active only when the application has registered at least one route.
 
 Unlike the silent symlink fall-through, an **explicit** `argv0` invocation is strict: an unknown
 name, or a bare `argv0` with no name, exits non-zero with an error listing the known names. This
