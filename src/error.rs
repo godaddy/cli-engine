@@ -107,6 +107,10 @@ pub enum CliCoreError {
     /// Structured HTTP transport error.
     #[error(transparent)]
     Transport(#[from] crate::transport::Error),
+    /// An [`EnvConfig`](crate::env_config::EnvConfig) struct failed to
+    /// assemble from its [`SourceChain`](crate::env_config::SourceChain).
+    #[error(transparent)]
+    EnvConfig(#[from] crate::env_config::EnvConfigError),
 }
 
 impl CliCoreError {
@@ -240,7 +244,8 @@ impl CliCoreError {
             | Self::Detailed { .. }
             | Self::Io(_)
             | Self::Json(_)
-            | Self::Transport(_) => None,
+            | Self::Transport(_)
+            | Self::EnvConfig(_) => None,
         }
     }
 }
@@ -284,7 +289,8 @@ pub fn exit_code_for_error(err: &(dyn std::error::Error + 'static)) -> i32 {
                 | CliCoreError::SystemMessage { .. }
                 | CliCoreError::Io(_)
                 | CliCoreError::Json(_)
-                | CliCoreError::Transport(_) => {}
+                | CliCoreError::Transport(_)
+                | CliCoreError::EnvConfig(_) => {}
             }
         }
         current = error.source();

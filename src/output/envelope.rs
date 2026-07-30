@@ -466,7 +466,8 @@ fn find_detailed_error(
                     | crate::CliCoreError::ExitCode { .. }
                     | crate::CliCoreError::Fix { .. }
                     | crate::CliCoreError::Io(_)
-                    | crate::CliCoreError::Json(_),
+                    | crate::CliCoreError::Json(_)
+                    | crate::CliCoreError::EnvConfig(_),
                 )
                 | None => None,
             }
