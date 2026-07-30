@@ -10966,6 +10966,53 @@ async fn env_group_lists_gets_and_shows_info_for_active_environment() {
     );
 }
 
+#[tokio::test]
+async fn command_help_lists_env_flag_after_command_specific_flags_when_environments_configured() {
+    use cli_engine::environments::{EnvironmentDef, Environments};
+
+    let mut cli = Cli::new(
+        CliConfig::new("my-cli", "Developer tooling", "my-cli").with_environments(Arc::new(
+            Environments::new("prod").with_environment(
+                "prod",
+                EnvironmentDef::new().with_field("api_url", "https://p"),
+            ),
+        )),
+    );
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("things", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("zeta").long("zeta").help("zeta flag")),
+        async |_credential, _args| Ok(CommandResult::new(json!([{"name": "x"}]))),
+    ));
+
+    let help = cli.run(["my-cli", "things", "--help"]).await;
+    assert_eq!(help.exit_code, 0);
+
+    let pos = |needle: &str| help.rendered.find(needle);
+    let zeta = pos("--zeta");
+    let env_flag = pos("--env <ENV>");
+    let help_flag = pos("-h, --help");
+
+    assert!(
+        zeta.is_some() && env_flag.is_some() && help_flag.is_some(),
+        "expected all three flags in help text, got: {}",
+        help.rendered
+    );
+    // `--env` is registered conditionally, directly in `Cli::new` (not via
+    // `register_global_flags`), when `CliConfig.environments` is set. It
+    // needs its own `global_flag_order` value just like every other global
+    // flag, or it falls back to clap's implicit low per-`Command` counter
+    // and collides with command-specific flags again.
+    assert!(
+        zeta < env_flag,
+        "zeta ({zeta:?}) should precede --env ({env_flag:?})"
+    );
+    assert!(
+        help_flag < env_flag,
+        "--help ({help_flag:?}) should precede --env ({env_flag:?}), matching engine declaration order"
+    );
+}
+
 #[derive(Debug)]
 struct RecordingEnvProvider {
     envs: Arc<Mutex<Vec<String>>>,

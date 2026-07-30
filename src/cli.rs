@@ -917,6 +917,7 @@ impl Cli {
                     .long("env")
                     .global(true)
                     .value_name("ENV")
+                    .display_order(crate::flags::global_flag_order::ENV)
                     .help("Override the active environment (see: env list)"),
             );
         }

@@ -77,6 +77,13 @@ impl Default for GlobalFlags {
 /// re-registers those three per-command (see `apply_fields_arg` and
 /// `apply_filter_and_expr_examples`) with contextual help text; they must
 /// reuse these same values or the override would drift out of position.
+///
+/// `REASON` and `ENV` cover the two global flags `Cli::new` registers
+/// directly (conditionally, outside `register_global_flags`) rather than
+/// this module's own function — `--reason` when an authorizer/auditor/
+/// activity emitter is configured, `--env` when `CliConfig.environments` is
+/// set. Both are just as subject to the collision this module exists to
+/// prevent, so both need an explicit value here too.
 pub(crate) mod global_flag_order {
     pub(crate) const HELP: usize = 1000;
     pub(crate) const OUTPUT: usize = 1001;
@@ -95,6 +102,7 @@ pub(crate) mod global_flag_order {
     pub(crate) const TOON: usize = 1015;
     pub(crate) const HUMAN: usize = 1016;
     pub(crate) const REASON: usize = 1017;
+    pub(crate) const ENV: usize = 1018;
 }
 
 /// Registers framework-global flags on a `clap` command.
