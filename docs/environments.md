@@ -55,9 +55,9 @@ Per-field `#[env_config(...)]` attributes:
 
 Because a field's type participates directly, a TOML array becomes a `Vec<String>` with no attribute at all, a TOML table becomes a nested struct, and `Stage` (already `Deserialize` + `FromStr`) needs no per-field wiring either.
 
-**Blank is absent by default.** A source that answers a field with an empty-or-whitespace-only string is treated the same as that source not answering at all — resolution keeps walking the rest of the chain and ultimately falls to `default`/`default_fn`, exactly as if the blank source had said nothing.
+**Blank is absent by default.** A source that answers a field with an empty-or-whitespace-only string, or an empty TOML array (`[]`), is treated the same as that source not answering at all — resolution keeps walking the rest of the chain and ultimately falls to `default`/`default_fn`, exactly as if the blank source had said nothing. (Any other empty TOML shape, like an empty table, doesn't count as blank.)
 
-**`allow_blank` opts a field *out* of that default**, for the rare case where `""` is itself a meaningful, literal answer rather than a stand-in for "unset."
+**`allow_blank` opts a field *out* of that default**, for the rare case where `""` or `[]` is itself a meaningful, literal answer rather than a stand-in for "unset."
 
 ## `ConfigSource` and `SourceChain`
 

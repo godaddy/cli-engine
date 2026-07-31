@@ -297,15 +297,17 @@ where
 /// the field at all, letting the caller apply a default.
 ///
 /// By default (`allow_blank` is `false`), a source that answers with an
-/// empty-or-whitespace-only string (either form — an env var is always a
-/// string; a TOML value counts only when it *is* a string) is treated the
+/// empty-or-whitespace-only string, or an empty TOML array, is treated the
 /// same as that source not answering at all: `resolve_field` keeps walking
 /// the rest of the chain, trying the *next* source, and ultimately falls to
 /// the field's `default`/`default_fn` only once every source has been asked.
-/// This fits nearly every field — a blank override is essentially always a
-/// mistake or an unset placeholder, not a real value, and this holds whether
-/// a field has one source or several fallback tiers. Set `allow_blank` on the
-/// rare field where `""` is itself a meaningful, literal answer.
+/// (An env var is always a string; a TOML value counts only when it *is* a
+/// string or an array — any other TOML shape, including an empty table,
+/// never counts as blank.) This fits nearly every field — a blank or empty
+/// override is essentially always a mistake or an unset placeholder, not a
+/// real value, and this holds whether a field has one source or several
+/// fallback tiers. Set `allow_blank` on the rare field where `""` or `[]` is
+/// itself a meaningful, literal answer.
 ///
 /// # Errors
 ///
@@ -323,6 +325,13 @@ pub fn resolve_field<T>(
     fn is_blank(s: &str) -> bool {
         s.trim().is_empty()
     }
+    fn is_blank_toml_value(value: &toml::Value) -> bool {
+        match value {
+            toml::Value::String(s) => is_blank(s),
+            toml::Value::Array(a) => a.is_empty(),
+            _ => false,
+        }
+    }
 
     for source in sources.iter() {
         if let Some(suffix) = env_suffix
@@ -334,7 +343,7 @@ pub fn resolve_field<T>(
                 .map_err(|reason| EnvConfigError::InvalidField { field, reason });
         }
         if let Some(value) = source.toml_value(key)
-            && (allow_blank || !value.as_str().is_some_and(is_blank))
+            && (allow_blank || !is_blank_toml_value(value))
         {
             return from_toml(value)
                 .map(Some)
@@ -529,6 +538,65 @@ mod tests {
         assert_eq!(
             section.base, "   ",
             "`base` opts in via `allow_blank`, so its blank value is used as-is"
+        );
+    }
+
+    #[test]
+    fn empty_array_falls_through_to_the_next_source_by_default() {
+        // Mirrors the blank-string case, but for a Vec<T> field: a source
+        // that answers with an empty TOML array (e.g. a wired environment's
+        // `scopes = []`) must not silently win over a later tier's real
+        // value — same "blank is absent by default" rule, extended to
+        // arrays, not just strings.
+        let mut table = toml::Table::new();
+        table.insert("tags".to_owned(), toml::Value::Array(Vec::new()));
+        let env = EnvSource::new("prod", table);
+        let base = ValueSource::new().with("tags", vec!["real".to_owned()]);
+        let chain = SourceChain::new().push(&env).push(&base);
+
+        let tags = resolve_field::<Vec<String>>(
+            &chain,
+            "tags",
+            "tags",
+            None,
+            false, // allow_blank: default — empty array collapses to absent
+            default_from_toml::<Vec<String>>,
+            |_raw: &str| -> Result<Vec<String>, String> { Err(String::new()) },
+        )
+        .expect("resolves")
+        .expect("some tier has a value");
+
+        assert_eq!(
+            tags,
+            vec!["real".to_owned()],
+            "the higher-priority source's empty array must defer to the base's real value"
+        );
+    }
+
+    #[test]
+    fn allow_blank_accepts_an_empty_array_as_is() {
+        let mut table = toml::Table::new();
+        table.insert("tags".to_owned(), toml::Value::Array(Vec::new()));
+        let env = EnvSource::new("prod", table);
+        let base = ValueSource::new().with("tags", vec!["real".to_owned()]);
+        let chain = SourceChain::new().push(&env).push(&base);
+
+        let tags = resolve_field::<Vec<String>>(
+            &chain,
+            "tags",
+            "tags",
+            None,
+            true, // allow_blank: opts out, accepting [] literally
+            default_from_toml::<Vec<String>>,
+            |_raw: &str| -> Result<Vec<String>, String> { Err(String::new()) },
+        )
+        .expect("resolves")
+        .expect("some tier has a value");
+
+        assert_eq!(
+            tags,
+            Vec::<String>::new(),
+            "with allow_blank set, the empty array is accepted as-is, not skipped"
         );
     }
 

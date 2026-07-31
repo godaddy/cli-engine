@@ -1222,6 +1222,45 @@ mod tests {
         );
     }
 
+    /// A resolved environment's `scopes = []` is treated as absent, not as a
+    /// deliberate "no scopes" override — it falls through to the provider's
+    /// real base scopes, the same way a blank `client_id`/`auth_url` string
+    /// would. An OAuth flow with zero scopes is never what a wired
+    /// environment actually means; it's the same kind of unset-placeholder
+    /// case blank-string collapsing already exists to catch.
+    #[test]
+    fn environment_with_empty_scopes_falls_back_to_base_scopes() {
+        use crate::environments::{EnvTable, Environments};
+
+        let environments = Arc::new(
+            Environments::new("prod").with_environment(
+                "prod",
+                EnvTable::new()
+                    .with("client_id", "prod-client")
+                    .with("scopes", Vec::<String>::new()),
+            ),
+        );
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid", "base.read"],
+        )
+        .with_environments(environments);
+
+        let oauth = provider.effective_oauth("prod").expect("assembles");
+        assert_eq!(
+            oauth.client_id, "prod-client",
+            "the environment's own value still wins"
+        );
+        assert_eq!(
+            oauth.scopes,
+            vec!["openid".to_owned(), "base.read".to_owned()],
+            "an empty scopes array from the environment must defer to the base config's real scopes"
+        );
+    }
+
     /// A provider with no environment resolver falls back to the base client id,
     /// endpoints, and scopes for every env.
     #[test]

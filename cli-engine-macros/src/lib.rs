@@ -22,14 +22,14 @@
 //!   `EnvConfig` so a compiled-in environment can be registered as a plain
 //!   struct value via `Environments::with_environment`).
 //! - `allow_blank` — bare marker (no value); by default, a source that
-//!   answers with an empty-or-whitespace-only string is treated as not
-//!   having answered at all, so the field keeps looking at the rest of the
-//!   `SourceChain` (and ultimately falls to `default`/`default_fn`) instead
-//!   of accepting `""` literally. This default fits nearly every field: a
-//!   blank override is essentially always a mistake or an unset placeholder,
-//!   never a real value. Set `allow_blank` on the rare field where an
-//!   explicit `""` is itself a meaningful, literal answer distinct from
-//!   "unset."
+//!   answers with an empty-or-whitespace-only string, or an empty TOML
+//!   array, is treated as not having answered at all, so the field keeps
+//!   looking at the rest of the `SourceChain` (and ultimately falls to
+//!   `default`/`default_fn`) instead of accepting `""`/`[]` literally. This
+//!   default fits nearly every field: a blank or empty override is
+//!   essentially always a mistake or an unset placeholder, never a real
+//!   value. Set `allow_blank` on the rare field where an explicit `""` or
+//!   `[]` is itself a meaningful, literal answer distinct from "unset."
 //!
 //! `default` and `default_fn` are mutually exclusive.
 
