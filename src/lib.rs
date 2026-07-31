@@ -61,6 +61,14 @@
 //! Command paths are colon-separated (`project:list`) for policy, audit,
 //! schema, and authorization compatibility with existing CLI ecosystems.
 
+// Lets `#[derive(EnvConfig)]`-generated code always emit `::cli_engine::env_config::...`
+// paths, whether the derive is used by an external consumer crate or by this
+// crate itself (e.g. `auth::pkce::OAuthSection`). The lint doesn't see through
+// macro-generated code as a "use" of the alias, so it's silenced here rather
+// than fought.
+#[allow(unused_extern_crates)]
+extern crate self as cli_engine;
+
 /// Auth provider traits, dispatch, and built-in provider commands.
 pub mod auth;
 /// CLI application assembly and execution.
@@ -73,6 +81,9 @@ pub mod config;
 pub mod config_commands;
 /// Built-in `env` command group (private; only `cli.rs` consumes it).
 mod env_commands;
+/// Declarative, attribute-driven per-environment configuration: `EnvConfig`,
+/// `ConfigSource`, and the `#[derive(EnvConfig)]` macro's runtime support.
+pub mod env_config;
 /// First-class environment definitions and layered resolution.
 pub mod environments;
 /// Shared error type and error traits.
@@ -128,7 +139,10 @@ pub use config::{
     credential_store_env_var, resolve_credential_store, resolve_credential_store_with,
 };
 pub use config_commands::config_command_group;
-pub use environments::{Environment, EnvironmentDef, Environments, OAuthConfig};
+pub use env_config::{
+    ConfigSource, EnvConfig, EnvConfigError, EnvSource, EnvVarSource, SourceChain, ValueSource,
+};
+pub use environments::{EnvTable, Environments};
 pub use error::{
     CliCoreError, DetailedError, ExitCoder, Result, exit_code_for_error, exit_code_for_exit_coder,
 };

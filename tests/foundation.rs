@@ -10978,19 +10978,13 @@ async fn auth_registered_after_construction_is_categorized() {
 
 #[tokio::test]
 async fn env_group_lists_gets_and_shows_info_for_active_environment() {
-    use cli_engine::environments::{EnvironmentDef, Environments};
+    use cli_engine::environments::{EnvTable, Environments};
 
     let cli = Cli::new(
         CliConfig::new("envcmds", "Env cmds", "envcmds").with_environments(Arc::new(
             Environments::new("prod")
-                .with_environment(
-                    "prod",
-                    EnvironmentDef::new().with_field("api_url", "https://p"),
-                )
-                .with_environment(
-                    "ote",
-                    EnvironmentDef::new().with_field("api_url", "https://o"),
-                ),
+                .with_environment("prod", EnvTable::new().with("api_url", "https://p"))
+                .with_environment("ote", EnvTable::new().with("api_url", "https://o")),
         )),
     );
 
@@ -11028,14 +11022,12 @@ async fn env_group_lists_gets_and_shows_info_for_active_environment() {
 
 #[tokio::test]
 async fn command_help_lists_env_flag_after_command_specific_flags_when_environments_configured() {
-    use cli_engine::environments::{EnvironmentDef, Environments};
+    use cli_engine::environments::{EnvTable, Environments};
 
     let mut cli = Cli::new(
         CliConfig::new("my-cli", "Developer tooling", "my-cli").with_environments(Arc::new(
-            Environments::new("prod").with_environment(
-                "prod",
-                EnvironmentDef::new().with_field("api_url", "https://p"),
-            ),
+            Environments::new("prod")
+                .with_environment("prod", EnvTable::new().with("api_url", "https://p")),
         )),
     );
     cli.add_command(RuntimeCommandSpec::new(

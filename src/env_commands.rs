@@ -53,18 +53,12 @@ pub fn env_command_group() -> RuntimeGroupSpec {
                 .with_system("env"),
             async |ctx| {
                 let env = ctx.environment()?;
-                let oauth = env.oauth.map(|o| {
-                    json!({
-                        "client_id": o.client_id,
-                        "auth_url": o.auth_url,
-                        "token_url": o.token_url,
-                        "scopes": o.scopes,
-                    })
-                });
+                let table = serde_json::to_value(env.table()).map_err(|err| {
+                    CliCoreError::message(format!("rendering environment: {err}"))
+                })?;
                 Ok(CommandResult::new(json!({
-                    "name": env.name,
-                    "oauth": oauth,
-                    "extra": env.extra,
+                    "name": env.name(),
+                    "config": table,
                 })))
             },
         ))

@@ -10,7 +10,7 @@ keywords = ["cli", "framework", "clap", "schema"]
 categories = ["command-line-interface"]
 
 [workspace]
-members = ["."]
+members = [".", "cli-engine-macros"]
 
 [lib]
 name = "cli_engine"
@@ -20,6 +20,7 @@ path = "src/lib.rs"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bytes = "1.11"
+cli-engine-macros = { version = "0.1.0", path = "cli-engine-macros" }
 keyring = { version = "3.6.1", optional = true, default-features = false }
 open = { version = "5.3.2", optional = true }
 rand = { version = "0.9", optional = true }
@@ -36,6 +37,7 @@ schemars = { version = "1.2.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
+toml = "0.9"
 toml_edit = { version = "0.22", features = ["serde"] }
 tokio = { version = "1.48.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.43"

@@ -1,0 +1,21 @@
+[package]
+name = "cli-engine-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Derive macro backing cli-engine's EnvConfig"
+repository = "https://github.com/godaddy/cli-engine"
+license = "Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+trybuild = "1"
+
+[lints]
+workspace = true

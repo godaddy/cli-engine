@@ -1,172 +1,135 @@
 //! First-class environment definitions and layered resolution.
 //!
-//! An [`Environments`] value holds compiled-in environment definitions and,
-//! optionally, an `environments.toml` file plus `<ENV>_*` env-var overrides.
-//! Resolving a name merges those layers (later wins) into an [`Environment`].
+//! An [`Environments`] value holds compiled-in environment TOML tables and,
+//! optionally, an `environments.toml` file plus a fallback for names known to
+//! neither. Resolving a name merges those layers (later wins, shallow —
+//! no deep-merging into nested tables/arrays) into one [`EnvSource`], then
+//! threads it (plus an app-scoped environment-variable source) through an
+//! [`crate::env_config::EnvConfig`] struct's own assembly instructions.
+//!
+//! This module owns no per-field knowledge at all. Consumers can create structs
+//! that use `#[derive(EnvConfig)]` to create strongly-typed environment
+//! configs populated by [`Environments`].
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use serde::Deserialize;
+use crate::env_config::{EnvConfig, EnvConfigError, EnvSource, EnvVarSource};
+use crate::{Result, error::CliCoreError};
 
-use crate::{Result, Stage, error::CliCoreError};
+/// A consumer-supplied callback that defines an environment purely from outside
+/// the compiled/file layers (for example, from environment variables) when a
+/// name isn't known to either. See [`Environments::with_fallback`].
+type EnvironmentFallback = Arc<dyn Fn(&str) -> Option<EnvTable> + Send + Sync>;
 
-/// Standard OAuth slice of an environment, consumed by `PkceAuthProvider`.
-///
-/// `auth_url`, `token_url`, and `scopes` may be empty when a layer set only
-/// `client_id`. Consumers should treat empty endpoint strings as "fall back to
-/// the provider's default base endpoints".
-#[non_exhaustive]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OAuthConfig {
-    /// OAuth client id.
-    pub client_id: String,
-    /// Authorization endpoint.
-    pub auth_url: String,
-    /// Token endpoint.
-    pub token_url: String,
-    /// Default scopes.
-    pub scopes: Vec<String>,
-}
+/// A compiled-in environment's raw configuration, expressed as a TOML table so
+/// it can merge with the `environments.toml` file layer on equal footing.
+/// Values accepted by [`EnvTable::with`] cover the common Rust literal types
+/// (`&str`/`String`/`bool`/integers/floats and `Vec<T>` of those) via
+/// [`Into<toml::Value>`], so a compiled-in environment reads like ordinary
+/// Rust, not embedded TOML text.
+#[derive(Debug, Clone, Default)]
+pub struct EnvTable(toml::Table);
 
-/// A fully-resolved environment.
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Environment {
-    /// Environment name (e.g. `prod`).
-    pub name: String,
-    /// OAuth configuration, present when the environment participates in OAuth.
-    pub oauth: Option<OAuthConfig>,
-    /// App-specific fields (for example `api_url`).
-    pub extra: BTreeMap<String, String>,
-    /// Bulk override for this environment's minimum visible feature stage, if set
-    /// by any layer (compiled, file, or env var).
-    pub min_stage: Option<Stage>,
-    /// Per-key feature-stage overrides declared for this environment.
-    pub feature_overrides: BTreeMap<String, Stage>,
-}
-
-/// An unresolved per-environment declaration (one layer of configuration).
-///
-/// Fields are optional so layers can override individual values during
-/// resolution. The same shape parses the `environments.toml` file.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct EnvironmentDef {
-    #[serde(default)]
-    client_id: Option<String>,
-    #[serde(default)]
-    auth_url: Option<String>,
-    #[serde(default)]
-    token_url: Option<String>,
-    #[serde(default)]
-    scopes: Option<Vec<String>>,
-    #[serde(default)]
-    min_stage: Option<Stage>,
-    #[serde(default)]
-    feature_overrides: BTreeMap<String, Stage>,
-    /// Everything not recognised above is captured here (app-specific fields).
-    #[serde(flatten, default)]
-    extra: BTreeMap<String, String>,
-}
-
-impl EnvironmentDef {
-    /// Creates an empty declaration; every field falls back to lower layers.
+impl EnvTable {
+    /// Creates an empty table.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self(toml::Table::new())
     }
 
-    /// Sets the OAuth client id.
+    /// Sets `key` to `value`.
     #[must_use]
-    pub fn with_client_id(mut self, value: impl Into<String>) -> Self {
-        self.client_id = Some(value.into());
-        self
-    }
-
-    /// Sets the authorization endpoint.
-    #[must_use]
-    pub fn with_auth_url(mut self, value: impl Into<String>) -> Self {
-        self.auth_url = Some(value.into());
-        self
-    }
-
-    /// Sets the token endpoint.
-    #[must_use]
-    pub fn with_token_url(mut self, value: impl Into<String>) -> Self {
-        self.token_url = Some(value.into());
-        self
-    }
-
-    /// Sets the default scopes.
-    #[must_use]
-    pub fn with_scopes(mut self, scopes: &[impl AsRef<str>]) -> Self {
-        self.scopes = Some(scopes.iter().map(|s| s.as_ref().to_owned()).collect());
-        self
-    }
-
-    /// Sets an app-specific bag field.
-    #[must_use]
-    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.extra.insert(key.into(), value.into());
-        self
-    }
-
-    /// Sets a bulk override for this environment's minimum visible feature stage.
-    #[must_use]
-    pub fn with_min_stage(mut self, stage: Stage) -> Self {
-        self.min_stage = Some(stage);
-        self
-    }
-
-    /// Sets a per-key feature-stage override for this environment.
-    #[must_use]
-    pub fn with_feature_override(mut self, key: impl Into<String>, stage: Stage) -> Self {
-        self.feature_overrides.insert(key.into(), stage);
+    pub fn with(mut self, key: impl Into<String>, value: impl Into<toml::Value>) -> Self {
+        self.0.insert(key.into(), value.into());
         self
     }
 }
 
-/// On-disk shape of `environments.toml`. The recommended (and only documented)
-/// shape is a flat top-level table per environment (`[prod]`), captured by
-/// `top_level`'s flatten. `environments` is an undocumented compatibility shim
-/// accepting a nested top-level `[environments.prod]` table, so files written
-/// against that shape keep working without being rewritten. The named
-/// `environments` field claims that key before `top_level`'s flatten catches
-/// everything else, so the two shapes never conflict.
-#[derive(Debug, Default, Deserialize)]
-struct FileShape {
-    #[serde(default)]
-    environments: BTreeMap<String, EnvironmentDef>,
-    #[serde(flatten, default)]
-    top_level: BTreeMap<String, EnvironmentDef>,
-}
-
-/// Engine-owned environment system: definitions + resolution + active-env state.
-#[derive(Clone, Debug)]
+/// Engine-owned environment system: compiled/file tables + resolution +
+/// active-env state.
+#[derive(Clone)]
 pub struct Environments {
     default: String,
-    defs: BTreeMap<String, EnvironmentDef>,
+    compiled: BTreeMap<String, EnvTable>,
     use_config_file: bool,
     app_id: String,
     file_path_override: Option<std::path::PathBuf>,
+    fallback: Option<EnvironmentFallback>,
+}
+
+impl std::fmt::Debug for Environments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Environments")
+            .field("default", &self.default)
+            .field("compiled", &self.compiled)
+            .field("use_config_file", &self.use_config_file)
+            .field("app_id", &self.app_id)
+            .field("file_path_override", &self.file_path_override)
+            .field("fallback", &self.fallback.is_some())
+            .finish()
+    }
 }
 
 impl Environments {
     /// Creates an environment system with the given default environment name.
+    ///
+    /// If `default_env` is sourced from the consumer's own persisted state,
+    /// read that state *raw* rather than through anything that calls back
+    /// into [`resolve`](Self::resolve) or a lazily-initialized singleton's
+    /// `instance()`. A consumer wiring a lazy singleton whose default depends
+    /// on its own config can otherwise deadlock re-entering that singleton's
+    /// own initialization while it is still being constructed.
     #[must_use]
     pub fn new(default_env: impl Into<String>) -> Self {
         Self {
             default: default_env.into(),
-            defs: BTreeMap::new(),
+            compiled: BTreeMap::new(),
             use_config_file: false,
             app_id: String::new(),
             file_path_override: None,
+            fallback: None,
         }
     }
 
-    /// Registers (or replaces) a compiled-in environment definition.
+    /// Registers a compiled-in environment's table, merging onto whatever is
+    /// already registered for `name` (later call wins, key-by-key — same
+    /// overlay rule as the `environments.toml` file layer). Accepts an
+    /// [`EnvTable`] directly, or any `#[derive(EnvConfig)]` struct *value* —
+    /// the derive generates `impl From<Self> for EnvTable`, so a compiled-in
+    /// environment can be written as a plain typed struct instead of a
+    /// stringly-keyed builder:
+    ///
+    /// ```
+    /// use cli_engine::{EnvConfig, environments::Environments};
+    ///
+    /// #[derive(Default, EnvConfig)]
+    /// struct ApiConfig {
+    ///     api_url: String,
+    ///     #[env_config(default = String::new())]
+    ///     client_id: String,
+    /// }
+    ///
+    /// let environments = Environments::new("prod").with_environment(
+    ///     "prod",
+    ///     ApiConfig { api_url: "https://api.example.com".to_owned(), client_id: "abc".to_owned() },
+    /// );
+    /// # let _ = environments;
+    /// ```
+    ///
+    /// A struct value has no "absent" state — every field is written, even
+    /// ones left at their type's default — so splitting concerns across
+    /// several smaller structs (each covering only the keys it cares about)
+    /// composes better than one struct with placeholder values for fields it
+    /// doesn't set; merging (rather than replacing) is what makes that
+    /// composition possible across repeated calls for the same `name`.
     #[must_use]
-    pub fn with_environment(mut self, name: impl Into<String>, def: EnvironmentDef) -> Self {
-        self.defs.insert(name.into(), def);
+    pub fn with_environment(mut self, name: impl Into<String>, table: impl Into<EnvTable>) -> Self {
+        let table = table.into();
+        self.compiled
+            .entry(name.into())
+            .and_modify(|existing| overlay(&mut existing.0, &table.0))
+            .or_insert(table);
         self
     }
 
@@ -177,7 +140,9 @@ impl Environments {
         self
     }
 
-    /// Sets the application id used to locate the config file.
+    /// Sets the application id used to locate the config file and as the
+    /// prefix for the app-scoped environment-variable override tier (see
+    /// [`resolve`](Self::resolve)).
     ///
     /// The consumer must set this to the same `app_id` passed to
     /// [`CliConfig::new`](crate::CliConfig::new) before sharing the
@@ -200,19 +165,54 @@ impl Environments {
         self
     }
 
+    /// Registers an opt-in seam for defining an environment purely from
+    /// outside the compiled/file layers.
+    ///
+    /// [`resolve`](Self::resolve)/[`source`](Self::source) — and therefore
+    /// every path built on them, including the built-in `--env` flag and the
+    /// `env` command group — consult `fallback` with the requested name
+    /// whenever that name is unknown to both the compiled-in and
+    /// `environments.toml` layers. Returning `Some(table)` lets a brand-new,
+    /// never-declared name resolve (typically by having `fallback` read its
+    /// own `<NAME>_*` environment variables and build a table from them);
+    /// returning `None` preserves the existing "unknown environment" error.
+    ///
+    /// The returned [`EnvTable`] is treated the same as a compiled-in table:
+    /// it does not skip the `environments.toml` layer, which still merges on
+    /// top of it (later wins). `fallback` is never consulted for a name
+    /// already known to the compiled-in or file layer.
+    #[must_use]
+    pub fn with_fallback<F>(mut self, fallback: F) -> Self
+    where
+        F: Fn(&str) -> Option<EnvTable> + Send + Sync + 'static,
+    {
+        self.fallback = Some(Arc::new(fallback));
+        self
+    }
+
     /// The default environment name.
     #[must_use]
     pub fn default_env(&self) -> &str {
         &self.default
     }
 
+    /// The app id set via [`with_app_id`](Self::with_app_id), or empty if
+    /// never set. Exposed so a consumer building its own
+    /// [`crate::env_config::SourceChain`] (for example `PkceAuthProvider`,
+    /// which has fallback tiers outside this system's own compiled/file
+    /// layers) can reuse the same app-scoped environment-variable prefix that
+    /// [`resolve`](Self::resolve) uses internally.
+    #[must_use]
+    pub fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
     /// Enumerable environment names (compiled-in + file-defined), sorted.
     ///
     /// Any error from reading or parsing the environments file (missing file,
     /// permission/read error, or malformed TOML) is silently swallowed and only
-    /// the compiled-in names are returned. Use [`resolve`](Self::resolve) when
-    /// you need those errors surfaced; a fallible listing variant can be added
-    /// later if needed.
+    /// the compiled-in names are returned. Use [`source`](Self::source) or
+    /// [`resolve`](Self::resolve) when you need those errors surfaced.
     ///
     /// # Blocking
     ///
@@ -222,41 +222,49 @@ impl Environments {
     /// latency-sensitive async path.
     #[must_use]
     pub fn list(&self) -> Vec<String> {
-        let mut names: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
-        if let Ok(file) = self.file_defs() {
+        let mut names: std::collections::BTreeSet<String> = self.compiled.keys().cloned().collect();
+        if let Ok(file) = self.file_tables() {
             names.extend(file.into_keys());
         }
         names.into_iter().collect()
     }
 
-    /// Resolves `name` by merging compiled defaults, the config file,
-    /// and `<ENV>_*` env-var overrides (later wins) into an [`Environment`].
+    /// Builds the merged [`EnvSource`] for `name`: the compiled-in table
+    /// overlaid by the `environments.toml` file table for the same name
+    /// (file wins key-by-key), or a registered [`with_fallback`](Self::with_fallback)
+    /// table when `name` is unknown to both.
     ///
-    /// When only `client_id` was set on the matching layer(s), the returned
-    /// [`Environment`]'s `oauth.auth_url` / `oauth.token_url` will be empty
-    /// strings. Consumers should treat empty endpoint strings as "fall back to
-    /// the provider's default base endpoints".
+    /// This is the seam behind [`resolve`](Self::resolve), exposed directly
+    /// for generic introspection (for example, `env info` printing whatever
+    /// keys an environment's merged table actually has) without needing to
+    /// know about any particular [`EnvConfig`] struct.
     ///
     /// # Blocking
     ///
-    /// When the config-file layer is enabled (via
-    /// [`with_config_file`](Self::with_config_file)), this performs synchronous
-    /// filesystem I/O to read and parse `environments.toml`. Resolve the
-    /// environment once at startup (or off the latency-sensitive path) rather
-    /// than calling it per request inside an async handler.
+    /// When the config-file layer is enabled, this performs synchronous
+    /// filesystem I/O to read and parse `environments.toml`. Avoid calling it
+    /// repeatedly on a latency-sensitive async path.
     ///
     /// # Errors
     ///
-    /// Returns an error when `name` is not known to any layer or when the
+    /// Returns an error when `name` is not known to any layer (including a
+    /// registered [`with_fallback`](Self::with_fallback)) or when the
     /// environments file exists but cannot be read or parsed.
-    pub fn resolve(&self, name: &str) -> Result<Environment> {
-        let compiled = self.defs.get(name);
-        // Parse the file once; reuse for both membership check and merge.
-        let mut all_file_defs = self.file_defs()?;
-        let file = all_file_defs.remove(name);
-        if compiled.is_none() && file.is_none() {
-            let mut known: std::collections::BTreeSet<String> = self.defs.keys().cloned().collect();
-            known.extend(all_file_defs.into_keys());
+    pub fn source(&self, name: &str) -> Result<EnvSource> {
+        let compiled = self.compiled.get(name);
+        let mut all_file_tables = self.file_tables()?;
+        let file = all_file_tables.remove(name);
+        // The fallback only ever introduces a name unknown to the compiled-in
+        // and file layers; a name known to either never consults it.
+        let fallback = if compiled.is_none() && file.is_none() {
+            self.fallback.as_ref().and_then(|f| f(name))
+        } else {
+            None
+        };
+        if compiled.is_none() && file.is_none() && fallback.is_none() {
+            let mut known: std::collections::BTreeSet<String> =
+                self.compiled.keys().cloned().collect();
+            known.extend(all_file_tables.into_keys());
             let known_list: Vec<String> = known.into_iter().collect();
             let known_display = if known_list.is_empty() {
                 "(none defined)".to_owned()
@@ -267,15 +275,62 @@ impl Environments {
                 "unknown environment {name:?}; known: {known_display}"
             )));
         }
-        let mut merged = EnvironmentDef::default();
-        if let Some(def) = compiled {
-            merge_into(&mut merged, def);
+        let mut merged = toml::Table::new();
+        if let Some(table) = compiled {
+            overlay(&mut merged, &table.0);
         }
-        if let Some(def) = &file {
-            merge_into(&mut merged, def);
+        if let Some(table) = &fallback {
+            overlay(&mut merged, &table.0);
         }
-        apply_env_vars(name, &mut merged)?;
-        Ok(finalize(name, merged))
+        if let Some(table) = &file {
+            overlay(&mut merged, table);
+        }
+        Ok(EnvSource::new(name, merged))
+    }
+
+    /// Resolves `name` into a typed [`EnvConfig`] section: the common path,
+    /// `T::assemble` over a chain of the app-scoped environment-variable
+    /// source (see the design note below) and `name`'s merged [`EnvSource`].
+    ///
+    /// # Environment-variable overrides are app-scoped, not environment-scoped
+    ///
+    /// A field's `#[env_config(env = "SUFFIX")]` checks
+    /// `<APP_ID_UPPER>_<SUFFIX>` here — not `<NAME_UPPER>_<SUFFIX>`. At any
+    /// single resolution there is exactly one environment being asked about,
+    /// so scoping the override variable by environment name buys nothing an
+    /// app-scoped name doesn't already give for free, while a bare
+    /// environment name as a prefix (`PROD_`, `DEV_`) is a real collision
+    /// risk in a shared shell/CI environment that an app-scoped prefix
+    /// (`GDDY_...`) avoids categorically. A consumer needing extra fallback
+    /// tiers outside this system's own compiled/file/fallback layers (for
+    /// example a legacy provider-scoped env var) builds its own
+    /// [`crate::env_config::SourceChain`] and calls `T::assemble` directly —
+    /// see `PkceAuthProvider`.
+    ///
+    /// # Blocking
+    ///
+    /// See [`source`](Self::source).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as [`source`](Self::source),
+    /// or when a field's present value fails to convert to its type, or a
+    /// required field has no value in any source and no default (see
+    /// [`EnvConfigError`]).
+    pub fn resolve<T: EnvConfig>(&self, name: &str) -> std::result::Result<T, EnvConfigError> {
+        let source = self.source(name)?;
+        if self.app_id.is_empty() {
+            let chain = crate::env_config::SourceChain::new().push(&source);
+            T::assemble(&chain)
+        } else {
+            let app_scoped = EnvVarSource {
+                prefix: self.app_id.to_uppercase(),
+            };
+            let chain = crate::env_config::SourceChain::new()
+                .push(&app_scoped)
+                .push(&source);
+            T::assemble(&chain)
+        }
     }
 
     /// Path to `environments.toml` next to the engine config file, or `None`
@@ -296,13 +351,13 @@ impl Environments {
         self.config_file_path()
     }
 
-    /// Parses the environments file into a name -> def map. Missing file = empty.
+    /// Parses the environments file into a name -> table map. Missing file = empty.
     ///
     /// Also accepts a legacy, undocumented nested top-level `[environments.prod]`
     /// table alongside the recommended flat `[prod]` shape, so files already
     /// written against that shape keep parsing without being rewritten. When a
-    /// name appears under both, the nested entry's fields win.
-    fn file_defs(&self) -> Result<BTreeMap<String, EnvironmentDef>> {
+    /// name appears under both, the nested entry's keys win, per-key.
+    fn file_tables(&self) -> Result<BTreeMap<String, toml::Table>> {
         let Some(path) = self.effective_file_path() else {
             return Ok(BTreeMap::new());
         };
@@ -315,19 +370,32 @@ impl Environments {
                 )));
             }
         };
-        let shape = toml_edit::de::from_str::<FileShape>(&text).map_err(|err| {
+        let top: toml::Table = toml::from_str(&text).map_err(|err| {
             CliCoreError::message(format!("parsing environments file {path:?}: {err}"))
         })?;
-        let mut defs = shape.top_level;
-        for (name, def) in shape.environments {
-            match defs.get_mut(&name) {
-                Some(existing) => merge_into(existing, &def),
-                None => {
-                    defs.insert(name, def);
+        let mut tables: BTreeMap<String, toml::Table> = BTreeMap::new();
+        for (name, value) in &top {
+            if name == "environments" {
+                continue;
+            }
+            if let Some(table) = value.as_table() {
+                tables.insert(name.clone(), table.clone());
+            }
+        }
+        if let Some(nested) = top.get("environments").and_then(toml::Value::as_table) {
+            for (name, value) in nested {
+                let Some(table) = value.as_table() else {
+                    continue;
+                };
+                match tables.get_mut(name) {
+                    Some(existing) => overlay(existing, table),
+                    None => {
+                        tables.insert(name.clone(), table.clone());
+                    }
                 }
             }
         }
-        Ok(defs)
+        Ok(tables)
     }
 
     /// Config-file key under which the sticky active environment is stored.
@@ -360,7 +428,7 @@ impl Environments {
     /// Returns an error when `name` does not resolve to a known environment, or
     /// when the config file cannot be written.
     pub fn persist_active(&self, name: &str) -> Result<()> {
-        self.resolve(name)?; // reject unknown names
+        self.source(name)?; // reject unknown names
         // Persisting writes the engine config file, which is keyed by app_id.
         // Validate it up front so a missing/invalid app_id yields a clear,
         // actionable error rather than a misleading "no config path" failure
@@ -377,107 +445,12 @@ impl Environments {
     }
 }
 
-/// Merges `src` into `dst`, with `src` winning on any field it sets.
-fn merge_into(dst: &mut EnvironmentDef, src: &EnvironmentDef) {
-    if src.client_id.is_some() {
-        dst.client_id = src.client_id.clone();
-    }
-    if src.auth_url.is_some() {
-        dst.auth_url = src.auth_url.clone();
-    }
-    if src.token_url.is_some() {
-        dst.token_url = src.token_url.clone();
-    }
-    if src.scopes.is_some() {
-        dst.scopes = src.scopes.clone();
-    }
-    if src.min_stage.is_some() {
-        dst.min_stage = src.min_stage;
-    }
-    for (k, v) in &src.feature_overrides {
-        dst.feature_overrides.insert(k.clone(), *v);
-    }
-    for (k, v) in &src.extra {
-        dst.extra.insert(k.clone(), v.clone());
-    }
-}
-
-/// Applies `<ENV>_*` overrides: the three OAuth fields always, any bag key
-/// already present in the merged record (keyed `<ENV>_<KEY>`), the bulk
-/// `<ENV>_MIN_STAGE` stage override, and any feature key already present in
-/// the merged record (keyed `<ENV>_FEATURE_<KEY>`).
-///
-/// The prefix is `name.to_uppercase().replace('-', "_")`, so environment names
-/// that differ only by `-` vs `_` map to the same prefix and will collide.
-///
-/// Scopes are intentionally not env-var overridable; set them via the
-/// compiled-in layer or the `environments.toml` file.
-///
-/// # Errors
-///
-/// Returns an error when `<ENV>_MIN_STAGE` or `<ENV>_FEATURE_<KEY>` is set but
-/// fails to parse as a [`Stage`]. Unlike a missing var (a no-op), a malformed
-/// value is not silently ignored.
-fn apply_env_vars(name: &str, def: &mut EnvironmentDef) -> Result<()> {
-    let prefix = name.to_uppercase().replace('-', "_");
-    if let Ok(v) = std::env::var(format!("{prefix}_OAUTH_CLIENT_ID")) {
-        def.client_id = Some(v);
-    }
-    if let Ok(v) = std::env::var(format!("{prefix}_OAUTH_AUTH_URL")) {
-        def.auth_url = Some(v);
-    }
-    if let Ok(v) = std::env::var(format!("{prefix}_OAUTH_TOKEN_URL")) {
-        def.token_url = Some(v);
-    }
-    let keys: Vec<String> = def.extra.keys().cloned().collect();
-    for key in keys {
-        let var = format!("{prefix}_{}", key.to_uppercase().replace('-', "_"));
-        if let Ok(v) = std::env::var(&var) {
-            def.extra.insert(key, v);
-        }
-    }
-    if let Ok(v) = std::env::var(format!("{prefix}_MIN_STAGE")) {
-        def.min_stage = Some(v.parse::<Stage>().map_err(|err| {
-            CliCoreError::message(format!("invalid {prefix}_MIN_STAGE {v:?}: {err}"))
-        })?);
-    }
-    let feature_keys: Vec<String> = def.feature_overrides.keys().cloned().collect();
-    for key in feature_keys {
-        let var = format!("{prefix}_FEATURE_{}", key.to_uppercase().replace('-', "_"));
-        if let Ok(v) = std::env::var(&var) {
-            let stage = v
-                .parse::<Stage>()
-                .map_err(|err| CliCoreError::message(format!("invalid {var} {v:?}: {err}")))?;
-            def.feature_overrides.insert(key, stage);
-        }
-    }
-    Ok(())
-}
-
-/// Turns a fully-merged declaration into a resolved [`Environment`]. OAuth is
-/// present when a client id was set by any layer.
-fn finalize(name: &str, def: EnvironmentDef) -> Environment {
-    let EnvironmentDef {
-        client_id,
-        auth_url,
-        token_url,
-        scopes,
-        min_stage,
-        feature_overrides,
-        extra,
-    } = def;
-    let oauth = client_id.map(|id| OAuthConfig {
-        client_id: id,
-        auth_url: auth_url.unwrap_or_default(),
-        token_url: token_url.unwrap_or_default(),
-        scopes: scopes.unwrap_or_default(),
-    });
-    Environment {
-        name: name.to_owned(),
-        oauth,
-        extra,
-        min_stage,
-        feature_overrides,
+/// Copies every key from `src` into `dst`, overwriting; shallow — a nested
+/// table or array value replaces `dst`'s prior value wholesale, it is never
+/// merged into.
+fn overlay(dst: &mut toml::Table, src: &toml::Table) {
+    for (key, value) in src {
+        dst.insert(key.clone(), value.clone());
     }
 }
 
@@ -485,6 +458,7 @@ fn finalize(name: &str, def: EnvironmentDef) -> Environment {
 #[allow(clippy::unwrap_used, clippy::expect_used, unsafe_code)]
 mod tests {
     use super::*;
+    use cli_engine_macros::EnvConfig as DeriveEnvConfig;
 
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -498,32 +472,41 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, DeriveEnvConfig)]
+    struct OAuthLike {
+        client_id: String,
+        #[env_config(default = String::new())]
+        auth_url: String,
+        #[env_config(default = String::new())]
+        token_url: String,
+        #[env_config(default = Vec::new())]
+        scopes: Vec<String>,
+    }
+
+    #[derive(Debug, Clone, DeriveEnvConfig)]
+    struct ApiLike {
+        #[env_config(env = "API_URL")]
+        api_url: String,
+    }
+
     fn sample() -> Environments {
         Environments::new("prod")
             .with_environment(
                 "prod",
-                EnvironmentDef::new()
-                    .with_client_id("prod-client")
-                    .with_auth_url("https://api.example.com/authorize")
-                    .with_token_url("https://api.example.com/token")
-                    .with_scopes(&["openid"])
-                    .with_field("api_url", "https://api.example.com"),
+                EnvTable::new()
+                    .with("client_id", "prod-client")
+                    .with("auth_url", "https://api.example.com/authorize")
+                    .with("token_url", "https://api.example.com/token")
+                    .with("scopes", vec!["openid".to_owned()])
+                    .with("api_url", "https://api.example.com"),
             )
-            .with_environment("dev", EnvironmentDef::new().with_client_id("dev-client"))
+            .with_environment("dev", EnvTable::new().with("client_id", "dev-client"))
     }
 
-    #[test]
-    fn oauth_config_defaults_are_empty() {
-        let c = OAuthConfig::default();
-        assert!(c.client_id.is_empty() && c.scopes.is_empty());
-    }
-
-    /// With no environments defined at all, the unknown-env error renders a
-    /// readable placeholder instead of a dangling `known: `.
     #[test]
     fn resolve_unknown_env_with_no_defs_uses_placeholder() {
         let err = Environments::new("prod")
-            .resolve("prod")
+            .source("prod")
             .expect_err("nothing defined should fail");
         let message = err.to_string();
         assert!(
@@ -532,8 +515,6 @@ mod tests {
         );
     }
 
-    /// `persist_active` without an `app_id` returns a clear, actionable error
-    /// (mentioning `app_id`) rather than a misleading config-path failure.
     #[test]
     fn persist_active_without_app_id_errors_clearly() {
         // `persist_active` resolves "prod" internally, which reads the same
@@ -555,17 +536,57 @@ mod tests {
 
     #[test]
     fn builder_registers_compiled_environment() {
-        let envs = Environments::new("prod").with_environment(
-            "prod",
-            EnvironmentDef::new()
-                .with_client_id("prod-client")
-                .with_auth_url("https://api.example.com/authorize")
-                .with_token_url("https://api.example.com/token")
-                .with_scopes(&["openid"])
-                .with_field("api_url", "https://api.example.com"),
-        );
+        let envs = Environments::new("prod")
+            .with_environment("prod", EnvTable::new().with("client_id", "prod-client"));
         assert_eq!(envs.default_env(), "prod");
         assert_eq!(envs.list(), vec!["prod".to_owned()]);
+    }
+
+    /// A struct value works as a compiled-in environment, not just an
+    /// `EnvTable` — the derive's `impl From<T> for EnvTable` maps each field
+    /// by its own `key`.
+    #[test]
+    fn with_environment_accepts_a_typed_struct_value() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = Environments::new("prod").with_environment(
+            "prod",
+            OAuthLike {
+                client_id: "prod-client".to_owned(),
+                auth_url: "https://api.example.com/authorize".to_owned(),
+                token_url: "https://api.example.com/token".to_owned(),
+                scopes: vec!["openid".to_owned()],
+            },
+        );
+        let oauth: OAuthLike = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(oauth.client_id, "prod-client");
+        assert_eq!(oauth.auth_url, "https://api.example.com/authorize");
+    }
+
+    /// Two `with_environment` calls for the same name merge (later call wins
+    /// per key) rather than the second replacing the first outright — this is
+    /// what lets a consumer split one environment's compiled defaults across
+    /// several small structs instead of one struct with placeholder fields
+    /// for keys it doesn't set.
+    #[test]
+    fn with_environment_merges_across_repeated_calls_for_the_same_name() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = Environments::new("prod")
+            .with_environment("prod", EnvTable::new().with("client_id", "prod-client"))
+            .with_environment(
+                "prod",
+                EnvTable::new().with("api_url", "https://api.example.com"),
+            );
+        let oauth: OAuthLike = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(oauth.client_id, "prod-client", "first call's key survives");
+        let api: ApiLike = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(
+            api.api_url, "https://api.example.com",
+            "second call's key is also present"
+        );
     }
 
     #[test]
@@ -573,14 +594,11 @@ mod tests {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let env = sample().resolve("prod").expect("prod resolves");
-        let oauth = env.oauth.expect("oauth present");
+        let oauth: OAuthLike = sample().resolve("prod").expect("prod resolves");
         assert_eq!(oauth.client_id, "prod-client");
+        assert_eq!(oauth.auth_url, "https://api.example.com/authorize");
+        assert_eq!(oauth.token_url, "https://api.example.com/token");
         assert_eq!(oauth.scopes, vec!["openid".to_owned()]);
-        assert_eq!(
-            env.extra.get("api_url").map(String::as_str),
-            Some("https://api.example.com")
-        );
     }
 
     #[test]
@@ -588,157 +606,23 @@ mod tests {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let err = sample().resolve("nope").unwrap_err().to_string();
+        let err = sample().source("nope").unwrap_err().to_string();
         assert!(err.contains("nope"));
         assert!(err.contains("prod") && err.contains("dev"));
     }
 
     #[test]
-    fn resolve_with_only_client_id_yields_partial_oauth() {
+    fn app_scoped_env_var_overrides_toml_value() {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let envs = Environments::new("dev")
-            .with_environment("dev", EnvironmentDef::new().with_client_id("dev-only"));
-        let env = envs.resolve("dev").expect("dev resolves");
-        let oauth = env.oauth.expect("oauth present when client_id is set");
-        assert_eq!(oauth.client_id, "dev-only");
-        assert!(
-            oauth.auth_url.is_empty(),
-            "auth_url should be empty (fall back to provider default)"
-        );
-        assert!(
-            oauth.token_url.is_empty(),
-            "token_url should be empty (fall back to provider default)"
-        );
-        assert!(oauth.scopes.is_empty());
-    }
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit.
+        unsafe { std::env::set_var("MYAPP_API_URL", "https://override.example.com") };
+        let _guard = EnvGuard("MYAPP_API_URL");
 
-    #[test]
-    fn env_var_layer_overrides_oauth_and_known_bag_keys() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: serialized by ENV_LOCK; guards remove vars on any exit incl. panic.
-        unsafe { std::env::set_var("PROD_OAUTH_CLIENT_ID", "override-client") };
-        let _g1 = EnvGuard("PROD_OAUTH_CLIENT_ID");
-        unsafe { std::env::set_var("PROD_API_URL", "https://api.override.example.com") };
-        let _g2 = EnvGuard("PROD_API_URL");
-
-        let env = sample().resolve("prod").expect("prod resolves");
-        assert_eq!(env.oauth.unwrap().client_id, "override-client");
-        assert_eq!(
-            env.extra.get("api_url").map(String::as_str),
-            Some("https://api.override.example.com")
-        );
-    }
-
-    #[test]
-    fn environment_def_min_stage_and_feature_override_builders_set_fields() {
-        let def = EnvironmentDef::new()
-            .with_min_stage(Stage::Experimental)
-            .with_feature_override("domain-bulk-transfer", Stage::Beta);
-        assert_eq!(def.min_stage, Some(Stage::Experimental));
-        assert_eq!(
-            def.feature_overrides.get("domain-bulk-transfer"),
-            Some(&Stage::Beta)
-        );
-    }
-
-    #[test]
-    fn resolve_returns_compiled_min_stage_and_feature_overrides() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let envs = Environments::new("dev").with_environment(
-            "dev",
-            EnvironmentDef::new()
-                .with_client_id("dev-client")
-                .with_min_stage(Stage::Experimental)
-                .with_feature_override("domain-bulk-transfer", Stage::Beta),
-        );
-        let env = envs.resolve("dev").expect("dev resolves");
-        assert_eq!(env.min_stage, Some(Stage::Experimental));
-        assert_eq!(
-            env.feature_overrides.get("domain-bulk-transfer"),
-            Some(&Stage::Beta)
-        );
-    }
-
-    #[test]
-    fn env_var_min_stage_overrides_compiled_and_file_layers() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Local fixture with a compiled `min_stage` (Experimental) that differs
-        // from the env-var value (Beta), so a passing assertion proves the env
-        // var *wins over* an already-set compiled value — not merely that it
-        // populates an otherwise-empty field (which `sample()`'s prod, with no
-        // compiled `min_stage`, could not distinguish).
-        let envs = Environments::new("prod").with_environment(
-            "prod",
-            EnvironmentDef::new()
-                .with_client_id("prod-client")
-                .with_min_stage(Stage::Experimental),
-        );
-        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
-        unsafe { std::env::set_var("PROD_MIN_STAGE", "beta") };
-        let _guard = EnvGuard("PROD_MIN_STAGE");
-
-        let env = envs.resolve("prod").expect("prod resolves");
-        assert_eq!(env.min_stage, Some(Stage::Beta));
-    }
-
-    #[test]
-    fn env_var_feature_override_updates_existing_key() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let envs = Environments::new("prod").with_environment(
-            "prod",
-            EnvironmentDef::new().with_feature_override("domain-bulk-transfer", Stage::Beta),
-        );
-        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
-        unsafe { std::env::set_var("PROD_FEATURE_DOMAIN_BULK_TRANSFER", "ga") };
-        let _guard = EnvGuard("PROD_FEATURE_DOMAIN_BULK_TRANSFER");
-
-        let env = envs.resolve("prod").expect("prod resolves");
-        assert_eq!(
-            env.feature_overrides.get("domain-bulk-transfer"),
-            Some(&Stage::Ga)
-        );
-    }
-
-    #[test]
-    fn env_var_feature_override_for_undeclared_key_is_ignored() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
-        unsafe { std::env::set_var("PROD_FEATURE_NEVER_DECLARED", "beta") };
-        let _guard = EnvGuard("PROD_FEATURE_NEVER_DECLARED");
-
-        let env = sample().resolve("prod").expect("prod resolves");
-        assert!(
-            !env.feature_overrides.contains_key("never-declared"),
-            "an env var must not introduce a brand-new feature key"
-        );
-    }
-
-    #[test]
-    fn malformed_min_stage_env_var_errors_clearly() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit incl. panic.
-        unsafe { std::env::set_var("PROD_MIN_STAGE", "nightly") };
-        let _guard = EnvGuard("PROD_MIN_STAGE");
-
-        let err = sample().resolve("prod").unwrap_err().to_string();
-        assert!(
-            err.contains("PROD_MIN_STAGE") && err.contains("nightly"),
-            "expected error to mention the var name and bad value, got: {err}"
-        );
+        let envs = sample().with_app_id("myapp");
+        let api: ApiLike = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(api.api_url, "https://override.example.com");
     }
 
     #[test]
@@ -772,17 +656,13 @@ api_url = "https://api.custom.example.com"
             .with_config_file(true)
             .with_config_file_path_override(file);
 
-        // File overrides the compiled prod client id, keeps compiled api_url.
-        let prod = envs.resolve("prod").expect("prod");
-        assert_eq!(prod.oauth.unwrap().client_id, "file-client");
-        assert_eq!(
-            prod.extra.get("api_url").map(String::as_str),
-            Some("https://api.example.com")
-        );
+        let prod: OAuthLike = envs.resolve("prod").expect("prod");
+        assert_eq!(prod.client_id, "file-client");
+        let prod_api: ApiLike = envs.resolve("prod").expect("prod");
+        assert_eq!(prod_api.api_url, "https://api.example.com");
 
-        // Custom env exists only in the file.
-        let custom = envs.resolve("custom").expect("custom");
-        assert_eq!(custom.oauth.unwrap().client_id, "custom-client");
+        let custom: OAuthLike = envs.resolve("custom").expect("custom");
+        assert_eq!(custom.client_id, "custom-client");
         assert!(envs.list().contains(&"custom".to_owned()));
     }
 
@@ -815,21 +695,11 @@ client_id = "e710d8b9-f4e5-4178-b1bf-98dfcd15d4ed"
             .with_config_file(true)
             .with_config_file_path_override(file);
 
-        let dev = envs.resolve("dev").expect("dev");
-        assert_eq!(
-            dev.oauth.unwrap().client_id,
-            "94488449-5769-4ecf-8bf4-9f8aa83859a3"
-        );
-        assert_eq!(
-            dev.extra.get("api_url").map(String::as_str),
-            Some("https://api.dev-godaddy.com")
-        );
+        let dev: OAuthLike = envs.resolve("dev").expect("dev");
+        assert_eq!(dev.client_id, "94488449-5769-4ecf-8bf4-9f8aa83859a3");
 
-        let test = envs.resolve("test").expect("test");
-        assert_eq!(
-            test.oauth.unwrap().client_id,
-            "e710d8b9-f4e5-4178-b1bf-98dfcd15d4ed"
-        );
+        let test: OAuthLike = envs.resolve("test").expect("test");
+        assert_eq!(test.client_id, "e710d8b9-f4e5-4178-b1bf-98dfcd15d4ed");
         assert!(envs.list().contains(&"dev".to_owned()));
         assert!(envs.list().contains(&"test".to_owned()));
     }
@@ -861,48 +731,10 @@ client_id = "nested-client"
             .with_config_file(true)
             .with_config_file_path_override(file);
 
-        let prod = envs.resolve("prod").expect("prod");
-        assert_eq!(prod.oauth.unwrap().client_id, "nested-client");
-        assert_eq!(
-            prod.extra.get("api_url").map(String::as_str),
-            Some("https://api.flat.example.com")
-        );
-    }
-
-    #[test]
-    fn file_layer_min_stage_and_features_table_merge_into_feature_overrides() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("environments.toml");
-        std::fs::write(
-            &file,
-            r#"
-[dev]
-min_stage = "experimental"
-
-[staging]
-client_id = "staging-client"
-
-[staging.feature_overrides]
-"domain-bulk-transfer" = "beta"
-"#,
-        )
-        .expect("write file");
-
-        let envs = Environments::new("prod")
-            .with_config_file(true)
-            .with_config_file_path_override(file);
-
-        let dev = envs.resolve("dev").expect("dev");
-        assert_eq!(dev.min_stage, Some(Stage::Experimental));
-
-        let staging = envs.resolve("staging").expect("staging");
-        assert_eq!(
-            staging.feature_overrides.get("domain-bulk-transfer"),
-            Some(&Stage::Beta)
-        );
+        let prod: OAuthLike = envs.resolve("prod").expect("prod");
+        assert_eq!(prod.client_id, "nested-client");
+        let prod_api: ApiLike = envs.resolve("prod").expect("prod");
+        assert_eq!(prod_api.api_url, "https://api.flat.example.com");
     }
 
     const ACTIVE_KEY: &str = "environment.active";
@@ -931,5 +763,65 @@ client_id = "staging-client"
         assert_eq!(envs.effective_active(None, &cfg), "dev"); // config next
         let empty = ConfigFile::default();
         assert_eq!(envs.effective_active(None, &empty), "prod"); // default last
+    }
+
+    #[test]
+    fn fallback_resolves_a_name_unknown_to_compiled_and_file_layers() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = sample().with_fallback(|name| {
+            Some(EnvTable::new().with("client_id", format!("{name}-fallback-client")))
+        });
+        let env: OAuthLike = envs.resolve("throwaway").expect("fallback should resolve");
+        assert_eq!(env.client_id, "throwaway-fallback-client");
+    }
+
+    /// A fallback returning `None` preserves the original "unknown environment"
+    /// error, including the known-names listing.
+    #[test]
+    fn fallback_returning_none_preserves_unknown_env_error() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = sample().with_fallback(|_name| None);
+        let err = envs.source("nope").unwrap_err().to_string();
+        assert!(err.contains("nope"));
+        assert!(err.contains("prod") && err.contains("dev"));
+    }
+
+    /// The fallback is never consulted for a name already known to the
+    /// compiled-in layer — a fallback that would yield different values must
+    /// not be able to shadow it.
+    #[test]
+    fn fallback_is_not_consulted_for_a_known_name() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envs = sample()
+            .with_fallback(|_name| Some(EnvTable::new().with("client_id", "should-not-win")));
+        let env: OAuthLike = envs.resolve("prod").expect("prod resolves");
+        assert_eq!(env.client_id, "prod-client");
+    }
+
+    /// Mirrors gddy's DEVEX-947 case: a brand-new environment name, never
+    /// declared in the compiled-in or file layers, becomes selectable purely
+    /// because its own `<NAME>_API_URL`-style env var is set.
+    #[test]
+    fn fallback_plus_env_var_layer_defines_a_brand_new_environment() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit.
+        unsafe { std::env::set_var("THROWAWAY_API_URL", "https://api.throwaway.example.com") };
+        let _guard = EnvGuard("THROWAWAY_API_URL");
+
+        let envs = sample().with_fallback(|name| {
+            std::env::var(format!("{}_API_URL", name.to_uppercase()))
+                .ok()
+                .map(|api_url| EnvTable::new().with("api_url", api_url))
+        });
+        let env: ApiLike = envs.resolve("throwaway").expect("fallback should resolve");
+        assert_eq!(env.api_url, "https://api.throwaway.example.com");
     }
 }

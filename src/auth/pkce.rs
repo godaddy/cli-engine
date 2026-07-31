@@ -46,15 +46,10 @@
 //! [`Environments`](crate::environments::Environments) with
 //! [`PkceAuthProvider::with_environments`](crate::auth::pkce::PkceAuthProvider::with_environments);
 //! the resolved environment then drives the OAuth config for the active `env`.
-//!
-//! Without a wired resolver (or for a field the resolved environment leaves
-//! empty), endpoints and client ID can still be overridden via environment
-//! variables:
-//! - `<PREFIX>_OAUTH_CLIENT_ID`
-//! - `<PREFIX>_OAUTH_AUTH_URL`
-//! - `<PREFIX>_OAUTH_TOKEN_URL`
-//!
-//! where `<PREFIX>` is the provider name uppercased and with `-` replaced by `_`.
+//! A field the resolved environment leaves empty falls back to the base
+//! config passed to
+//! [`PkceAuthProvider::new`](crate::auth::pkce::PkceAuthProvider::new) — there
+//! is no environment-variable override for OAuth fields.
 
 use std::{
     collections::HashMap,
@@ -80,6 +75,7 @@ use crate::{
     auth::CredentialRequest,
     auth::storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
     config::CredentialStore,
+    env_config::{EnvConfig, SourceChain, ValueSource},
     error::CliCoreError,
 };
 
@@ -135,14 +131,19 @@ impl StoredToken {
     }
 }
 
-/// The effective OAuth values for an environment, computed from a single
-/// environment resolution. A token flow resolves this once and reuses it across
-/// the authorize URL, code exchange, and refresh, rather than re-reading and
-/// re-parsing `environments.toml` once per field.
-struct EffectiveOAuth {
+/// The effective OAuth values for an environment. No default on
+/// `client_id`/`auth_url`/`token_url`: a provider whose base config and
+/// resolved environment both leave one of these blank must fail loudly
+/// (`EnvConfigError::MissingField`), not silently assemble with an empty
+/// endpoint. `scopes` is different — an empty scope list is a normal,
+/// supported configuration (see [`PkceAuthProvider::effective_scopes`]), not
+/// a sign of a never-initialized provider.
+#[derive(Debug, Clone, Default, EnvConfig)]
+struct OAuthSection {
     client_id: String,
     auth_url: String,
     token_url: String,
+    #[env_config(default = Vec::new())]
     scopes: Vec<String>,
 }
 
@@ -158,8 +159,9 @@ pub struct PkceAuthProvider {
     client_id: String,
     scopes: Vec<String>,
     /// Optional environment resolver; when set, per-env OAuth config comes from
-    /// the resolved environment instead of the base config / legacy env override.
-    /// Looked up by the `env` passed to [`AuthProvider::get_credential`].
+    /// the resolved environment instead of the base config passed to
+    /// [`PkceAuthProvider::new`]. Looked up by the `env` passed to
+    /// [`AuthProvider::get_credential`].
     environments: Option<Arc<crate::environments::Environments>>,
     redirect_port: u16,
     redirect_uri: Option<String>,
@@ -172,7 +174,6 @@ pub struct PkceAuthProvider {
     /// published at execution time, not at provider construction.
     client: reqwest::Client,
     app_id: String,
-    env_prefix: String,
     /// Explicit storage backend injected via [`PkceAuthProvider::with_storage`].
     /// Wins over `store_mode` and the config-driven default.
     storage_override: Option<Arc<dyn CredentialStorage>>,
@@ -209,10 +210,8 @@ impl PkceAuthProvider {
         client_id: impl Into<String>,
         scopes: &[impl AsRef<str>],
     ) -> Self {
-        let name = name.into();
-        let env_prefix = name.to_uppercase().replace('-', "_");
         Self {
-            name,
+            name: name.into(),
             auth_url: auth_url.into(),
             token_url: token_url.into(),
             client_id: client_id.into(),
@@ -223,7 +222,6 @@ impl PkceAuthProvider {
             token_timeout: TOKEN_REQUEST_TIMEOUT_DEFAULT,
             client: reqwest::Client::new(),
             app_id: String::new(),
-            env_prefix,
             storage_override: None,
             store_mode: None,
             storage: tokio::sync::OnceCell::new(),
@@ -238,19 +236,19 @@ impl PkceAuthProvider {
     /// Sources per-environment OAuth config from a shared
     /// [`Environments`](crate::environments::Environments).
     ///
-    /// Given an `env`, the provider resolves the environment and uses its
-    /// [`OAuthConfig`](crate::environments::OAuthConfig). This is the
-    /// single-source-of-truth path; prefer it over the base
-    /// `client_id`/`auth_url`/`token_url` when the consumer registers
+    /// Given an `env`, every OAuth-driven method on this provider resolves its
+    /// OAuth config from two tiers, highest priority first: the resolved
+    /// environment's own TOML value, then this provider's base configuration
+    /// from [`PkceAuthProvider::new`]. There is no environment-variable
+    /// override for either tier. Prefer wiring an
+    /// [`Environments`](crate::environments::Environments) over relying on
+    /// the base `client_id`/`auth_url`/`token_url` when the consumer registers
     /// environments via
-    /// [`CliConfig::with_environments`](crate::CliConfig::with_environments).
+    /// [`CliConfig::with_environments`](crate::CliConfig::with_environments) —
+    /// it's the single-source-of-truth path.
     ///
-    /// Precedence per OAuth field, for the resolved env: the resolved
-    /// environment's value when non-empty; otherwise the legacy
-    /// provider-prefixed env var (`<PREFIX>_OAUTH_CLIENT_ID`, `_AUTH_URL`,
-    /// `_TOKEN_URL`); otherwise the base configuration supplied to
-    /// [`PkceAuthProvider::new`]. An empty field on the resolved environment
-    /// falls through, so a partial environment can override only the client id
+    /// A field absent from the resolved environment falls through to the
+    /// base config, so a partial environment can override only the client id
     /// while inheriting the provider's base endpoints.
     ///
     /// # Examples
@@ -259,16 +257,16 @@ impl PkceAuthProvider {
     /// use std::sync::Arc;
     /// use cli_engine::{
     ///     auth::pkce::PkceAuthProvider,
-    ///     environments::{EnvironmentDef, Environments},
+    ///     environments::{EnvTable, Environments},
     /// };
     ///
     /// let environments = Arc::new(
     ///     Environments::new("prod").with_environment(
     ///         "dev",
-    ///         EnvironmentDef::new()
-    ///             .with_client_id("dev-client-id")
-    ///             .with_auth_url("https://api.dev-godaddy.com/v2/oauth2/authorize")
-    ///             .with_token_url("https://api.dev-godaddy.com/v2/oauth2/token"),
+    ///         EnvTable::new()
+    ///             .with("client_id", "dev-client-id")
+    ///             .with("auth_url", "https://api.dev-godaddy.com/v2/oauth2/authorize")
+    ///             .with("token_url", "https://api.dev-godaddy.com/v2/oauth2/token"),
     ///     ),
     /// );
     ///
@@ -422,71 +420,63 @@ impl PkceAuthProvider {
         }
     }
 
-    /// Resolves the [`OAuthConfig`](crate::environments::OAuthConfig) for `env`
-    /// from the wired [`Environments`](crate::environments::Environments), if
-    /// any. Returns `None` when no resolver is wired, the env does not resolve,
-    /// or the resolved environment carries no OAuth slice.
-    fn resolved_oauth(&self, env: &str) -> Option<crate::environments::OAuthConfig> {
-        let envs = self.environments.as_ref()?;
-        match envs.resolve(env) {
-            Ok(resolved) => resolved.oauth,
-            Err(e) => {
-                tracing::debug!(
-                    env,
-                    error = %e,
-                    "environment resolve failed; falling back to base OAuth config"
-                );
-                None
-            }
-        }
-    }
-
     /// Computes the effective OAuth config for `env` with a SINGLE environment
-    /// resolution (at most one `environments.toml` read), then applies the
-    /// resolved → `<PREFIX>_OAUTH_*` env var → base precedence to each field.
+    /// resolution (at most one `environments.toml` read), by assembling an
+    /// [`OAuthSection`] from a two-tier [`SourceChain`], highest priority
+    /// first:
+    ///
+    /// 1. The resolved environment's own TOML value (compiled + file layers).
+    /// 2. This provider's own base config, from [`PkceAuthProvider::new`].
     ///
     /// Token flows call this once and reuse the result so they don't re-read the
     /// environments file once per field.
-    fn effective_oauth(&self, env: &str) -> EffectiveOAuth {
-        let resolved = self.resolved_oauth(env);
-        // Resolved value when non-empty, else the provider-prefixed env var, else base.
-        let field = |resolved_value: Option<&String>, var_suffix: &str, base: &str| -> String {
-            if let Some(value) = resolved_value
-                && !value.is_empty()
-            {
-                return value.clone();
-            }
-            std::env::var(format!("{}_OAUTH_{var_suffix}", self.env_prefix))
-                .unwrap_or_else(|_| base.to_owned())
-        };
-        let scopes = match &resolved {
-            Some(oauth) if !oauth.scopes.is_empty() => oauth.scopes.clone(),
-            _ => self.scopes.clone(),
-        };
-        EffectiveOAuth {
-            client_id: field(
-                resolved.as_ref().map(|o| &o.client_id),
-                "CLIENT_ID",
-                &self.client_id,
-            ),
-            auth_url: field(
-                resolved.as_ref().map(|o| &o.auth_url),
-                "AUTH_URL",
-                &self.auth_url,
-            ),
-            token_url: field(
-                resolved.as_ref().map(|o| &o.token_url),
-                "TOKEN_URL",
-                &self.token_url,
-            ),
-            scopes,
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a present TOML value fails to convert to its
+    /// field's type (for example a non-array `scopes` value), or if
+    /// `client_id`/`auth_url`/`token_url` is blank in *both* tiers — a
+    /// provider whose base config was never given a real value, and whose
+    /// resolved environment (if any) doesn't supply one either, fails loudly
+    /// rather than assembling with an empty endpoint.
+    fn effective_oauth(&self, env: &str) -> Result<OAuthSection> {
+        let env_source =
+            self.environments
+                .as_ref()
+                .and_then(|environments| match environments.source(env) {
+                    Ok(source) => Some(source),
+                    Err(err) => {
+                        tracing::debug!(
+                            env,
+                            error = %err,
+                            "environment resolve failed; falling back to base OAuth config"
+                        );
+                        None
+                    }
+                });
+        let base = ValueSource::new()
+            .with("client_id", self.client_id.clone())
+            .with("auth_url", self.auth_url.clone())
+            .with("token_url", self.token_url.clone())
+            .with("scopes", self.scopes.clone());
+
+        let mut chain = SourceChain::new();
+        if let Some(env_source) = &env_source {
+            chain = chain.push(env_source);
         }
+        chain = chain.push(&base);
+
+        OAuthSection::assemble(&chain).map_err(CliCoreError::from)
     }
 
     /// Default scopes for `env`: the resolved environment's scopes when
     /// non-empty, otherwise the provider's base scopes.
-    fn effective_scopes(&self, env: &str) -> Vec<String> {
-        self.effective_oauth(env).scopes
+    ///
+    /// # Errors
+    ///
+    /// See [`effective_oauth`](Self::effective_oauth).
+    fn effective_scopes(&self, env: &str) -> Result<Vec<String>> {
+        Ok(self.effective_oauth(env)?.scopes)
     }
 
     fn effective_redirect_uri(&self) -> String {
@@ -581,7 +571,7 @@ impl PkceAuthProvider {
         if let Some(token) = self.existing_token(env).await? {
             return Ok(token);
         }
-        let scopes = self.effective_scopes(env);
+        let scopes = self.effective_scopes(env)?;
         self.reauthenticate(env, &scopes).await
     }
 
@@ -633,7 +623,7 @@ impl PkceAuthProvider {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
         // Resolve the OAuth config once for this whole flow (authorize + exchange).
-        let oauth = self.effective_oauth(env);
+        let oauth = self.effective_oauth(env)?;
         let redirect_uri = self.effective_redirect_uri();
         let scope = scopes.join(" ");
 
@@ -693,7 +683,7 @@ impl PkceAuthProvider {
 
     async fn exchange_code_for_token(
         &self,
-        oauth: &EffectiveOAuth,
+        oauth: &OAuthSection,
         code: &str,
         code_verifier: &str,
         requested_scopes: &[String],
@@ -730,7 +720,7 @@ impl PkceAuthProvider {
         refresh_token: &str,
         prior_scopes: &[String],
     ) -> Result<StoredToken> {
-        let oauth = self.effective_oauth(env);
+        let oauth = self.effective_oauth(env)?;
         let params = [
             ("grant_type", "refresh_token"),
             ("client_id", &oauth.client_id),
@@ -787,7 +777,7 @@ impl AuthProvider for PkceAuthProvider {
                 // request defaults ∪ already-granted ∪ required so step-up never
                 // drops previously-acquired scopes.
                 StepUp::Reauthenticate => {
-                    let union = union_scopes(&self.effective_scopes(env), &granted, required);
+                    let union = union_scopes(&self.effective_scopes(env)?, &granted, required);
                     let token = self.reauthenticate(env, &union).await?;
                     ensure_granted(env, &token, required)?;
                     return Ok(self.build_credential(env, &token));
@@ -796,7 +786,7 @@ impl AuthProvider for PkceAuthProvider {
         }
 
         // No usable token: authenticate once, requesting defaults ∪ required.
-        let union = union_scopes(&self.effective_scopes(env), &[], required);
+        let union = union_scopes(&self.effective_scopes(env)?, &[], required);
         let token = self.reauthenticate(env, &union).await?;
         ensure_granted(env, &token, required)?;
         Ok(self.build_credential(env, &token))
@@ -1195,15 +1185,15 @@ mod tests {
     }
 
     fn envs_for_test() -> Arc<crate::environments::Environments> {
-        use crate::environments::{EnvironmentDef, Environments};
+        use crate::environments::{EnvTable, Environments};
         Arc::new(
             Environments::new("prod").with_environment(
                 "prod",
-                EnvironmentDef::new()
-                    .with_client_id("prod-client")
-                    .with_auth_url("https://prod.example.com/auth")
-                    .with_token_url("https://prod.example.com/token")
-                    .with_scopes(&["openid", "prod.read"]),
+                EnvTable::new()
+                    .with("client_id", "prod-client")
+                    .with("auth_url", "https://prod.example.com/auth")
+                    .with("token_url", "https://prod.example.com/token")
+                    .with("scopes", vec!["openid", "prod.read"]),
             ),
         )
     }
@@ -1222,13 +1212,52 @@ mod tests {
             &["openid"],
         )
         .with_environments(envs_for_test());
-        let oauth = provider.effective_oauth("prod");
+        let oauth = provider.effective_oauth("prod").expect("assembles");
         assert_eq!(oauth.client_id, "prod-client");
         assert_eq!(oauth.auth_url, "https://prod.example.com/auth");
         assert_eq!(oauth.token_url, "https://prod.example.com/token");
         assert_eq!(
             oauth.scopes,
             vec!["openid".to_owned(), "prod.read".to_owned()]
+        );
+    }
+
+    /// A resolved environment's `scopes = []` is treated as absent, not as a
+    /// deliberate "no scopes" override — it falls through to the provider's
+    /// real base scopes, the same way a blank `client_id`/`auth_url` string
+    /// would. An OAuth flow with zero scopes is never what a wired
+    /// environment actually means; it's the same kind of unset-placeholder
+    /// case blank-string collapsing already exists to catch.
+    #[test]
+    fn environment_with_empty_scopes_falls_back_to_base_scopes() {
+        use crate::environments::{EnvTable, Environments};
+
+        let environments = Arc::new(
+            Environments::new("prod").with_environment(
+                "prod",
+                EnvTable::new()
+                    .with("client_id", "prod-client")
+                    .with("scopes", Vec::<String>::new()),
+            ),
+        );
+        let provider = PkceAuthProvider::new(
+            "godaddy",
+            "https://base/auth",
+            "https://base/token",
+            "base-client",
+            &["openid", "base.read"],
+        )
+        .with_environments(environments);
+
+        let oauth = provider.effective_oauth("prod").expect("assembles");
+        assert_eq!(
+            oauth.client_id, "prod-client",
+            "the environment's own value still wins"
+        );
+        assert_eq!(
+            oauth.scopes,
+            vec!["openid".to_owned(), "base.read".to_owned()],
+            "an empty scopes array from the environment must defer to the base config's real scopes"
         );
     }
 
@@ -1243,7 +1272,7 @@ mod tests {
             "base-client",
             &["openid"],
         );
-        let oauth = provider.effective_oauth("anything");
+        let oauth = provider.effective_oauth("anything").expect("assembles");
         assert_eq!(oauth.client_id, "base-client");
         assert_eq!(oauth.scopes, vec!["openid".to_owned()]);
     }
@@ -1806,20 +1835,6 @@ mod tests {
         assert_eq!(cred.token, "filetok");
     }
 
-    /// Serializes env-var access and removes the vars on drop (matching the
-    /// convention in `src/environments.rs` tests). Vars persist process-wide, so
-    /// concurrent tests would otherwise see each other's writes.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard removing an env var on drop, even on panic, while ENV_LOCK held.
-    struct EnvGuard(&'static str);
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: the test holds ENV_LOCK for the guard's lifetime.
-            unsafe { std::env::remove_var(self.0) }
-        }
-    }
-
     /// The fix: a provider wired to a shared `Arc<Environments>` whose
     /// `environments.toml` file layer defines `prod` with a different `client_id`
     /// resolves the FILE's client id. This proves the provider's file layer
@@ -1827,7 +1842,7 @@ mod tests {
     /// than an unstamped copy whose file path is `None`.
     #[test]
     fn wired_provider_resolves_client_id_from_environments_file() {
-        use crate::environments::{EnvironmentDef, Environments};
+        use crate::environments::{EnvTable, Environments};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("environments.toml");
@@ -1845,7 +1860,7 @@ client_id = "file-prod-client"
                 .with_app_id("x")
                 .with_environment(
                     "prod",
-                    EnvironmentDef::new().with_client_id("compiled-prod-client"),
+                    EnvTable::new().with("client_id", "compiled-prod-client"),
                 )
                 .with_config_file_path_override(file),
         );
@@ -1862,38 +1877,48 @@ client_id = "file-prod-client"
         // The file overrides the compiled client id, which itself overrides the
         // provider's base — proving the wired provider reads the file layer.
         assert_eq!(
-            provider.effective_oauth("prod").client_id,
+            provider
+                .effective_oauth("prod")
+                .expect("assembles")
+                .client_id,
             "file-prod-client"
         );
     }
 
-    /// Legacy escape hatch: a NON-wired provider still honors the provider-prefixed
-    /// `<PREFIX>_OAUTH_CLIENT_ID` env var, and a wired provider whose resolved env
-    /// yields a non-empty client id takes precedence over that legacy var.
+    /// A wired provider's resolved environment overrides the base config's
+    /// client id.
     #[test]
-    fn legacy_oauth_client_id_env_var_overrides_base_but_yields_to_wired_env() {
-        use crate::environments::{EnvironmentDef, Environments};
+    fn wired_provider_resolved_env_overrides_base_client_id() {
+        use crate::environments::{EnvTable, Environments};
 
-        let _lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // `<PREFIX>` = provider name uppercased, '-' -> '_'. Provider is "test".
-        // SAFETY: serialized by ENV_LOCK; guard removes the var on any exit.
-        unsafe { std::env::set_var("TEST_OAUTH_CLIENT_ID", "legacy-client") };
-        let _guard = EnvGuard("TEST_OAUTH_CLIENT_ID");
-
-        // Non-wired provider: the legacy var overrides the base client id.
-        let bare = test_provider();
-        assert_eq!(bare.effective_oauth("prod").client_id, "legacy-client");
-
-        // Wired provider whose resolved env carries a non-empty client id: the
-        // resolved environment wins over the legacy var.
         let environments = Arc::new(
             Environments::new("prod")
                 .with_app_id("x")
-                .with_environment("prod", EnvironmentDef::new().with_client_id("env-client")),
+                .with_environment("prod", EnvTable::new().with("client_id", "env-client")),
         );
         let wired = test_provider().with_environments(environments);
-        assert_eq!(wired.effective_oauth("prod").client_id, "env-client");
+        assert_eq!(
+            wired.effective_oauth("prod").expect("assembles").client_id,
+            "env-client"
+        );
+    }
+
+    /// `client_id`/`auth_url`/`token_url` have no default: a provider whose
+    /// base config was never given a real client id, and with no environment
+    /// wired to supply one either, must fail loudly rather than assemble with
+    /// an empty client id.
+    #[test]
+    fn effective_oauth_rejects_a_never_initialized_client_id() {
+        let provider = PkceAuthProvider::new(
+            "test",
+            "https://example.com/auth",
+            "https://example.com/token",
+            "",
+            &["openid"],
+        );
+        let err = provider
+            .effective_oauth("prod")
+            .expect_err("a blank client_id with no other tier to supply one must be an error");
+        assert!(err.to_string().contains("client_id"));
     }
 }

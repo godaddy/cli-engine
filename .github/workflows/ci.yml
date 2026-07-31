@@ -37,5 +37,18 @@ jobs:
       - name: Doc Tests
         run: cargo test --doc && cargo test --doc --features pkce-auth
 
+      # cli-engine depends on the new cli-engine-macros crate (path + version
+      # dependency), which isn't on crates.io until its first real release
+      # (see release.yml) — until then, the dry run can't resolve it, which
+      # is expected and not a real publish problem. Tolerate specifically
+      # that failure; anything else still fails the check.
       - name: Publish dry run
-        run: cargo publish --dry-run
+        run: |
+          if ! output=$(cargo publish --dry-run 2>&1); then
+            echo "$output"
+            if echo "$output" | grep -q 'no matching package named `cli-engine-macros` found'; then
+              echo "cli-engine-macros isn't on crates.io yet (expected pre-first-release); not a real dry-run failure"
+            else
+              exit 1
+            fi
+          fi

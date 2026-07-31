@@ -2,8 +2,8 @@
 //! [`Cli::run`] the way a real consumer binary would: cascading resolution across
 //! module/group/command with an override, pruning a hidden node from `--help` and
 //! `--schema` (and the unknown-command error on direct invocation), environment
-//! `min_stage`/`feature_overrides` layering (compiled and via an `<ENV>_*` env
-//! var), and the built-in `flags list`/`flags info` introspection commands.
+//! `min_stage`/`feature_overrides` layering (compiled and via `environments.toml`),
+//! and the built-in `flags list`/`flags info` introspection commands.
 //!
 //! Cascading resolution, pruning internals, and env-var precedence already have
 //! thorough unit coverage in `src/cli.rs` and `src/environments.rs`; this file
@@ -14,10 +14,11 @@
 // mutation race-free for the whole `Cli::new` + `Cli::run` sequence.
 #![allow(clippy::await_holding_lock)]
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cli_engine::{
-    Cli, CliConfig, CommandResult, CommandSpec, EnvironmentDef, Environments, GroupSpec, Module,
+    Cli, CliConfig, CommandResult, CommandSpec, EnvTable, Environments, GroupSpec, Module,
     RuntimeCommandSpec, RuntimeGroupSpec, Stage,
 };
 use serde_json::{Value, json};
@@ -156,7 +157,7 @@ async fn environment_min_stage_loosens_consumer_policy_end_to_end() {
             .with_environments(Arc::new(
                 Environments::new("flagtest-envmin").with_environment(
                     "flagtest-envmin",
-                    EnvironmentDef::new().with_min_stage(Stage::Experimental),
+                    EnvTable::new().with("min_stage", "experimental"),
                 ),
             ))
             .with_module(gated_module()),
@@ -194,7 +195,10 @@ async fn environment_feature_override_reveals_pruned_subtree_end_to_end() {
         .with_environments(Arc::new(
             Environments::new("flagtest-featoverride").with_environment(
                 "flagtest-featoverride",
-                EnvironmentDef::new().with_feature_override("sandbox-flag", Stage::Ga),
+                EnvTable::new().with(
+                    "feature_overrides",
+                    BTreeMap::from([("sandbox-flag", "ga")]),
+                ),
             ),
         ))
         .with_module(gated_module()),
@@ -232,10 +236,8 @@ async fn environment_min_stage_tightens_permissive_consumer_policy_end_to_end() 
         CliConfig::new("flagtighten", "Flag tighten test", "flagtighten-app")
             .with_min_stage(Stage::Experimental)
             .with_environments(Arc::new(
-                Environments::new("flagtest-tighten").with_environment(
-                    "flagtest-tighten",
-                    EnvironmentDef::new().with_min_stage(Stage::Ga),
-                ),
+                Environments::new("flagtest-tighten")
+                    .with_environment("flagtest-tighten", EnvTable::new().with("min_stage", "ga")),
             ))
             .with_module(gated_module()),
     );
@@ -306,47 +308,6 @@ impl Drop for EnvGuard {
     }
 }
 
-// A distinctive, test-scoped environment name so its derived env-var prefix
-// (`FLAGTEST_ENVVAR_*`) cannot collide with a real environment name a developer
-// might have configured locally.
-const ENV_VAR_ENV_NAME: &str = "flagtest-envvar";
-const ENV_VAR_MIN_STAGE: &str = "FLAGTEST_ENVVAR_MIN_STAGE";
-
-#[tokio::test]
-async fn env_var_min_stage_override_reaches_dispatch_end_to_end() {
-    // Confirms the full `<ENV>_MIN_STAGE` env var -> `Environments::resolve` ->
-    // `FlagPolicy` -> tree-pruning -> clap chain, not just that `resolve()`
-    // returns the right `Environment` in isolation (already covered in
-    // `src/environments.rs`'s unit tests).
-    let _lock = lock();
-    let _guard = EnvGuard::set(ENV_VAR_MIN_STAGE, "experimental");
-
-    let cli = Cli::new(
-        CliConfig::new("flagenvvar", "Flag env-var test", "flagenvvar-app")
-            .with_environments(Arc::new(
-                Environments::new(ENV_VAR_ENV_NAME)
-                    .with_environment(ENV_VAR_ENV_NAME, EnvironmentDef::new()),
-            ))
-            .with_module(gated_module()),
-    );
-
-    let help = cli.run(["flagenvvar", "devkit"]).await;
-    assert_eq!(help.exit_code, 0, "{}", help.rendered);
-    assert!(help.rendered.contains("sandbox"), "{}", help.rendered);
-
-    let dispatch = cli
-        .run([
-            "flagenvvar",
-            "devkit",
-            "sandbox",
-            "peek",
-            "--output",
-            "json",
-        ])
-        .await;
-    assert_eq!(dispatch.exit_code, 0, "{}", dispatch.rendered);
-}
-
 // A distinctive, test-scoped app id so its derived `GLOBALMINSTAGE_MIN_STAGE`
 // env var cannot collide with a real app id a developer/CI might have set.
 const GLOBAL_MIN_STAGE_APP_ID: &str = "globalminstage";
@@ -408,7 +369,7 @@ async fn active_environment_tightens_beyond_global_min_stage_env_var_end_to_end(
         .with_environments(Arc::new(
             Environments::new("globalminstageenv-env").with_environment(
                 "globalminstageenv-env",
-                EnvironmentDef::new().with_min_stage(Stage::Ga),
+                EnvTable::new().with("min_stage", "ga"),
             ),
         ))
         .with_module(gated_module()),

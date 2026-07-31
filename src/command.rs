@@ -159,20 +159,23 @@ impl CommandContext {
         self.middleware.dry_run
     }
 
-    /// Resolves the active [`Environment`](crate::environments::Environment) for
-    /// this invocation.
+    /// Resolves the active environment's merged TOML table for this
+    /// invocation, as an [`EnvSource`](crate::env_config::EnvSource).
     ///
     /// The active environment name is `self.middleware.env`, seeded at startup
     /// from the persisted active environment or configured default and
     /// overridden per invocation by the global `--env` flag. Resolution merges
-    /// the compiled-in definition, the `environments.toml` file layer, and
-    /// `<ENV>_*` environment-variable overrides.
+    /// the compiled-in table and the `environments.toml` file layer (file
+    /// wins). Use this for generic introspection (see the built-in `env info`
+    /// command); for a typed section with the app-scoped environment-variable
+    /// override tier applied, use
+    /// [`environment_config`](Self::environment_config) instead.
     ///
     /// # Blocking
     ///
     /// When the `environments.toml` file layer is enabled, this performs
     /// synchronous filesystem I/O via
-    /// [`Environments::resolve`](crate::environments::Environments::resolve).
+    /// [`Environments::source`](crate::environments::Environments::source).
     /// Call it once per invocation and reuse the result rather than calling it
     /// repeatedly inside an async handler on a latency-sensitive path.
     ///
@@ -181,7 +184,31 @@ impl CommandContext {
     /// Returns an error if no environment system was registered via
     /// [`CliConfig::with_environments`](crate::CliConfig::with_environments) or
     /// if the active name does not resolve to a known environment.
-    pub fn environment(&self) -> Result<crate::environments::Environment> {
+    pub fn environment(&self) -> Result<crate::env_config::EnvSource> {
+        let environments = self.middleware.environments.as_ref().ok_or_else(|| {
+            crate::error::CliCoreError::message("no environment system configured")
+        })?;
+        environments.source(&self.middleware.env)
+    }
+
+    /// Resolves the active environment into a typed
+    /// [`EnvConfig`](crate::env_config::EnvConfig) section, with the
+    /// app-scoped environment-variable override tier applied (see
+    /// [`Environments::resolve`](crate::environments::Environments::resolve)).
+    ///
+    /// # Blocking
+    ///
+    /// See [`environment`](Self::environment).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as
+    /// [`environment`](Self::environment), or when a field's present value
+    /// fails to convert to its type, or a required field has no value in any
+    /// source and no default.
+    pub fn environment_config<T: crate::env_config::EnvConfig>(
+        &self,
+    ) -> std::result::Result<T, crate::env_config::EnvConfigError> {
         let environments = self.middleware.environments.as_ref().ok_or_else(|| {
             crate::error::CliCoreError::message("no environment system configured")
         })?;
