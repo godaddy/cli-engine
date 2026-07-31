@@ -1,6 +1,6 @@
 [package]
 name = "cli-engine"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Rust CLI framework for consistent command modules"
 repository = "https://github.com/godaddy/cli-engine"
@@ -20,7 +20,7 @@ path = "src/lib.rs"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bytes = "1.11"
-cli-engine-macros = { version = "0.1.0", path = "cli-engine-macros" }
+cli-engine-macros = { version = "0.2.0", path = "cli-engine-macros" }
 keyring = { version = "3.6.1", optional = true, default-features = false }
 open = { version = "5.3.2", optional = true }
 rand = { version = "0.9", optional = true }

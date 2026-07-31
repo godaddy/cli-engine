@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.5.0...cli-engine-v0.6.0) (2026-07-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* **environments:** declarative, attribute-driven per-environment config ([#69](https://github.com/godaddy/cli-engine/issues/69))
+
+### Features
+
+* **environments:** declarative, attribute-driven per-environment config ([#69](https://github.com/godaddy/cli-engine/issues/69)) ([bdf256d](https://github.com/godaddy/cli-engine/commit/bdf256d370585492fe02f8b70adedc5e1fa0c42b))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * cli-engine-macros bumped from 0.1.0 to 0.2.0
+
 ## [0.5.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.4.10...cli-engine-v0.5.0) (2026-07-30)
 
 
