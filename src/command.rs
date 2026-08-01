@@ -283,7 +283,13 @@ impl CommandContext {
 ///
 /// `CommandSpec` intentionally keeps command metadata next to the command's
 /// handler. This is the primary copy/paste surface for teams adding commands.
+///
+/// Construct with [`CommandSpec::new`] or [`CommandSpec::from_args`], then
+/// configure with the `with_*` builder methods — never as a struct literal.
+/// `#[non_exhaustive]` enforces this so the engine can add fields (as it did
+/// for [`arg_groups`](CommandSpec::arg_groups)) without a breaking release.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct CommandSpec {
     /// Leaf command name.
     pub name: String,
@@ -714,7 +720,12 @@ impl CommandSpec {
 ///
 /// Groups are noun-based containers. They do not run business logic directly;
 /// when invoked bare, the CLI renders group help.
+///
+/// Construct with [`GroupSpec::new`], then configure with the `with_*` builder
+/// methods — never as a struct literal. `#[non_exhaustive]` enforces this so
+/// the engine can add fields later without a breaking release.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct GroupSpec {
     /// Group command name.
     pub name: String,
