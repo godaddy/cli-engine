@@ -23,9 +23,10 @@ use super::{Envelope, NextAction, NextActionParam};
 /// and hide-priority. Declared order only governs output when no selection is
 /// given at all.
 ///
-/// Construct with [`TableColumn::new`], then chain `with_*`/builder methods —
-/// never as a struct literal. `#[non_exhaustive]` enforces this so the engine
-/// can add fields (as it did for `nested`) without a breaking release.
+/// Construct with [`TableColumn::new`], then chain builder methods like
+/// [`no_truncate`](TableColumn::no_truncate)/[`nested`](TableColumn::nested)
+/// — never as a struct literal. `#[non_exhaustive]` enforces this so the
+/// engine can add fields (as it did for `nested`) without a breaking release.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct TableColumn {
