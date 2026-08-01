@@ -571,7 +571,7 @@ Human output is designed for readable terminal display:
   hiding all work identically either way.
 - Objects render as `key: value` lines.
 - Mixed object/scalar arrays fall back to line-per-item rendering.
-- Objects in fallback lines render as compact JSON.
+- Objects in fallback lines render as compact JSON, unless a column opts into `nested` rendering — see below.
 - JSON numbers use `serde_json` number text.
 - Table columns size to the live terminal width (falling back to a fixed 80
   columns when stdout isn't a TTY, e.g. when piped) rather than a fixed
@@ -580,6 +580,8 @@ Human output is designed for readable terminal display:
 - `TableColumn::no_truncate` opts a column out of shrinking entirely (still
   bounded by a large pathological-value safety cap) — use it for values that
   are useless when cut short, such as URLs.
+- `TableColumn::field` supports a dotted path (`"parameters.items"`) to reach a value nested under intermediate objects — useful when a response wraps a list in a pagination/summary envelope.
+- `TableColumn::nested(columns)` opts a column into rendering its value as an indented child table (when the value is a list of objects) or an indented child property bag (when it's a single object), instead of the raw-JSON fallback every other column gets. It's a strict opt-in: a column with no `.nested(...)` renders exactly as before even if its runtime value happens to be list/object shaped. Nesting only applies inside an object's property bag — a row cell inside an array-of-objects table always renders as a single flat value, since a table row is one monospace line and can't itself contain a rendered sub-block. A nested child's own columns may set `.nested(...)` again for a grandchild table or property bag; the width budget and hide-before-truncate behavior below apply to every nesting level, narrowed by two spaces of indent per level.
 - When the terminal is too narrow for every column, hiding a column is
   preferred over truncating a cell: the lowest-priority (trailing) columns —
   see "Column order is priority" below — are hidden one at a time until the
@@ -621,6 +623,33 @@ let shared = HumanViewDef::new(
 
 // Referenced from any command that should use it:
 let spec = CommandSpec::new("get", "Get a project").with_view_id("projects-table");
+```
+
+A column can nest a child table under an object field. Given a response shaped like `{ "name": "getPets", "parameters": { "items": [...], "total": 2 } }`:
+
+```rust
+use cli_engine::{CommandSpec, TableColumn};
+
+let spec = CommandSpec::new("get", "Get an operation").with_view(vec![
+    TableColumn::new("name", "Name"),
+    TableColumn::new("parameters.items", "Parameters").nested(vec![
+        TableColumn::new("name", "Name"),
+        TableColumn::new("in", "In"),
+    ]),
+]);
+```
+
+which renders as:
+
+```
+Name: getPets
+Parameters:
+  NAME   IN
+  -----  -----
+  limit  query
+  id     path
+
+  (2 rows)
 ```
 
 ### Column order is priority

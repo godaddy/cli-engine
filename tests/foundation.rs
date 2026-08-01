@@ -1130,11 +1130,13 @@ async fn cli_config_registers_modules_guides_views_and_init_once() {
                     field: "name".to_owned(),
                     header: "Name".to_owned(),
                     no_truncate: false,
+                    nested: None,
                 },
                 TableColumn {
                     field: "enabled".to_owned(),
                     header: "Enabled".to_owned(),
                     no_truncate: false,
+                    nested: None,
                 },
             ],
         });
@@ -1263,6 +1265,7 @@ async fn cli_config_accepts_trait_based_command_modules() {
                     field: "name".to_owned(),
                     header: "Name".to_owned(),
                     no_truncate: false,
+                    nested: None,
                 }],
             }]
         }
@@ -1564,11 +1567,13 @@ async fn cli_seeds_schema_and_human_views_from_global_registries() {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
             TableColumn {
                 field: "enabled".to_owned(),
                 header: "Enabled".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
         ],
     });
@@ -7816,11 +7821,13 @@ async fn middleware_human_output_default_fields_narrows_view_columns() {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
             TableColumn {
                 field: "status".to_owned(),
                 header: "Status".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
         ],
     });
@@ -7871,11 +7878,13 @@ async fn middleware_human_output_resolves_declared_view_id() {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
             TableColumn {
                 field: "status".to_owned(),
                 header: "Status".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
         ],
     });
@@ -7918,6 +7927,7 @@ async fn middleware_human_output_uses_custom_view_function_before_columns() {
             field: "name".to_owned(),
             header: "Name".to_owned(),
             no_truncate: false,
+            nested: None,
         }],
     });
     middleware.human_views.register_func("things:list", |data| {
@@ -9176,6 +9186,7 @@ fn human_renderer_column_mixed_object_scalar_array_falls_back_to_lines() {
         field: "name".to_owned(),
         header: "Name".to_owned(),
         no_truncate: false,
+        nested: None,
     }];
     let envelope = Envelope::success(
         json!([
@@ -9201,11 +9212,13 @@ fn human_view_registry_renders_registered_columns_for_lists() {
                 field: "name".to_owned(),
                 header: "Name".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
             TableColumn {
                 field: "enabled".to_owned(),
                 header: "Enabled".to_owned(),
                 no_truncate: false,
+                nested: None,
             },
         ],
     });
@@ -9232,11 +9245,13 @@ fn human_view_registry_renders_registered_columns_for_objects() {
             field: "name".to_owned(),
             header: "Name".to_owned(),
             no_truncate: false,
+            nested: None,
         },
         TableColumn {
             field: "missing".to_owned(),
             header: "Missing".to_owned(),
             no_truncate: false,
+            nested: None,
         },
     ];
     let envelope = Envelope::success(json!({"name": "alpha", "ignored": "x"}), "things");
@@ -9255,6 +9270,7 @@ fn human_view_registry_custom_renderer_wins_over_columns_preserves_legacy_view_f
             field: "name".to_owned(),
             header: "Name".to_owned(),
             no_truncate: false,
+            nested: None,
         }],
     });
     registry.register_func("things", |data| {
