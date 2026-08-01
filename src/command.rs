@@ -42,7 +42,12 @@ pub type StreamingCommandHandler =
 /// Command handlers should return renderable data and keep output metadata on
 /// [`CommandSpec`]. The metadata field is reserved for future command-result
 /// extensions that are not known when the command is registered.
+///
+/// Construct with [`CommandResult::new`], then chain `with_*` methods —
+/// never as a struct literal. `#[non_exhaustive]` enforces this so the engine
+/// can add fields without a breaking release.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct CommandResult {
     /// JSON data rendered by the configured output formatter.
     pub data: Value,
@@ -842,7 +847,13 @@ impl GroupSpec {
 ///
 /// Use [`RuntimeCommandSpec::new_streaming`] for commands that emit incremental
 /// NDJSON progress events (e.g. long-running deployments with `--follow`).
+///
+/// Construct with one of the `new*` constructors — never as a struct literal.
+/// Literal construction would bypass the `handles_dry_run`/handler-shape
+/// misuse checks those constructors debug-assert. `#[non_exhaustive]` also
+/// means the engine can add fields without a breaking release.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct RuntimeCommandSpec {
     /// Declarative command metadata.
     pub spec: CommandSpec,
@@ -1076,7 +1087,12 @@ impl RuntimeCommandSpec {
 }
 
 /// Executable command group with runtime children.
+///
+/// Construct with [`RuntimeGroupSpec::new`], then chain `with_*` methods —
+/// never as a struct literal. `#[non_exhaustive]` enforces this so the engine
+/// can add fields without a breaking release.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct RuntimeGroupSpec {
     /// Declarative group metadata.
     pub group: GroupSpec,
