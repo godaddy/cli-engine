@@ -25,8 +25,10 @@ use super::{Envelope, NextAction, NextActionParam};
 ///
 /// Construct with [`TableColumn::new`], then chain builder methods like
 /// [`no_truncate`](TableColumn::no_truncate)/[`nested`](TableColumn::nested)
-/// — never as a struct literal. `#[non_exhaustive]` enforces this so the
-/// engine can add fields (as it did for `nested`) without a breaking release.
+/// — never as a struct literal. No known consumer constructs `TableColumn`
+/// via struct literal, so marking it `#[non_exhaustive]` carries no real
+/// breaking impact today; going forward it means the engine can add fields
+/// (as it did for `nested`) without that becoming a breaking release either.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct TableColumn {
