@@ -571,7 +571,7 @@ Human output is designed for readable terminal display:
   hiding all work identically either way.
 - Objects render as `key: value` lines.
 - Mixed object/scalar arrays fall back to line-per-item rendering.
-- Objects in fallback lines render as compact JSON, unless a column opts into `nested` rendering — see below.
+- Objects in fallback lines render as compact JSON.
 - JSON numbers use `serde_json` number text.
 - Table columns size to the live terminal width (falling back to a fixed 80
   columns when stdout isn't a TTY, e.g. when piped) rather than a fixed

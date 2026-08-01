@@ -749,7 +749,7 @@ fn render_object_with_columns(
     for column in columns {
         let value = resolve_field_path(map, &column.field);
         match (&column.nested, value) {
-            (Some(nested_columns), Some(value)) => {
+            (Some(nested_columns), Some(value)) if is_nestable(value) => {
                 out.push_str(&format!("{}:\n", column.header));
                 let child_width = available_width.saturating_sub(NESTED_INDENT.len());
                 let (block, child_notes) = render_nested_value(value, nested_columns, child_width);
@@ -877,22 +877,31 @@ fn indent_block(block: &str, indent: &str) -> String {
         + "\n"
 }
 
+/// Whether `value` is a shape [`TableColumn::nested`] can render as a child
+/// block: a single object, or an array whose items are all objects (an empty
+/// array trivially qualifies, rendering as an indented "no results"). Gates
+/// entry into nested rendering in [`render_object_with_columns`] so a column
+/// with `.nested(...)` set is a true no-op — the exact same single-line
+/// `format_value` rendering an un-opted-in column would have produced —
+/// whenever the runtime value doesn't actually have this shape (a scalar, or
+/// an array mixing objects with non-objects).
+fn is_nestable(value: &Value) -> bool {
+    matches!(value, Value::Object(_))
+        || matches!(value, Value::Array(items) if items.iter().all(Value::is_object))
+}
+
 /// Renders a nested column's resolved value as a child block, reusing the
 /// same renderers a top-level array/object would use, just at a narrowed
-/// width. Anything that isn't list-of-objects or object shaped (scalar,
-/// non-uniform array, etc.) falls back to the exact one-line `format_value`
-/// rendering an un-opted-in nested column would have produced — opting a
-/// column into `nested` is a no-op for any run where the runtime value
-/// doesn't actually have that shape.
+/// width. Only called once [`is_nestable`] has confirmed `value`'s shape, so
+/// the array/object arms below are the only ones a real caller reaches; the
+/// scalar fallback keeps this function total on its own.
 fn render_nested_value(
     value: &Value,
     nested_columns: &[TableColumn],
     available_width: usize,
 ) -> (String, RenderNotes) {
     match value {
-        Value::Array(items) if items.iter().all(Value::is_object) => {
-            render_array_with_columns(items, nested_columns, available_width)
-        }
+        Value::Array(items) => render_array_with_columns(items, nested_columns, available_width),
         Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
         other => (format!("{}\n", format_value(other)), RenderNotes::default()),
     }
@@ -1589,5 +1598,45 @@ mod tests {
             )
         );
         assert!(out.contains('{'), "unchanged raw-JSON fallback: {out}");
+    }
+
+    #[test]
+    fn nested_column_is_a_no_op_when_the_value_is_not_actually_nestable() {
+        // A column can opt into `.nested(...)` while still receiving a
+        // scalar or a mixed (non-uniform) array at runtime — e.g. a field
+        // that's usually a list of objects but is empty/absent for this row,
+        // or simply the wrong shape. Rendering must stay the same flat
+        // `header: value` line a column with `nested: None` would have
+        // produced, not a `header:\n  value` block — regression guard for a
+        // shape-drift bug where the header line alone changed to multi-line
+        // even though the value itself fell back to `format_value`.
+        let map = json!({
+            "scalar": "just a string",
+            "mixed": ["a", {"b": 1}],
+        });
+        let nested_columns = vec![TableColumn::new("x", "X")];
+        let columns = vec![
+            TableColumn::new("scalar", "Scalar").nested(nested_columns.clone()),
+            TableColumn::new("mixed", "Mixed").nested(nested_columns),
+        ];
+        let unnested_columns = vec![
+            TableColumn::new("scalar", "Scalar"),
+            TableColumn::new("mixed", "Mixed"),
+        ];
+
+        let (nested_out, _) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+        let (unnested_out, _) = render_object_with_columns(
+            map.as_object().expect("object fixture"),
+            &unnested_columns,
+            80,
+        );
+
+        assert_eq!(
+            nested_out, unnested_out,
+            "an opted-in column must render identically to an unopted-in one \
+             when the runtime value isn't list-of-objects or object shaped"
+        );
+        assert_eq!(nested_out, "Scalar: just a string\nMixed: a, {\"b\":1}\n");
     }
 }
