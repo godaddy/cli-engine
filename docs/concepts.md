@@ -589,7 +589,10 @@ Human output is designed for readable terminal display:
   got hidden and suggests `--fields`/`--json`. A similar footer appears if a
   cell still had to be shortened (only possible once hiding can't help
   further — e.g. a single remaining column whose value alone exceeds the
-  display width).
+  display width). When the narrowing happened inside a `TableColumn::nested`
+  column's own child table or property bag, the footer suggests only
+  `--json` — `--fields` selects among top-level declared columns and can
+  drop a nested column entirely, but can't narrow what's shown inside one.
 
 Views can be assigned to commands. There are two ways to do it.
 

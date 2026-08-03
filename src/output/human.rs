@@ -445,16 +445,38 @@ fn dynamic_columns(fields: &str, natural_keys: impl FnOnce() -> Vec<String>) -> 
 /// (a no-op when neither happened). Mirrors `append_next_actions`: writes
 /// directly into `out` rather than building a separate string.
 fn append_render_notes(out: &mut String, notes: &RenderNotes) {
+    // `--fields` only ever selects among top-level declared columns: it can
+    // drop a `TableColumn::nested` column entirely, but can't narrow what
+    // shows *inside* one. Suggesting it as a fix once any of the reported
+    // narrowing happened inside a nested block would be wrong — there's no
+    // flag that reaches that fine-grained, so `--json` is the only real
+    // remedy in that case.
+    let fields_helps = !notes.nested_narrowing;
     if notes.truncated {
-        out.push_str(
-            "\nOutput truncated to fit the display width — use --fields to show fewer columns, or --json for full values.\n",
-        );
+        if fields_helps {
+            out.push_str(
+                "\nOutput truncated to fit the display width — use --fields to show fewer columns, or --json for full values.\n",
+            );
+        } else {
+            out.push_str(
+                "\nOutput truncated to fit the display width — use --json for full values (--fields only selects top-level columns, not columns nested under them).\n",
+            );
+        }
     }
     if !notes.hidden_columns.is_empty() {
+        let suggestion = if fields_helps {
+            "use --fields to choose columns, or --json for full output"
+        } else {
+            "use --json for full output (--fields only selects top-level columns, not columns nested under them)"
+        };
         out.push_str(&format!(
-            "\n{} column{} hidden to fit the display width ({}) — use --fields to choose columns, or --json for full output.\n",
+            "\n{} column{} hidden to fit the display width ({}) — {suggestion}.\n",
             notes.hidden_columns.len(),
-            if notes.hidden_columns.len() == 1 { "" } else { "s" },
+            if notes.hidden_columns.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             notes.hidden_columns.join(", "),
         ));
     }
@@ -553,6 +575,15 @@ struct RenderNotes {
     /// would have appeared in the table, had they fit) — not reverse
     /// priority order.
     hidden_columns: Vec<String>,
+    /// Whether any of the truncation/hiding captured above happened inside a
+    /// nested child block (a `TableColumn::nested` column's own table or
+    /// property bag) rather than at this level's own top-level columns.
+    /// `--fields` only ever selects among top-level declared columns — it
+    /// can drop a nested column entirely, but can't narrow what's shown
+    /// *inside* one — so [`append_render_notes`] must not suggest `--fields`
+    /// as a fix when this is set, even though `hidden_columns`/`truncated`
+    /// are otherwise reported identically either way.
+    nested_narrowing: bool,
 }
 
 /// Chooses how many leading columns (priority order, most important first),
@@ -740,6 +771,7 @@ fn render_array_with_columns(
         RenderNotes {
             truncated,
             hidden_columns,
+            nested_narrowing: false,
         },
     )
 }
@@ -762,6 +794,12 @@ fn render_object_with_columns(
                 let child_width = available_width.saturating_sub(NESTED_INDENT.len());
                 let (block, child_notes) = render_nested_value(value, nested_columns, child_width);
                 out.push_str(&indent_block(&block, NESTED_INDENT));
+                if child_notes.truncated
+                    || !child_notes.hidden_columns.is_empty()
+                    || child_notes.nested_narrowing
+                {
+                    notes.nested_narrowing = true;
+                }
                 notes.truncated |= child_notes.truncated;
                 notes.hidden_columns.extend(
                     child_notes
@@ -1555,6 +1593,64 @@ mod tests {
             notes.hidden_columns,
             vec!["Items > B".to_owned(), "Items > C".to_owned()],
             "hidden columns bubble up prefixed with the parent header: {out}"
+        );
+        assert!(
+            notes.nested_narrowing,
+            "narrowing happened inside the nested child, not at this level's own columns: {out}"
+        );
+    }
+
+    #[test]
+    fn footer_does_not_suggest_fields_for_narrowing_inside_a_nested_column() {
+        // `--fields` only selects among top-level declared columns — it
+        // cannot narrow what shows *inside* a `TableColumn::nested` column.
+        // When a nested child's own columns get hidden, the footer must not
+        // claim `--fields` fixes it (regression: it used to say so
+        // unconditionally, misleading users into trying a flag that does
+        // nothing for this case — see PR review discussion). Same fixture
+        // shape as `render_human_with_view_reports_hidden_columns_in_footer`
+        // (proven to overflow the fallback 80-column width), just nested
+        // one level under an "items" field instead of being the top-level
+        // view directly.
+        let envelope = Envelope::success(
+            json!({
+                "items": [{
+                    "id": "1",
+                    "name": "acme",
+                    "status": "active",
+                    "region": "us-west",
+                    "created_at": "2026-01-01",
+                    "updated_at": "2026-01-02",
+                    "notes": "irrelevant, lowest priority",
+                }],
+            }),
+            "thing",
+        );
+        let columns = vec![TableColumn::new("items", "Items").nested(vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
+            TableColumn::new("region", "Region"),
+            TableColumn::new("created_at", "Created At"),
+            TableColumn::new("updated_at", "Updated At"),
+            TableColumn::new("notes", "This Is An Extremely Long Trailing Column Header"),
+        ])];
+
+        let out = render_human_with_view(&envelope, Some(&columns), "");
+
+        assert!(out.contains("hidden to fit the display width"), "{out}");
+        assert!(
+            out.contains("Items > This Is An Extremely Long Trailing Column Header"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("use --fields"),
+            "must not suggest --fields as a fix when the narrowing is inside a nested column \
+             (mentioning it to explain why it won't help is fine): {out}"
+        );
+        assert!(
+            out.contains("--json"),
+            "must still point at --json as the real remedy: {out}"
         );
     }
 
