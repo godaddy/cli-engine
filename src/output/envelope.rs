@@ -32,7 +32,12 @@ pub struct Envelope {
 }
 
 /// A suggested follow-up command the caller can run next.
+///
+/// Construct with [`NextAction::new`], then chain `with_*` methods — never as
+/// a struct literal. `#[non_exhaustive]` enforces this so the engine can add
+/// fields without a breaking release.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NextAction {
     /// Executable command template, e.g. `"application info --name <name>"`.
     /// A param's placeholder is its key wrapped in angle brackets (`<key>`);

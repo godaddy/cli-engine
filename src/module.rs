@@ -37,7 +37,12 @@ pub trait CommandModule: Send + Sync + std::fmt::Debug + 'static {
 /// A module usually maps to a product, platform, resource family, or team
 /// ownership boundary. It contributes one top-level group plus optional guides
 /// and human output views.
+///
+/// Construct with [`Module::new`], then chain `with_*` methods — never as a
+/// struct literal. `#[non_exhaustive]` enforces this so the engine can add
+/// fields without a breaking release.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Module {
     /// Root help category.
     pub category: String,

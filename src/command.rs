@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command};
 use schemars::JsonSchema;
 use serde_json::{Number, Value};
 use tokio::sync::mpsc;
@@ -42,7 +42,12 @@ pub type StreamingCommandHandler =
 /// Command handlers should return renderable data and keep output metadata on
 /// [`CommandSpec`]. The metadata field is reserved for future command-result
 /// extensions that are not known when the command is registered.
+///
+/// Construct with [`CommandResult::new`], then chain `with_*` methods —
+/// never as a struct literal. `#[non_exhaustive]` enforces this so the engine
+/// can add fields without a breaking release.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct CommandResult {
     /// JSON data rendered by the configured output formatter.
     pub data: Value,
@@ -283,7 +288,13 @@ impl CommandContext {
 ///
 /// `CommandSpec` intentionally keeps command metadata next to the command's
 /// handler. This is the primary copy/paste surface for teams adding commands.
+///
+/// Construct with [`CommandSpec::new`] or [`CommandSpec::from_args`], then
+/// configure with the `with_*` builder methods — never as a struct literal.
+/// `#[non_exhaustive]` enforces this so the engine can add fields (as it did
+/// for [`arg_groups`](CommandSpec::arg_groups)) without a breaking release.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct CommandSpec {
     /// Leaf command name.
     pub name: String,
@@ -323,22 +334,30 @@ pub struct CommandSpec {
     /// its preview result with [`CommandResult::with_dry_run`].
     ///
     /// **Requires a context-aware handler.** Only handlers built with
-    /// [`RuntimeCommandSpec::new_with_context`] (or
-    /// [`new_streaming`](RuntimeCommandSpec::new_streaming)) receive a
-    /// [`CommandContext`] and can call [`CommandContext::dry_run`]. A handler
-    /// built with [`RuntimeCommandSpec::new`]/[`new_typed`](RuntimeCommandSpec::new_typed)
+    /// [`RuntimeCommandSpec::new_with_context`],
+    /// [`new_streaming`](RuntimeCommandSpec::new_streaming),
+    /// [`new_typed_with_context`](RuntimeCommandSpec::new_typed_with_context),
+    /// or [`new_typed_streaming`](RuntimeCommandSpec::new_typed_streaming)
+    /// receive a [`CommandContext`] and can call [`CommandContext::dry_run`].
+    /// A handler built with [`RuntimeCommandSpec::new`]/[`new_typed`](RuntimeCommandSpec::new_typed)
     /// only receives `(CredentialResolver, args)` — it has no way to observe
     /// `--dry-run` at all, so opting it into `handles_dry_run` would silently
     /// execute the handler's real side effects under `--dry-run` instead of
     /// skipping them. `RuntimeCommandSpec::new`/`new_typed` debug-assert
     /// against this misuse; release builds do not, so treat the assert as a
     /// development-time safety net, not the actual guarantee — only pair this
-    /// field with `new_with_context`.
+    /// field with one of the four context-aware constructors above.
     pub handles_dry_run: bool,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// Command-specific `clap` arguments.
     pub args: Vec<Arg>,
+    /// Argument relations (mutually-exclusive or "at least one of" groups).
+    ///
+    /// Set with [`with_arg_group`](CommandSpec::with_arg_group), or captured
+    /// automatically by [`from_args`](CommandSpec::from_args) from a
+    /// `#[derive(clap::Args)]` struct's `#[group(...)]` attribute.
+    pub arg_groups: Vec<ArgGroup>,
     /// Optional output schema published through `--schema` and help.
     pub output_schema: Option<SchemaInfo>,
     /// Inline human-output table columns assigned directly to this command.
@@ -384,9 +403,18 @@ impl CommandSpec {
     ///
     /// Extracts the argument definitions from the derive type and populates the
     /// spec's args list. The command name and help text are still required since
-    /// `Args` types do not carry those.
+    /// `Args` types do not carry those. Also captures any `ArgGroup`s the derive
+    /// macro registers (via a struct-level `#[group(...)]` attribute) into
+    /// [`arg_groups`](CommandSpec::arg_groups).
+    ///
+    /// **Flatten caveat**: `clap_derive` empties a struct's own implicit group's
+    /// member list when the struct also has a `#[command(flatten)]` field, so a
+    /// `#[group(required = true)]` on such a struct silently enforces nothing.
+    /// This is debug-asserted against below; treat it as a development-time
+    /// safety net, not the actual guarantee.
     #[must_use]
     pub fn from_args<T: clap::Args>(name: impl Into<String>, short: impl Into<String>) -> Self {
+        let name = name.into();
         let placeholder = Command::new("__placeholder");
         let augmented = T::augment_args(placeholder);
         let args: Vec<Arg> = augmented
@@ -394,10 +422,20 @@ impl CommandSpec {
             .filter(|a| !matches!(a.get_id().as_str(), "help" | "version"))
             .cloned()
             .collect();
+        let arg_groups: Vec<ArgGroup> = augmented.get_groups().cloned().collect();
+        debug_assert!(
+            arg_groups
+                .iter()
+                .all(|group| !group.is_required_set() || group.get_args().count() > 0),
+            "command {name:?} has a required ArgGroup with no member args — likely the \
+             clap_derive flatten+group interaction emptying the implicit group's \
+             member list; the constraint will not be enforced"
+        );
         Self {
-            name: name.into(),
+            name,
             short: short.into(),
             args,
+            arg_groups,
             ..Self::default()
         }
     }
@@ -563,6 +601,21 @@ impl CommandSpec {
         self.with_arg(flag)
     }
 
+    /// Adds an argument relation (an `ArgGroup`) to this command, e.g. to
+    /// express "at least one of" or mutually-exclusive relationships between
+    /// arguments added with [`with_arg`](CommandSpec::with_arg)/[`with_flag`](CommandSpec::with_flag).
+    ///
+    /// The group's `ArgGroup::args([...])` ids must reference args already (or
+    /// later) added to this spec, matching `clap`'s own requirement that
+    /// referenced arg ids exist on the built `Command`. This replaces
+    /// hand-rolled `required_unless_present_any`/`conflicts_with` chains with a
+    /// single declarative relation.
+    #[must_use]
+    pub fn with_arg_group(mut self, group: ArgGroup) -> Self {
+        self.arg_groups.push(group);
+        self
+    }
+
     /// Registers a compact framework schema from an [`OutputSchema`] type.
     #[must_use]
     pub fn with_output_schema<T: OutputSchema>(mut self) -> Self {
@@ -594,9 +647,12 @@ impl CommandSpec {
     /// See [`handles_dry_run`](CommandSpec::handles_dry_run) (the field) for
     /// the contract a handler must follow once it opts in — in particular,
     /// **only use this with a context-aware handler**
-    /// ([`RuntimeCommandSpec::new_with_context`]); a `new`/`new_typed`
-    /// handler can't observe `--dry-run` and would execute its real side
-    /// effects under it regardless of this flag.
+    /// ([`RuntimeCommandSpec::new_with_context`],
+    /// [`new_streaming`](RuntimeCommandSpec::new_streaming),
+    /// [`new_typed_with_context`](RuntimeCommandSpec::new_typed_with_context), or
+    /// [`new_typed_streaming`](RuntimeCommandSpec::new_typed_streaming)); a
+    /// `new`/`new_typed` handler can't observe `--dry-run` and would execute
+    /// its real side effects under it regardless of this flag.
     #[must_use]
     pub fn handles_dry_run(mut self, handles: bool) -> Self {
         self.handles_dry_run = handles;
@@ -658,6 +714,9 @@ impl CommandSpec {
         for (index, arg) in self.args.iter().enumerate() {
             command = command.arg(arg.clone().display_order(index));
         }
+        for group in &self.arg_groups {
+            command = command.group(group.clone());
+        }
         command
     }
 }
@@ -666,7 +725,12 @@ impl CommandSpec {
 ///
 /// Groups are noun-based containers. They do not run business logic directly;
 /// when invoked bare, the CLI renders group help.
+///
+/// Construct with [`GroupSpec::new`], then configure with the `with_*` builder
+/// methods — never as a struct literal. `#[non_exhaustive]` enforces this so
+/// the engine can add fields later without a breaking release.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct GroupSpec {
     /// Group command name.
     pub name: String,
@@ -783,7 +847,13 @@ impl GroupSpec {
 ///
 /// Use [`RuntimeCommandSpec::new_streaming`] for commands that emit incremental
 /// NDJSON progress events (e.g. long-running deployments with `--follow`).
+///
+/// Construct with one of the `new*` constructors — never as a struct literal.
+/// Literal construction would bypass the `handles_dry_run`/handler-shape
+/// misuse checks those constructors debug-assert. `#[non_exhaustive]` also
+/// means the engine can add fields without a breaking release.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct RuntimeCommandSpec {
     /// Declarative command metadata.
     pub spec: CommandSpec,
@@ -827,7 +897,8 @@ impl RuntimeCommandSpec {
             "command {:?} sets handles_dry_run but RuntimeCommandSpec::new's handler \
              (CredentialResolver, args) has no CommandContext and can never check \
              CommandContext::dry_run(), so it would silently run its real side effects \
-             under --dry-run; use RuntimeCommandSpec::new_with_context instead",
+             under --dry-run; use RuntimeCommandSpec::new_with_context (or \
+             new_typed_with_context to keep typed args) instead",
             spec.name
         );
         Self {
@@ -887,8 +958,9 @@ impl RuntimeCommandSpec {
     /// type safety from argument definition through handler consumption.
     ///
     /// If the handler also needs the command path, middleware, or user-supplied
-    /// args, use [`RuntimeCommandSpec::new_with_context`] with
-    /// [`CommandContext::typed_args`] instead.
+    /// args, use [`RuntimeCommandSpec::new_typed_with_context`] (or
+    /// [`RuntimeCommandSpec::new_with_context`] with
+    /// [`CommandContext::typed_args`]) instead.
     ///
     /// This handler shape has no [`CommandContext`], so it can never call
     /// [`CommandContext::dry_run`] — do not pair this with
@@ -906,7 +978,8 @@ impl RuntimeCommandSpec {
             "command {:?} sets handles_dry_run but RuntimeCommandSpec::new_typed's handler \
              (CredentialResolver, args) has no CommandContext and can never check \
              CommandContext::dry_run(), so it would silently run its real side effects \
-             under --dry-run; use RuntimeCommandSpec::new_with_context instead",
+             under --dry-run; use RuntimeCommandSpec::new_with_context (or \
+             new_typed_with_context to keep typed args) instead",
             spec.name
         );
         let handler = Arc::new(handler);
@@ -926,10 +999,100 @@ impl RuntimeCommandSpec {
             streaming_handler: None,
         }
     }
+
+    /// Creates a runtime command with full context and typed argument
+    /// deserialization.
+    ///
+    /// Combines [`new_with_context`](RuntimeCommandSpec::new_with_context)'s
+    /// access to [`CommandContext`] (command path, middleware snapshot,
+    /// user-supplied args, [`CommandContext::dry_run`]) with
+    /// [`new_typed`](RuntimeCommandSpec::new_typed)'s automatic
+    /// deserialization: the engine parses `T` from the raw matches before
+    /// invoking the handler, so the handler never needs to call
+    /// [`CommandContext::typed_args`] itself.
+    ///
+    /// Use this instead of `new_with_context` + `context.typed_args::<T>()`
+    /// when a command needs full context and wants eager, guaranteed-parsed
+    /// typed args rather than parsing on demand. Because the handler receives
+    /// a [`CommandContext`], this is a valid pairing with
+    /// [`CommandSpec::handles_dry_run`].
+    ///
+    /// # Errors
+    ///
+    /// The returned handler surfaces a `CliCoreError::Message` if `T` fails to
+    /// deserialize from the parsed matches (this should not happen for args
+    /// generated by `CommandSpec::from_args::<T>()`, since `clap` already
+    /// validated them during parsing).
+    #[must_use]
+    pub fn new_typed_with_context<T, F, Fut, Output>(spec: CommandSpec, handler: F) -> Self
+    where
+        T: clap::FromArgMatches + Send + 'static,
+        F: Fn(CommandContext, T) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Output>> + Send + 'static,
+        Output: Into<CommandResult> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        Self {
+            spec,
+            handler: Arc::new(move |context| {
+                let parsed = T::from_arg_matches(context.raw_matches.as_ref());
+                let handler = handler.clone();
+                Box::pin(async move {
+                    let args = parsed.map_err(|e| {
+                        crate::CliCoreError::Message(format!("argument parse error: {e}"))
+                    })?;
+                    handler(context, args).await.map(Into::into)
+                })
+            }),
+            streaming_handler: None,
+        }
+    }
+
+    /// Creates a streaming command with full context and typed argument
+    /// deserialization.
+    ///
+    /// Combines [`new_streaming`](RuntimeCommandSpec::new_streaming)'s NDJSON
+    /// event emission with [`new_typed`](RuntimeCommandSpec::new_typed)'s
+    /// automatic deserialization: the engine parses `T` from the raw matches
+    /// before invoking the handler.
+    ///
+    /// # Errors
+    ///
+    /// The returned handler surfaces a `CliCoreError::Message` if `T` fails to
+    /// deserialize from the parsed matches.
+    #[must_use]
+    pub fn new_typed_streaming<T, F, Fut>(spec: CommandSpec, handler: F) -> Self
+    where
+        T: clap::FromArgMatches + Send + 'static,
+        F: Fn(CommandContext, T, StreamSender) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        let streaming: StreamingCommandHandler = Arc::new(move |context, sender| {
+            let parsed = T::from_arg_matches(context.raw_matches.as_ref());
+            let handler = handler.clone();
+            Box::pin(async move {
+                let args = parsed.map_err(|e| {
+                    crate::CliCoreError::Message(format!("argument parse error: {e}"))
+                })?;
+                handler(context, args, sender).await
+            })
+        });
+        Self {
+            spec,
+            streaming_handler: Some(streaming),
+            handler: Arc::new(|_context| Box::pin(async { Ok(CommandResult::new(Value::Null)) })),
+        }
+    }
 }
 
 /// Executable command group with runtime children.
+///
+/// Construct with [`RuntimeGroupSpec::new`], then chain `with_*` methods —
+/// never as a struct literal. `#[non_exhaustive]` enforces this so the engine
+/// can add fields without a breaking release.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct RuntimeGroupSpec {
     /// Declarative group metadata.
     pub group: GroupSpec,
@@ -1201,5 +1364,44 @@ mod tests {
         let group = GroupSpec::new("project", "Manage projects");
 
         assert!(group.feature_flag.is_none());
+    }
+
+    #[test]
+    fn command_spec_with_arg_group_registers_group_on_clap_command() {
+        let spec = CommandSpec::new("update", "Update a thing")
+            .with_arg(Arg::new("a").long("a"))
+            .with_arg(Arg::new("b").long("b"))
+            .with_arg_group(ArgGroup::new("ab").args(["a", "b"]).required(true));
+
+        assert!(
+            spec.clap_command()
+                .try_get_matches_from(["update"])
+                .is_err(),
+            "neither `a` nor `b` present should fail the required group"
+        );
+        assert!(
+            spec.clap_command()
+                .try_get_matches_from(["update", "--a", "x"])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn command_spec_from_args_preserves_derive_arg_group() {
+        #[derive(clap::Args)]
+        #[group(required = true, multiple = false)]
+        struct ExclusiveArgs {
+            #[arg(long)]
+            one: bool,
+            #[arg(long)]
+            two: bool,
+        }
+
+        let spec = CommandSpec::from_args::<ExclusiveArgs>("bump", "Bump one thing");
+
+        assert_eq!(spec.arg_groups.len(), 1);
+        let group = &spec.arg_groups[0];
+        assert!(group.is_required_set());
+        assert_eq!(group.get_args().count(), 2);
     }
 }

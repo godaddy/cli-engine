@@ -218,6 +218,8 @@ on-demand deserialization.
 
 The builder and derive paths are equivalent at runtime and can be mixed within a module.
 
+Most real commands need more than `new_typed`'s `(CredentialResolver, T)` shape — they need the command path, middleware snapshot, or `--dry-run` via `CommandContext`. `RuntimeCommandSpec::new_typed_with_context` combines that with eager typed-arg deserialization: the engine parses `T` before calling the handler, so a `Fn(CommandContext, T) -> Fut` handler never needs `context.typed_args::<T>()` itself. `RuntimeCommandSpec::new_typed_streaming` does the same for streaming commands (`Fn(CommandContext, T, StreamSender) -> Fut`). Prefer these two over `new_with_context`/`new_streaming` + `context.typed_args()` whenever a command's args are already a `#[derive(clap::Args)]` struct — they give the same compile-time guarantee `new_typed` gives the credential-only case.
+
 Command metadata should be explicit:
 
 - `with_system` sets backend attribution for output and errors.
@@ -226,8 +228,44 @@ Command metadata should be explicit:
 - `with_tier` and `mutates` mark risk and dry-run behavior.
 - `with_json_schema::<T>()` publishes JSON Schema for output.
 - `with_arg` adds typed `clap::Arg` values.
+- `with_arg_group` adds a `clap::ArgGroup` expressing "at least one of" or mutually-exclusive
+relationships between args, without a `required_unless_present_any`/`conflicts_with` chain.
 - `handles_dry_run` opts a mutating command out of the generic `--dry-run` short-circuit so its
   handler runs instead (see [Dry-Run](#dry-run) below).
+
+### Argument Relations
+
+`CommandSpec::with_arg_group(ArgGroup)` registers a `clap::ArgGroup` alongside a command's `Arg`s, for example an "at least one of" constraint:
+
+```rust
+use clap::{Arg, ArgGroup};
+
+CommandSpec::new("update", "Update an application")
+    .with_arg(Arg::new("label").long("label"))
+    .with_arg(Arg::new("description").long("description"))
+    .with_arg(Arg::new("status").long("status"))
+    .with_arg_group(
+        ArgGroup::new("update-fields")
+            .args(["label", "description", "status"])
+            .required(true)
+            .multiple(true),
+    );
+```
+
+`CommandSpec::from_args::<T>()` captures the same relationship automatically from a derive struct's struct-level `#[group(...)]` attribute — every `#[derive(clap::Args)]` struct registers one implicit group over its own fields (`multiple(true)`, `required(false)` by default, so a plain struct with no `#[group(...)]` attribute is a no-op); `#[group(required = true, multiple = true)]` customizes it into an "at least one of" constraint, and `multiple = false` into a mutually-exclusive one:
+
+```rust
+#[derive(clap::Args)]
+#[group(required = true, multiple = true)]
+struct UpdateArgs {
+    #[arg(long)] label: Option<String>,
+    #[arg(long)] description: Option<String>,
+    #[arg(long)] status: Option<String>,
+}
+```
+
+**Flatten caveat.** `clap_derive` empties a struct's own implicit group's member list when the struct also has a `#[command(flatten)]` field, so `#[group(required = true)]` on a struct mixing flattened and literal fields silently enforces nothing. `CommandSpec::from_args` debug-asserts against shipping a required-but-empty group, but — like the `handles_dry_run` debug_asserts above —
+treat that as a development-time safety net, not the actual guarantee: release builds won't catch it.
 
 ## Global Flags
 

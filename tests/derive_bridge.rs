@@ -1,6 +1,6 @@
 use cli_engine::{
     BuildInfo, Cli, CliConfig, CommandContext, CommandResult, CommandSpec, CredentialResolver,
-    GroupSpec, Module, RuntimeCommandSpec, RuntimeGroupSpec,
+    GroupSpec, Module, RuntimeCommandSpec, RuntimeGroupSpec, StreamSender,
 };
 use serde_json::{Value, json};
 
@@ -333,4 +333,314 @@ async fn human_shorthand_flag_produces_human_output() {
         "human output should not be raw JSON: {}",
         result.rendered
     );
+}
+
+// --- new_typed_with_context ---
+
+#[derive(Debug, Clone, clap::Args)]
+struct WhoamiArgs {
+    #[arg(long)]
+    tag: String,
+}
+
+fn typed_with_context_cli() -> Cli {
+    let whoami_command = RuntimeCommandSpec::new_typed_with_context::<WhoamiArgs, _, _, _>(
+        CommandSpec::from_args::<WhoamiArgs>("whoami", "Show tag and command path").no_auth(true),
+        async |context: CommandContext, args: WhoamiArgs| {
+            Ok(CommandResult::new(json!({
+                "tag": args.tag,
+                "command_path": context.command_path,
+            })))
+        },
+    );
+
+    let module = Module::new("Ident", move |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("ident", "Identity commands"))
+            .with_command(whoami_command.clone())
+    });
+
+    Cli::new(
+        CliConfig::new("typed-ctx-test", "Typed Context Test CLI", "typed-ctx-test")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(module),
+    )
+}
+
+#[tokio::test]
+async fn new_typed_with_context_exposes_parsed_args_and_command_path() {
+    let cli = typed_with_context_cli();
+
+    let result = cli
+        .run([
+            "typed-ctx-test",
+            "ident",
+            "whoami",
+            "--tag",
+            "hello",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    let json: Value = serde_json::from_str(&result.rendered).expect("valid json");
+    assert_eq!(json["data"]["tag"], "hello");
+    assert_eq!(json["data"]["command_path"], "ident:whoami");
+}
+
+#[tokio::test]
+async fn new_typed_with_context_reports_missing_required_arg() {
+    let cli = typed_with_context_cli();
+
+    let result = cli.run(["typed-ctx-test", "ident", "whoami"]).await;
+    assert_ne!(result.exit_code, 0);
+    assert!(result.rendered.contains("required"), "{}", result.rendered);
+}
+
+// --- new_typed_streaming ---
+
+#[derive(Debug, Clone, clap::Args)]
+struct CountArgs {
+    #[arg(long)]
+    label: String,
+
+    #[arg(long, default_value = "2")]
+    count: u32,
+}
+
+fn typed_streaming_cli() -> Cli {
+    let count_command = RuntimeCommandSpec::new_typed_streaming::<CountArgs, _, _>(
+        CommandSpec::from_args::<CountArgs>("count", "Stream counted events").no_auth(true),
+        async |_context: CommandContext, args: CountArgs, sender: StreamSender| {
+            // Successful NDJSON events are written straight to real stdout by
+            // the writer task (see tests/streaming.rs), so this test can't
+            // capture them via `result.rendered`. Prove the typed args were
+            // parsed correctly by failing loudly — into `rendered` — if they
+            // don't match what was passed on the command line.
+            if args.label != "tick" || args.count != 3 {
+                return Err(cli_engine::CliCoreError::message(format!(
+                    "unexpected parsed args: label={:?} count={}",
+                    args.label, args.count
+                )));
+            }
+            for index in 0..args.count {
+                sender
+                    .send(json!({ "label": args.label, "index": index }))
+                    .await;
+            }
+            Ok(())
+        },
+    );
+
+    let module = Module::new("Stream", move |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("stream", "Streaming commands"))
+            .with_command(count_command.clone())
+    });
+
+    Cli::new(
+        CliConfig::new(
+            "typed-stream-test",
+            "Typed Streaming Test CLI",
+            "typed-stream-test",
+        )
+        .with_build(BuildInfo::new("0.1.0"))
+        .with_module(module),
+    )
+}
+
+#[tokio::test]
+async fn new_typed_streaming_parses_args_before_invoking_handler() {
+    let cli = typed_streaming_cli();
+
+    let result = cli
+        .run([
+            "typed-stream-test",
+            "stream",
+            "count",
+            "--label",
+            "tick",
+            "--count",
+            "3",
+        ])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    assert!(
+        result.rendered.is_empty(),
+        "successful stream should produce no rendered envelope, got: {:?}",
+        result.rendered
+    );
+}
+
+#[tokio::test]
+async fn new_typed_streaming_reports_missing_required_arg() {
+    let cli = typed_streaming_cli();
+
+    let result = cli
+        .run(["typed-stream-test", "stream", "count", "--count", "3"])
+        .await;
+    assert_ne!(result.exit_code, 0);
+    assert!(result.rendered.contains("required"), "{}", result.rendered);
+}
+
+// --- ArgGroup passthrough via from_args ---
+
+#[derive(Debug, Clone, clap::Args)]
+#[group(required = true, multiple = true)]
+struct UpdateArgs {
+    #[arg(long)]
+    label: Option<String>,
+
+    #[arg(long)]
+    description: Option<String>,
+
+    #[arg(long)]
+    status: Option<String>,
+}
+
+fn update_cli() -> Cli {
+    let update_command = RuntimeCommandSpec::new_typed::<UpdateArgs, _, _, _>(
+        CommandSpec::from_args::<UpdateArgs>("update", "Update at least one field").no_auth(true),
+        async |_credential: CredentialResolver, args: UpdateArgs| {
+            Ok(CommandResult::new(json!({
+                "label": args.label,
+                "description": args.description,
+                "status": args.status,
+            })))
+        },
+    );
+
+    let module = Module::new("Update", move |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("thing", "Thing commands"))
+            .with_command(update_command.clone())
+    });
+
+    Cli::new(
+        CliConfig::new("group-test", "Group Test CLI", "group-test")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(module),
+    )
+}
+
+#[tokio::test]
+async fn arg_group_from_args_rejects_when_none_present() {
+    let cli = update_cli();
+
+    let result = cli.run(["group-test", "thing", "update"]).await;
+    assert_ne!(result.exit_code, 0);
+}
+
+#[tokio::test]
+async fn arg_group_from_args_accepts_exactly_one() {
+    let cli = update_cli();
+
+    let result = cli
+        .run([
+            "group-test",
+            "thing",
+            "update",
+            "--label",
+            "new-label",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    let json: Value = serde_json::from_str(&result.rendered).expect("valid json");
+    assert_eq!(json["data"]["label"], "new-label");
+    assert!(json["data"]["description"].is_null());
+}
+
+#[tokio::test]
+async fn arg_group_from_args_accepts_multiple_when_group_allows_multiple() {
+    let cli = update_cli();
+
+    let result = cli
+        .run([
+            "group-test",
+            "thing",
+            "update",
+            "--label",
+            "new-label",
+            "--status",
+            "ACTIVE",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    let json: Value = serde_json::from_str(&result.rendered).expect("valid json");
+    assert_eq!(json["data"]["label"], "new-label");
+    assert_eq!(json["data"]["status"], "ACTIVE");
+}
+
+#[derive(Debug, Clone, clap::Args)]
+#[group(required = true, multiple = false)]
+struct VersionArgs {
+    #[arg(long)]
+    major: bool,
+
+    #[arg(long)]
+    minor: bool,
+}
+
+fn version_cli() -> Cli {
+    let bump_command = RuntimeCommandSpec::new_typed::<VersionArgs, _, _, _>(
+        CommandSpec::from_args::<VersionArgs>("bump", "Bump exactly one version component")
+            .no_auth(true),
+        async |_credential: CredentialResolver, args: VersionArgs| {
+            Ok(CommandResult::new(
+                json!({ "major": args.major, "minor": args.minor }),
+            ))
+        },
+    );
+
+    let module = Module::new("Version", move |_context| {
+        RuntimeGroupSpec::new(GroupSpec::new("version", "Version commands"))
+            .with_command(bump_command.clone())
+    });
+
+    Cli::new(
+        CliConfig::new(
+            "exclusive-group-test",
+            "Exclusive Group Test CLI",
+            "exclusive-group-test",
+        )
+        .with_build(BuildInfo::new("0.1.0"))
+        .with_module(module),
+    )
+}
+
+#[tokio::test]
+async fn arg_group_from_args_rejects_mutually_exclusive_flags_together() {
+    let cli = version_cli();
+
+    let result = cli
+        .run([
+            "exclusive-group-test",
+            "version",
+            "bump",
+            "--major",
+            "--minor",
+        ])
+        .await;
+    assert_ne!(result.exit_code, 0);
+}
+
+#[tokio::test]
+async fn arg_group_from_args_accepts_one_of_mutually_exclusive_flags() {
+    let cli = version_cli();
+
+    let result = cli
+        .run([
+            "exclusive-group-test",
+            "version",
+            "bump",
+            "--major",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(result.exit_code, 0, "output: {}", result.rendered);
+    let json: Value = serde_json::from_str(&result.rendered).expect("valid json");
+    assert_eq!(json["data"]["major"], true);
+    assert_eq!(json["data"]["minor"], false);
 }
