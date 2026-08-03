@@ -10,7 +10,7 @@ keywords = ["cli", "framework", "clap", "schema"]
 categories = ["command-line-interface"]
 
 [workspace]
-members = [".", "cli-engine-macros"]
+members = ["cli-engine-macros"]
 
 [lib]
 name = "cli_engine"
