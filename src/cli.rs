@@ -21,8 +21,8 @@ use crate::{
     RuntimeGroupSpec,
     auth::commands::auth_command_group,
     command::{
-        CommandContext, StreamSender, command_args_from_matches, command_path_from_matches,
-        leaf_matches,
+        BareGroupAction, CommandContext, StreamSender, command_args_from_matches,
+        command_path_from_matches, leaf_matches,
     },
     error::exit_code_for_error,
     feature_flags::{FlagEntry, FlagPolicy, FlagRegistry, Stage},
@@ -827,6 +827,7 @@ pub struct Cli {
     middleware: Middleware,
     root: Command,
     commands: BTreeMap<String, RuntimeCommandSpec>,
+    group_actions: BTreeMap<String, BareGroupAction>,
     module_entries: Vec<ModuleHelpEntry>,
     guide_entries: Vec<GuideEntry>,
     init_deps: Option<InitDeps>,
@@ -1057,6 +1058,7 @@ impl Cli {
             middleware,
             root,
             commands: BTreeMap::new(),
+            group_actions: BTreeMap::new(),
             module_entries: Vec::new(),
             guide_entries: Vec::new(),
             init_deps,
@@ -1293,7 +1295,7 @@ impl Cli {
             &mut self.middleware.human_views,
         );
         let mut prefix = Vec::new();
-        group.register_commands(&mut prefix, &mut self.commands);
+        group.register_commands(&mut prefix, &mut self.commands, &mut self.group_actions);
         let mut prefix = Vec::new();
         let clap_group = runtime_group_clap_command_with_schema_help(
             &group,
@@ -1804,6 +1806,22 @@ impl Cli {
         }
         let Some(command) = self.commands.get(&command_path) else {
             if !command_path.is_empty()
+                && let Some(action) = self.group_actions.get(&command_path)
+            {
+                if let Err(err) = self.run_pre_run(
+                    &mut middleware,
+                    &command_path,
+                    &crate::middleware::ValueMap::new(),
+                ) {
+                    return self.finish_run(render_cli_error(
+                        &middleware,
+                        &err,
+                        &self.config.app_id,
+                    ));
+                }
+                return self.finish_run(self.render_bare_group_action(action, &middleware));
+            }
+            if !command_path.is_empty()
                 && let Some(group) = find_command_by_colon_path(&self.root, &command_path)
                 && group.get_subcommands().next().is_some()
             {
@@ -1988,6 +2006,38 @@ impl Cli {
         };
         let envelope =
             crate::Envelope::success(data, self.config.app_id.clone()).prepare_for_render("");
+        match crate::output::render(format, &envelope) {
+            Ok(rendered) => CliRunOutput {
+                exit_code: 0,
+                rendered,
+            },
+            Err(err) => CliRunOutput {
+                exit_code: exit_code_for_error(&err),
+                rendered: err.to_string(),
+            },
+        }
+    }
+
+    /// Renders a group's `bare_action` callback result as a JSON envelope,
+    /// replacing the default bare-group help text. Mirrors [`Self::render_search`]'s
+    /// format resolution and envelope construction.
+    fn render_bare_group_action(
+        &self,
+        action: &BareGroupAction,
+        middleware: &Middleware,
+    ) -> CliRunOutput {
+        let format: crate::output::OutputFormat = match middleware.output_format.parse() {
+            Ok(format) => format,
+            Err(err) => {
+                return CliRunOutput {
+                    exit_code: exit_code_for_error(&err),
+                    rendered: err.to_string(),
+                };
+            }
+        };
+        let data = action();
+        let envelope = crate::Envelope::success(data, self.config.app_id.clone())
+            .prepare_for_render(&middleware.verbose);
         match crate::output::render(format, &envelope) {
             Ok(rendered) => CliRunOutput {
                 exit_code: 0,
@@ -2325,7 +2375,7 @@ impl Cli {
             &mut self.middleware.human_views,
         );
         let mut prefix = Vec::new();
-        group.register_commands(&mut prefix, &mut self.commands);
+        group.register_commands(&mut prefix, &mut self.commands, &mut self.group_actions);
         let mut prefix = Vec::new();
         let clap_group = runtime_group_clap_command_with_schema_help(
             &group,
@@ -2352,7 +2402,7 @@ impl Cli {
         }
         let group = crate::config_commands::config_command_group();
         let mut prefix = Vec::new();
-        group.register_commands(&mut prefix, &mut self.commands);
+        group.register_commands(&mut prefix, &mut self.commands, &mut self.group_actions);
         let mut prefix = Vec::new();
         let clap_group = runtime_group_clap_command_with_schema_help(
             &group,
@@ -2388,7 +2438,7 @@ impl Cli {
         }
         let group = crate::env_commands::env_command_group();
         let mut prefix = Vec::new();
-        group.register_commands(&mut prefix, &mut self.commands);
+        group.register_commands(&mut prefix, &mut self.commands, &mut self.group_actions);
         let mut prefix = Vec::new();
         let clap_group = runtime_group_clap_command_with_schema_help(
             &group,
@@ -2422,7 +2472,7 @@ impl Cli {
         }
         let group = crate::flag_commands::flags_command_group();
         let mut prefix = Vec::new();
-        group.register_commands(&mut prefix, &mut self.commands);
+        group.register_commands(&mut prefix, &mut self.commands, &mut self.group_actions);
         let mut prefix = Vec::new();
         let clap_group = runtime_group_clap_command_with_schema_help(
             &group,
@@ -4562,5 +4612,55 @@ mod flags_command_tests {
             .await;
         assert_ne!(out.exit_code, 0);
         assert!(out.rendered.contains("no such flag"));
+    }
+}
+
+#[cfg(test)]
+mod bare_group_action_tests {
+    use super::*;
+    use crate::CommandResult;
+
+    fn group_with_bare_action() -> RuntimeGroupSpec {
+        RuntimeGroupSpec::new(GroupSpec::new("widgets", "Manage widgets"))
+            .with_bare_action(|| {
+                serde_json::json!({
+                    "command": "bartest widgets",
+                    "commands": ["bartest widgets list"],
+                })
+            })
+            .with_command(RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List widgets").no_auth(true),
+                async |_, _| Ok(CommandResult::new(serde_json::Value::Null)),
+            ))
+    }
+
+    #[tokio::test]
+    async fn bare_group_with_action_renders_json_instead_of_help() {
+        let mut cli = Cli::new(CliConfig::new("bartest", "Bar test", "bartest"));
+        cli.add_module_group("Test Category", group_with_bare_action());
+
+        let out = cli.run(["bartest", "widgets", "--output", "json"]).await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        let rendered: serde_json::Value =
+            serde_json::from_str(&out.rendered).expect("stdout should contain json");
+        assert_eq!(rendered["data"]["command"], "bartest widgets");
+    }
+
+    #[tokio::test]
+    async fn bare_group_without_action_still_renders_help() {
+        let mut cli = Cli::new(CliConfig::new("bartest2", "Bar test", "bartest2"));
+        cli.add_module_group(
+            "Test Category",
+            RuntimeGroupSpec::new(GroupSpec::new("widgets", "Manage widgets")).with_command(
+                RuntimeCommandSpec::new(
+                    CommandSpec::new("list", "List widgets").no_auth(true),
+                    async |_, _| Ok(CommandResult::new(serde_json::Value::Null)),
+                ),
+            ),
+        );
+
+        let out = cli.run(["bartest2", "widgets"]).await;
+        assert_eq!(out.exit_code, 0, "rendered: {}", out.rendered);
+        assert!(out.rendered.contains("Manage widgets"));
     }
 }
