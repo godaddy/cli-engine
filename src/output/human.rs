@@ -459,7 +459,7 @@ fn append_render_notes(out: &mut String, notes: &RenderNotes) {
             );
         } else {
             out.push_str(
-                "\nOutput truncated to fit the display width — use --json for full values (--fields only selects top-level columns, not columns nested under them).\n",
+                "\nOutput truncated to fit the display width — use --json for full values.\n",
             );
         }
     }
@@ -467,7 +467,7 @@ fn append_render_notes(out: &mut String, notes: &RenderNotes) {
         let suggestion = if fields_helps {
             "use --fields to choose columns, or --json for full output"
         } else {
-            "use --json for full output (--fields only selects top-level columns, not columns nested under them)"
+            "use --json for full output"
         };
         out.push_str(&format!(
             "\n{} column{} hidden to fit the display width ({}) — {suggestion}.\n",
