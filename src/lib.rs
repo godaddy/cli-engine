@@ -129,9 +129,9 @@ pub use cli::{
     RootNextActions, build_root_long,
 };
 pub use command::{
-    CommandContext, CommandFuture, CommandHandler, CommandResult, CommandResultMetadata,
-    CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec, StreamSender,
-    StreamingCommandFuture, StreamingCommandHandler, command_args_from_matches,
+    BareGroupAction, CommandContext, CommandFuture, CommandHandler, CommandResult,
+    CommandResultMetadata, CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec,
+    StreamSender, StreamingCommandFuture, StreamingCommandHandler, command_args_from_matches,
     command_path_from_matches, command_path_from_parts, leaf_matches,
 };
 pub use config::{
