@@ -781,7 +781,12 @@ fn render_object_with_columns(
     columns: &[TableColumn],
     available_width: usize,
 ) -> (String, RenderNotes) {
-    if map.is_empty() {
+    if map.is_empty() || columns.is_empty() {
+        // Empty columns happens the same way it does in
+        // `render_array_with_columns`: a view's `--fields` filtered out
+        // every declared column. Nothing to render either way, so this
+        // reports the same "(no data)" a genuinely empty object gets,
+        // rather than an unlabeled blank line.
         return ("(no data)\n".to_owned(), RenderNotes::default());
     }
     let mut out = String::new();
@@ -1490,6 +1495,21 @@ mod tests {
         let (out, notes) = render_array_with_columns(&items, &[], 80);
 
         assert_eq!(out, "(no results)\n");
+        assert!(!notes.truncated, "{out}");
+        assert!(notes.hidden_columns.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn render_object_with_columns_handles_no_columns_gracefully() {
+        // Sibling of the array-path test above (Copilot/human review caught
+        // this asymmetry): a view's `--fields` filtered out every declared
+        // column on an object-shaped response must report "(no data)"
+        // rather than silently rendering an empty string.
+        let map = json!({ "a": "1" });
+        let (out, notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &[], 80);
+
+        assert_eq!(out, "(no data)\n");
         assert!(!notes.truncated, "{out}");
         assert!(notes.hidden_columns.is_empty(), "{out}");
     }
