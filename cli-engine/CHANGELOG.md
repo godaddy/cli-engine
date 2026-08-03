@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.6.0...cli-engine-v0.6.1) (2026-08-03)
+
+
+### Features
+
+* **command:** add context-aware typed constructors and ArgGroup support ([#73](https://github.com/godaddy/cli-engine/issues/73)) ([748efc6](https://github.com/godaddy/cli-engine/commit/748efc65357b23b5032ba122d7f2effcd5e33a76))
+* **output:** support nested table output in human rendering ([#72](https://github.com/godaddy/cli-engine/issues/72)) ([8ca7479](https://github.com/godaddy/cli-engine/commit/8ca74794072927ec645e41853fa3f8f571059fe4))
+
+
+### Bug Fixes
+
+* **workspace:** drop redundant "." self-reference from workspace members ([#75](https://github.com/godaddy/cli-engine/issues/75)) ([b769528](https://github.com/godaddy/cli-engine/commit/b7695285bc6f2bf4b9578a9571cb6b0520c762bd))
+* **workspace:** restructure into a true sibling Cargo workspace ([#77](https://github.com/godaddy/cli-engine/issues/77)) ([05b8b29](https://github.com/godaddy/cli-engine/commit/05b8b2955746e4fee938f4f4044e857688dae96e))
+
 ## [0.6.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.5.0...cli-engine-v0.6.0) (2026-07-31)
 
 
