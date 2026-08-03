@@ -64,7 +64,7 @@ pub fn build_tree_from_clap(command: &Command) -> TreeNode {
     build_tree_from_clap_with_path(command, command.get_name().to_owned())
 }
 
-fn build_tree_from_clap_with_path(command: &Command, path: String) -> TreeNode {
+pub(crate) fn build_tree_from_clap_with_path(command: &Command, path: String) -> TreeNode {
     let children = command
         .get_subcommands()
         .filter(|child| !child.is_hide_set() && child.get_name() != "completion")
