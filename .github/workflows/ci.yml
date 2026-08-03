@@ -44,7 +44,7 @@ jobs:
       # that failure; anything else still fails the check.
       - name: Publish dry run
         run: |
-          if ! output=$(cargo publish --dry-run 2>&1); then
+          if ! output=$(cargo publish --dry-run -p cli-engine 2>&1); then
             echo "$output"
             if echo "$output" | grep -q 'no matching package named `cli-engine-macros` found'; then
               echo "cli-engine-macros isn't on crates.io yet (expected pre-first-release); not a real dry-run failure"

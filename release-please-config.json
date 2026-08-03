@@ -17,7 +17,7 @@
   ],
   "plugins": ["cargo-workspace"],
   "packages": {
-    ".": {
+    "cli-engine": {
       "release-type": "rust",
       "component": "cli-engine"
     },

@@ -58,8 +58,8 @@ Releases are automated via [release-please](https://github.com/googleapis/releas
 
 1. Every merge to `main` runs the Release Please GitHub Action.
 2. The action inspects commits since the last release and opens (or updates) a **Release PR** that:
-   - bumps the version in `Cargo.toml`
-   - updates `CHANGELOG.md`
+   - bumps the version in `cli-engine/Cargo.toml` (or `cli-engine-macros/Cargo.toml`)
+   - updates the corresponding `CHANGELOG.md`
 3. When a maintainer is ready to ship, they **merge the Release PR**.
 4. Merging the Release PR triggers the `publish` job, which runs `cargo publish` to crates.io.
 
