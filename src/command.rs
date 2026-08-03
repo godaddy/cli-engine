@@ -1096,7 +1096,7 @@ impl RuntimeCommandSpec {
 /// Construct with [`RuntimeGroupSpec::new`], then chain `with_*` methods —
 /// never as a struct literal. `#[non_exhaustive]` enforces this so the engine
 /// can add fields without a breaking release.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct RuntimeGroupSpec {
     /// Declarative group metadata.
@@ -1110,6 +1110,17 @@ pub struct RuntimeGroupSpec {
     /// invocation's JSON envelope instead of the default group help text.
     pub bare_action: Option<BareGroupAction>,
 }
+
+impl std::fmt::Debug for RuntimeGroupSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeGroupSpec")
+            .field("group", &self.group)
+            .field("commands", &self.commands)
+            .field("groups", &self.groups)
+            .field("has_bare_action", &self.bare_action.is_some())
+            .finish()
+    }
 }
 
 impl RuntimeGroupSpec {
