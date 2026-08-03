@@ -1,12 +1,14 @@
 # Rust cli-engine Agent Instructions
 
-These instructions apply to the Rust `cli_engine` crate in this directory.
+These instructions apply to the Rust `cli_engine` crate in this workspace.
 
 ## Project Shape
 
-- This repository is a standalone Rust crate for the `cli_engine` library.
-- Keep source in `src/`, crate docs in `docs/`, examples in `examples/`, and integration tests in
-  `tests/`.
+- This repository is a Cargo workspace: the root `Cargo.toml` is a virtual manifest, and the
+  `cli_engine` library lives in `cli-engine/`, alongside its companion proc-macro crate in
+  `cli-engine-macros/`.
+- Within `cli-engine/`, keep source in `src/`, crate docs in `docs/`, examples in `examples/`, and
+  integration tests in `tests/`.
 - Do not add implementation code, docs, fixtures, or tests from unrelated implementations to this repository.
 
 ## Design Direction
@@ -250,7 +252,7 @@ When a command calls HTTP APIs, prefer `cli_engine::transport::HttpClient` plus 
 
 For agentic programming tools generating a new CLI or module:
 
-1. Read `docs/concepts.md` and the nearest existing module.
+1. Read `cli-engine/docs/concepts.md` and the nearest existing module.
 2. Create or update the module file first.
 3. Define response structs with `Serialize` and `JsonSchema` for command output.
 4. Add command specs and handlers with the builder API.

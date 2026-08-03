@@ -96,10 +96,10 @@ of the resolved format.
 
 ## Documentation
 
-- [Concepts](docs/concepts.md)
-- [Design](docs/design.md)
-- [Authentication and transport](docs/auth.md)
-- [Basic example](examples/basic.rs)
+- [Concepts](cli-engine/docs/concepts.md)
+- [Design](cli-engine/docs/design.md)
+- [Authentication and transport](cli-engine/docs/auth.md)
+- [Basic example](cli-engine/examples/basic.rs)
 - [Agent instructions](AGENTS.md)
 
 ## Cargo Features

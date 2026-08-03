@@ -18,41 +18,42 @@ The design priorities are:
 
 ## Crate Shape
 
-The repository root is the Rust crate:
+This crate lives in `cli-engine/`, a member of the repository's Cargo workspace alongside the
+sibling `cli-engine-macros/` proc-macro crate (see the repo-root `AGENTS.md` for workspace-level
+conventions):
 
 ```text
-Cargo.toml
-AGENTS.md
-CLAUDE.md
-docs/
-  auth.md
-  concepts.md
-  design.md
-examples/
-  basic.rs
-  typed.rs
-src/
-  lib.rs
-  cli.rs
-  command.rs
-  module.rs
-  middleware.rs
-  flags.rs
-  guide.rs
-  search.rs
-  tree.rs
-  tier.rs
-  error.rs
-  auth/
-    mod.rs
-    exec.rs
-    pkce.rs
-    ...
-  output/
-  transport/
-tests/
-  foundation.rs
-  derive_bridge.rs
+cli-engine/
+  Cargo.toml
+  docs/
+    auth.md
+    concepts.md
+    design.md
+  examples/
+    basic.rs
+    typed.rs
+  src/
+    lib.rs
+    cli.rs
+    command.rs
+    module.rs
+    middleware.rs
+    flags.rs
+    guide.rs
+    search.rs
+    tree.rs
+    tier.rs
+    error.rs
+    auth/
+      mod.rs
+      exec.rs
+      pkce.rs
+      ...
+    output/
+    transport/
+  tests/
+    foundation.rs
+    derive_bridge.rs
 ```
 
 The root module re-exports the common authoring surface so consumer modules can usually import from
