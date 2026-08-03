@@ -629,3 +629,69 @@ async fn completion_print_unknown_shell_exits_nonzero() {
         out.rendered
     );
 }
+
+// A command returning an object whose "parameters" field wraps a list under
+// `items` (the pagination/`Summary<T>`-style shape a consumer CLI might use)
+// — a nested view column reaches through that wrapper via a dotted field path.
+fn nested_view_operation_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(Module::new("Demo", |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("operation", "Inspect operations"))
+                    .with_command(RuntimeCommandSpec::new(
+                        CommandSpec::new("get", "Get an operation")
+                            .with_view(vec![
+                                TableColumn::new("name", "Name"),
+                                TableColumn::new("parameters.items", "Parameters").nested(vec![
+                                    TableColumn::new("name", "Name"),
+                                    TableColumn::new("in", "In"),
+                                ]),
+                            ])
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!({
+                                "name": "getPets",
+                                "parameters": {
+                                    "items": [
+                                        {"name": "limit", "in": "query"},
+                                        {"name": "id", "in": "path"},
+                                    ],
+                                    "total": 2,
+                                },
+                            })))
+                        },
+                    ))
+            })),
+    )
+}
+
+#[tokio::test]
+async fn human_output_renders_nested_view_column_as_indented_child_table() {
+    // Proves the full wiring, not just the human.rs-internal path: `with_view`
+    // registration, `HumanViewRegistry` lookup by command path, and
+    // `render_human_with_registry_selected` all carry the nested column
+    // through to a rendered indented child table.
+    let cli = nested_view_operation_cli();
+    let human = cli
+        .run(["my-cli", "operation", "get", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(
+        human.rendered.contains("Name: getPets"),
+        "{}",
+        human.rendered
+    );
+    assert!(
+        human.rendered.contains("Parameters:\n"),
+        "{}",
+        human.rendered
+    );
+    assert!(human.rendered.contains("  NAME"), "{}", human.rendered);
+    assert!(human.rendered.contains("  limit"), "{}", human.rendered);
+    assert!(
+        !human.rendered.contains('{'),
+        "no raw JSON should leak into human output: {}",
+        human.rendered
+    );
+}

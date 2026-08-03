@@ -1126,16 +1126,8 @@ async fn cli_config_registers_modules_guides_views_and_init_once() {
         ctx.register_view(HumanViewDef {
             schema_id: "things".to_owned(),
             columns: vec![
-                TableColumn {
-                    field: "name".to_owned(),
-                    header: "Name".to_owned(),
-                    no_truncate: false,
-                },
-                TableColumn {
-                    field: "enabled".to_owned(),
-                    header: "Enabled".to_owned(),
-                    no_truncate: false,
-                },
+                TableColumn::new("name", "Name"),
+                TableColumn::new("enabled", "Enabled"),
             ],
         });
         ctx.add_guide(GuideEntry {
@@ -1259,11 +1251,7 @@ async fn cli_config_accepts_trait_based_command_modules() {
         fn views(&self) -> Vec<HumanViewDef> {
             vec![HumanViewDef {
                 schema_id: "trait-things".to_owned(),
-                columns: vec![TableColumn {
-                    field: "name".to_owned(),
-                    header: "Name".to_owned(),
-                    no_truncate: false,
-                }],
+                columns: vec![TableColumn::new("name", "Name")],
             }]
         }
 
@@ -1560,16 +1548,8 @@ async fn cli_seeds_schema_and_human_views_from_global_registries() {
     register_global_human_view(HumanViewDef {
         schema_id: "global-things".to_owned(),
         columns: vec![
-            TableColumn {
-                field: "name".to_owned(),
-                header: "Name".to_owned(),
-                no_truncate: false,
-            },
-            TableColumn {
-                field: "enabled".to_owned(),
-                header: "Enabled".to_owned(),
-                no_truncate: false,
-            },
+            TableColumn::new("name", "Name"),
+            TableColumn::new("enabled", "Enabled"),
         ],
     });
     let global_schema =
@@ -7812,16 +7792,8 @@ async fn middleware_human_output_default_fields_narrows_view_columns() {
     middleware.human_views.register(HumanViewDef {
         schema_id: "things".to_owned(),
         columns: vec![
-            TableColumn {
-                field: "name".to_owned(),
-                header: "Name".to_owned(),
-                no_truncate: false,
-            },
-            TableColumn {
-                field: "status".to_owned(),
-                header: "Status".to_owned(),
-                no_truncate: false,
-            },
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
         ],
     });
 
@@ -7867,16 +7839,8 @@ async fn middleware_human_output_resolves_declared_view_id() {
     middleware.human_views.register(HumanViewDef {
         schema_id: "projects-table".to_owned(),
         columns: vec![
-            TableColumn {
-                field: "name".to_owned(),
-                header: "Name".to_owned(),
-                no_truncate: false,
-            },
-            TableColumn {
-                field: "status".to_owned(),
-                header: "Status".to_owned(),
-                no_truncate: false,
-            },
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
         ],
     });
 
@@ -7914,11 +7878,7 @@ async fn middleware_human_output_uses_custom_view_function_before_columns() {
     middleware.output_format = "human".to_owned();
     middleware.human_views.register(HumanViewDef {
         schema_id: "things:list".to_owned(),
-        columns: vec![TableColumn {
-            field: "name".to_owned(),
-            header: "Name".to_owned(),
-            no_truncate: false,
-        }],
+        columns: vec![TableColumn::new("name", "Name")],
     });
     middleware.human_views.register_func("things:list", |data| {
         format!("custom:{}\n", data.as_array().map_or(0, Vec::len))
@@ -9172,11 +9132,7 @@ fn human_renderer_mixed_object_scalar_array_falls_back_to_lines() {
 
 #[test]
 fn human_renderer_column_mixed_object_scalar_array_falls_back_to_lines() {
-    let columns = vec![TableColumn {
-        field: "name".to_owned(),
-        header: "Name".to_owned(),
-        no_truncate: false,
-    }];
+    let columns = vec![TableColumn::new("name", "Name")];
     let envelope = Envelope::success(
         json!([
             {"name": "alpha"},
@@ -9197,16 +9153,8 @@ fn human_view_registry_renders_registered_columns_for_lists() {
     registry.register(HumanViewDef {
         schema_id: "things".to_owned(),
         columns: vec![
-            TableColumn {
-                field: "name".to_owned(),
-                header: "Name".to_owned(),
-                no_truncate: false,
-            },
-            TableColumn {
-                field: "enabled".to_owned(),
-                header: "Enabled".to_owned(),
-                no_truncate: false,
-            },
+            TableColumn::new("name", "Name"),
+            TableColumn::new("enabled", "Enabled"),
         ],
     });
     let envelope = Envelope::success(
@@ -9228,16 +9176,8 @@ fn human_view_registry_renders_registered_columns_for_lists() {
 #[test]
 fn human_view_registry_renders_registered_columns_for_objects() {
     let columns = vec![
-        TableColumn {
-            field: "name".to_owned(),
-            header: "Name".to_owned(),
-            no_truncate: false,
-        },
-        TableColumn {
-            field: "missing".to_owned(),
-            header: "Missing".to_owned(),
-            no_truncate: false,
-        },
+        TableColumn::new("name", "Name"),
+        TableColumn::new("missing", "Missing"),
     ];
     let envelope = Envelope::success(json!({"name": "alpha", "ignored": "x"}), "things");
 
@@ -9251,11 +9191,7 @@ fn human_view_registry_custom_renderer_wins_over_columns_preserves_legacy_view_f
     let mut registry = HumanViewRegistry::new();
     registry.register(HumanViewDef {
         schema_id: "things".to_owned(),
-        columns: vec![TableColumn {
-            field: "name".to_owned(),
-            header: "Name".to_owned(),
-            no_truncate: false,
-        }],
+        columns: vec![TableColumn::new("name", "Name")],
     });
     registry.register_func("things", |data| {
         format!(

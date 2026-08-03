@@ -191,7 +191,11 @@ fn renderer_format_matrix_has_stable_success_and_error_shapes() {
 }
 
 #[test]
-fn human_view_columns_preserve_shape_for_empty_missing_and_nested_values() {
+fn human_view_columns_resolve_dotted_paths_and_preserve_shape_for_empty_and_missing_values() {
+    // A dotted `field` path walks down into a nested object (row 1's
+    // "owner.name" resolves to "Ada"); a missing intermediate key or a
+    // present-but-empty nested object (row 2's `owner: {}`) still renders as
+    // an empty cell, same as a top-level missing field.
     let columns = vec![
         TableColumn::new("id", "ID"),
         TableColumn::new("owner.name", "Owner"),
@@ -207,7 +211,7 @@ fn human_view_columns_preserve_shape_for_empty_missing_and_nested_values() {
 
     assert_eq!(
         render_human_with_view(&envelope, Some(&columns), ""),
-        "ID  OWNER  MISSING\n--  -----  -------\np1                \np2                \n\n(2 rows)\n"
+        "ID  OWNER  MISSING\n--  -----  -------\np1  Ada           \np2                \n\n(2 rows)\n"
     );
 }
 

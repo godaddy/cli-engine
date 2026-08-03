@@ -22,9 +22,22 @@ use super::{Envelope, NextAction, NextActionParam};
 /// [`crate::output::render_human_with_registry_selected`]), for both display
 /// and hide-priority. Declared order only governs output when no selection is
 /// given at all.
+///
+/// Construct with [`TableColumn::new`], then chain builder methods like
+/// [`no_truncate`](TableColumn::no_truncate)/[`nested`](TableColumn::nested)
+/// — never as a struct literal. No known consumer constructs `TableColumn`
+/// via struct literal, so marking it `#[non_exhaustive]` carries no real
+/// breaking impact today; going forward it means the engine can add fields
+/// (as it did for `nested`) without that becoming a breaking release either.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct TableColumn {
-    /// JSON field path.
+    /// JSON field path. Supports simple dotted paths to reach a value nested
+    /// under intermediate objects, so a column can point through a wrapper
+    /// shape (a pagination envelope, a `Summary<T>`, etc.). A literal field
+    /// name containing a `.` is not supported — this mirrors the dotted-path
+    /// convention `crate::output::fields` already uses for `--fields`
+    /// projection.
     pub field: String,
     /// Display header.
     pub header: String,
@@ -33,6 +46,12 @@ pub struct TableColumn {
     /// values). Use this for values that are useless when cut short, such as
     /// URLs.
     pub no_truncate: bool,
+    /// When set, and the resolved value is list-of-objects or object shaped,
+    /// this column renders as an indented child table or child property bag
+    /// instead of a one-line dump — see [`TableColumn::nested`]. `None` (the
+    /// default from [`TableColumn::new`]) is a complete no-op: rendering is
+    /// identical to a column with no opinion about nesting.
+    pub nested: Option<Vec<TableColumn>>,
 }
 
 impl TableColumn {
@@ -43,6 +62,7 @@ impl TableColumn {
             field: field.into(),
             header: header.into(),
             no_truncate: false,
+            nested: None,
         }
     }
 
@@ -51,6 +71,24 @@ impl TableColumn {
     #[must_use]
     pub fn no_truncate(mut self, value: bool) -> Self {
         self.no_truncate = value;
+        self
+    }
+
+    /// Opts this column into rendering a nested list/object value as an
+    /// indented child table or property bag, using `columns` as that child's
+    /// own column definitions (which may themselves set `.nested(...)`).
+    ///
+    /// Nesting is only consulted when this column is rendered inside an
+    /// object property bag (top-level, or itself a nested property bag) — a
+    /// row cell inside an array-of-objects table always renders as a single
+    /// flat value, ignoring `nested`, because a table row is one monospace
+    /// line and can't itself contain a rendered sub-block without breaking
+    /// column alignment. Recursion is otherwise unbounded through the object
+    /// chain: a nested column's own child columns may set `.nested(...)`
+    /// again for a grandchild table or property bag.
+    #[must_use]
+    pub fn nested(mut self, columns: impl Into<Vec<TableColumn>>) -> Self {
+        self.nested = Some(columns.into());
         self
     }
 }
@@ -359,10 +397,7 @@ fn render_data_body(
     if let Some(columns) = columns {
         return match data {
             Value::Array(items) => render_array_with_columns(items, columns, available_width),
-            Value::Object(map) => (
-                render_object_with_columns(map, columns),
-                RenderNotes::default(),
-            ),
+            Value::Object(map) => render_object_with_columns(map, columns, available_width),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 (format!("{}\n", format_value(data)), RenderNotes::default())
             }
@@ -371,14 +406,8 @@ fn render_data_body(
     match data {
         Value::Array(items) => render_array(items, fields, available_width),
         Value::Object(map) => {
-            if map.is_empty() {
-                return ("(no data)\n".to_owned(), RenderNotes::default());
-            }
             let columns = dynamic_columns(fields, || map.keys().cloned().collect());
-            (
-                render_object_with_columns(map, &columns),
-                RenderNotes::default(),
-            )
+            render_object_with_columns(map, &columns, available_width)
         }
         other => (
             format!("{}\n", format_plain_value(other)),
@@ -416,16 +445,38 @@ fn dynamic_columns(fields: &str, natural_keys: impl FnOnce() -> Vec<String>) -> 
 /// (a no-op when neither happened). Mirrors `append_next_actions`: writes
 /// directly into `out` rather than building a separate string.
 fn append_render_notes(out: &mut String, notes: &RenderNotes) {
+    // `--fields` only ever selects among top-level declared columns: it can
+    // drop a `TableColumn::nested` column entirely, but can't narrow what
+    // shows *inside* one. Suggesting it as a fix once any of the reported
+    // narrowing happened inside a nested block would be wrong — there's no
+    // flag that reaches that fine-grained, so `--json` is the only real
+    // remedy in that case.
+    let fields_helps = !notes.nested_narrowing;
     if notes.truncated {
-        out.push_str(
-            "\nOutput truncated to fit the display width — use --fields to show fewer columns, or --json for full values.\n",
-        );
+        if fields_helps {
+            out.push_str(
+                "\nOutput truncated to fit the display width — use --fields to show fewer columns, or --json for full values.\n",
+            );
+        } else {
+            out.push_str(
+                "\nOutput truncated to fit the display width — use --json for full values.\n",
+            );
+        }
     }
     if !notes.hidden_columns.is_empty() {
+        let suggestion = if fields_helps {
+            "use --fields to choose columns, or --json for full output"
+        } else {
+            "use --json for full output"
+        };
         out.push_str(&format!(
-            "\n{} column{} hidden to fit the display width ({}) — use --fields to choose columns, or --json for full output.\n",
+            "\n{} column{} hidden to fit the display width ({}) — {suggestion}.\n",
             notes.hidden_columns.len(),
-            if notes.hidden_columns.len() == 1 { "" } else { "s" },
+            if notes.hidden_columns.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             notes.hidden_columns.join(", "),
         ));
     }
@@ -492,6 +543,12 @@ const NO_TRUNCATE_MAX_WIDTH: usize = 4096;
 /// is left for column content) has to agree with what gets printed.
 const COLUMN_GUTTER: usize = 2;
 
+/// Indent applied to a nested table/property-bag block under a parent
+/// object's field. Matches the two-space depth-step the TOON encoder already
+/// uses (`crate::output::toon`'s `push_line`), for a consistent look across
+/// human and TOON nested rendering.
+const NESTED_INDENT: &str = "  ";
+
 /// Detects how wide to render human-output tables and guides.
 ///
 /// An interactive terminal gets its live width (via `termimad`); anything
@@ -518,6 +575,15 @@ struct RenderNotes {
     /// would have appeared in the table, had they fit) — not reverse
     /// priority order.
     hidden_columns: Vec<String>,
+    /// Whether any of the truncation/hiding captured above happened inside a
+    /// nested child block (a `TableColumn::nested` column's own table or
+    /// property bag) rather than at this level's own top-level columns.
+    /// `--fields` only ever selects among top-level declared columns — it
+    /// can drop a nested column entirely, but can't narrow what's shown
+    /// *inside* one — so [`append_render_notes`] must not suggest `--fields`
+    /// as a fix when this is set, even though `hidden_columns`/`truncated`
+    /// are otherwise reported identically either way.
+    nested_narrowing: bool,
 }
 
 /// Chooses how many leading columns (priority order, most important first),
@@ -640,7 +706,7 @@ fn render_array_with_columns(
                 .map(|(index, column)| {
                     let value = item
                         .as_object()
-                        .and_then(|map| map.get(&column.field))
+                        .and_then(|map| resolve_field_path(map, &column.field))
                         .map_or_else(String::new, format_value);
                     let cap = if column.no_truncate {
                         NO_TRUNCATE_MAX_WIDTH
@@ -705,6 +771,7 @@ fn render_array_with_columns(
         RenderNotes {
             truncated,
             hidden_columns,
+            nested_narrowing: false,
         },
     )
 }
@@ -712,18 +779,47 @@ fn render_array_with_columns(
 fn render_object_with_columns(
     map: &serde_json::Map<String, Value>,
     columns: &[TableColumn],
-) -> String {
-    if map.is_empty() {
-        return "(no data)\n".to_owned();
+    available_width: usize,
+) -> (String, RenderNotes) {
+    if map.is_empty() || columns.is_empty() {
+        // Empty columns happens the same way it does in
+        // `render_array_with_columns`: a view's `--fields` filtered out
+        // every declared column. Nothing to render either way, so this
+        // reports the same "(no data)" a genuinely empty object gets,
+        // rather than an unlabeled blank line.
+        return ("(no data)\n".to_owned(), RenderNotes::default());
     }
     let mut out = String::new();
+    let mut notes = RenderNotes::default();
     for column in columns {
-        let value = map
-            .get(&column.field)
-            .map_or_else(String::new, format_value);
-        out.push_str(&format!("{}: {value}\n", column.header));
+        let value = resolve_field_path(map, &column.field);
+        match (&column.nested, value) {
+            (Some(nested_columns), Some(value)) if is_nestable(value) => {
+                out.push_str(&format!("{}:\n", column.header));
+                let child_width = available_width.saturating_sub(NESTED_INDENT.len());
+                let (block, child_notes) = render_nested_value(value, nested_columns, child_width);
+                out.push_str(&indent_block(&block, NESTED_INDENT));
+                if child_notes.truncated
+                    || !child_notes.hidden_columns.is_empty()
+                    || child_notes.nested_narrowing
+                {
+                    notes.nested_narrowing = true;
+                }
+                notes.truncated |= child_notes.truncated;
+                notes.hidden_columns.extend(
+                    child_notes
+                        .hidden_columns
+                        .into_iter()
+                        .map(|hidden| format!("{} > {hidden}", column.header)),
+                );
+            }
+            (_, value) => {
+                let value_str = value.map_or_else(String::new, format_value);
+                out.push_str(&format!("{}: {value_str}\n", column.header));
+            }
+        }
     }
-    out
+    (out, notes)
 }
 
 fn render_array(items: &[Value], fields: &str, available_width: usize) -> (String, RenderNotes) {
@@ -783,6 +879,83 @@ fn render_table(headers: &[String], widths: &[usize], rows: &[Vec<String>]) -> S
     }
     out.push_str(&format!("\n({} rows)\n", rows.len()));
     out
+}
+
+/// Resolves a column's (possibly dotted) field path against an object,
+/// walking down through nested objects one segment at a time — e.g.
+/// `"parameters.items"` reaches `map["parameters"]["items"]`.
+///
+/// Returns `None` when: `field` is empty; any segment (including a
+/// leading/trailing/doubled `.`) is empty; an intermediate or leaf segment is
+/// missing; or an intermediate segment's value is not an object. The leaf
+/// segment's value is returned as-is whatever its `Value` variant is —
+/// callers decide what to do with that.
+fn resolve_field_path<'value>(
+    map: &'value serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<&'value Value> {
+    let mut segments = field.split('.');
+    let first = segments.next()?;
+    if first.is_empty() {
+        return None;
+    }
+    let mut current = map.get(first)?;
+    for segment in segments {
+        if segment.is_empty() {
+            return None;
+        }
+        current = current.as_object()?.get(segment)?;
+    }
+    Some(current)
+}
+
+/// Prefixes every non-empty line of `block` with `indent`, leaving blank
+/// lines (e.g. the blank line before a table's `(N rows)` footer) bare so no
+/// line ever carries trailing-whitespace-only indent. Round-trips a block's
+/// existing single-trailing-newline convention.
+fn indent_block(block: &str, indent: &str) -> String {
+    block
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                line.to_owned()
+            } else {
+                format!("{indent}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// Whether `value` is a shape [`TableColumn::nested`] can render as a child
+/// block: a single object, or an array whose items are all objects (an empty
+/// array trivially qualifies, rendering as an indented "no results"). Gates
+/// entry into nested rendering in [`render_object_with_columns`] so a column
+/// with `.nested(...)` set is a true no-op — the exact same single-line
+/// `format_value` rendering an un-opted-in column would have produced —
+/// whenever the runtime value doesn't actually have this shape (a scalar, or
+/// an array mixing objects with non-objects).
+fn is_nestable(value: &Value) -> bool {
+    matches!(value, Value::Object(_))
+        || matches!(value, Value::Array(items) if items.iter().all(Value::is_object))
+}
+
+/// Renders a nested column's resolved value as a child block, reusing the
+/// same renderers a top-level array/object would use, just at a narrowed
+/// width. Only called once [`is_nestable`] has confirmed `value`'s shape, so
+/// the array/object arms below are the only ones a real caller reaches; the
+/// scalar fallback keeps this function total on its own.
+fn render_nested_value(
+    value: &Value,
+    nested_columns: &[TableColumn],
+    available_width: usize,
+) -> (String, RenderNotes) {
+    match value {
+        Value::Array(items) => render_array_with_columns(items, nested_columns, available_width),
+        Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
+        other => (format!("{}\n", format_value(other)), RenderNotes::default()),
+    }
 }
 
 fn format_value(value: &Value) -> String {
@@ -1327,6 +1500,21 @@ mod tests {
     }
 
     #[test]
+    fn render_object_with_columns_handles_no_columns_gracefully() {
+        // Sibling of the array-path test above (Copilot/human review caught
+        // this asymmetry): a view's `--fields` filtered out every declared
+        // column on an object-shaped response must report "(no data)"
+        // rather than silently rendering an empty string.
+        let map = json!({ "a": "1" });
+        let (out, notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &[], 80);
+
+        assert_eq!(out, "(no data)\n");
+        assert!(!notes.truncated, "{out}");
+        assert!(notes.hidden_columns.is_empty(), "{out}");
+    }
+
+    #[test]
     fn no_view_array_of_empty_objects_reports_no_results() {
         // Every item is `{}`, so the dynamic (no-view) column catalog has no
         // keys to derive columns from — same "no columns" case as above,
@@ -1336,5 +1524,243 @@ mod tests {
 
         assert_eq!(out, "(no results)\n");
         assert!(notes.hidden_columns.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn resolve_field_path_walks_dotted_wrapper_and_reports_missing_or_wrong_shape() {
+        let map = json!({
+            "parameters": { "items": [{"name": "limit"}], "total": 1 },
+            "owner": "not-an-object",
+        });
+        let map = map.as_object().expect("object fixture");
+
+        assert_eq!(
+            resolve_field_path(map, "parameters.items"),
+            map.get("parameters").and_then(|value| value.get("items"))
+        );
+        assert_eq!(resolve_field_path(map, "parameters.missing"), None);
+        assert_eq!(
+            resolve_field_path(map, "owner.name"),
+            None,
+            "intermediate value is a string, not an object"
+        );
+        assert_eq!(resolve_field_path(map, "missing"), None);
+        assert_eq!(resolve_field_path(map, ""), None, "empty field");
+        assert_eq!(resolve_field_path(map, ".parameters"), None, "leading dot");
+        assert_eq!(resolve_field_path(map, "parameters."), None, "trailing dot");
+        assert_eq!(
+            resolve_field_path(map, "parameters..items"),
+            None,
+            "doubled dot"
+        );
+    }
+
+    #[test]
+    fn nested_array_of_objects_renders_as_indented_child_table() {
+        let map = json!({
+            "name": "getPets",
+            "parameters": {
+                "items": [
+                    {"name": "limit", "in": "query"},
+                    {"name": "id", "in": "path"},
+                ],
+                "total": 2,
+            },
+        });
+        let columns = vec![
+            TableColumn::new("name", "Name"),
+            TableColumn::new("parameters.items", "Parameters").nested(vec![
+                TableColumn::new("name", "Name"),
+                TableColumn::new("in", "In"),
+            ]),
+        ];
+
+        let (out, notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert!(out.starts_with("Name: getPets\nParameters:\n"), "{out}");
+        assert!(
+            out.contains("  NAME"),
+            "child header must be indented: {out}"
+        );
+        assert!(out.contains("  limit"), "child row must be indented: {out}");
+        assert!(
+            !out.contains('{'),
+            "no raw JSON should leak into output: {out}"
+        );
+        assert!(!notes.truncated, "{out}");
+    }
+
+    #[test]
+    fn nested_child_table_narrows_and_reports_via_merged_render_notes() {
+        let map = json!({
+            "items": [
+                {"a": "x".repeat(5), "b": "x".repeat(5), "c": "x".repeat(5)},
+            ],
+        });
+        let columns = vec![TableColumn::new("items", "Items").nested(vec![
+            TableColumn::new("a", "A"),
+            TableColumn::new("b", "B"),
+            TableColumn::new("c", "C"),
+        ])];
+
+        // Narrow enough to force the child table's own hide-before-truncate
+        // cascade (mirrors `narrow_terminal_hides_columns_before_truncating_any_of_the_survivors`).
+        let (out, notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 12);
+
+        assert_eq!(
+            notes.hidden_columns,
+            vec!["Items > B".to_owned(), "Items > C".to_owned()],
+            "hidden columns bubble up prefixed with the parent header: {out}"
+        );
+        assert!(
+            notes.nested_narrowing,
+            "narrowing happened inside the nested child, not at this level's own columns: {out}"
+        );
+    }
+
+    #[test]
+    fn footer_does_not_suggest_fields_for_narrowing_inside_a_nested_column() {
+        // `--fields` only selects among top-level declared columns — it
+        // cannot narrow what shows *inside* a `TableColumn::nested` column.
+        // When a nested child's own columns get hidden, the footer must not
+        // claim `--fields` fixes it (regression: it used to say so
+        // unconditionally, misleading users into trying a flag that does
+        // nothing for this case — see PR review discussion). Same fixture
+        // shape as `render_human_with_view_reports_hidden_columns_in_footer`
+        // (proven to overflow the fallback 80-column width), just nested
+        // one level under an "items" field instead of being the top-level
+        // view directly.
+        let envelope = Envelope::success(
+            json!({
+                "items": [{
+                    "id": "1",
+                    "name": "acme",
+                    "status": "active",
+                    "region": "us-west",
+                    "created_at": "2026-01-01",
+                    "updated_at": "2026-01-02",
+                    "notes": "irrelevant, lowest priority",
+                }],
+            }),
+            "thing",
+        );
+        let columns = vec![TableColumn::new("items", "Items").nested(vec![
+            TableColumn::new("id", "ID"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("status", "Status"),
+            TableColumn::new("region", "Region"),
+            TableColumn::new("created_at", "Created At"),
+            TableColumn::new("updated_at", "Updated At"),
+            TableColumn::new("notes", "This Is An Extremely Long Trailing Column Header"),
+        ])];
+
+        let out = render_human_with_view(&envelope, Some(&columns), "");
+
+        assert!(out.contains("hidden to fit the display width"), "{out}");
+        assert!(
+            out.contains("Items > This Is An Extremely Long Trailing Column Header"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("use --fields"),
+            "must not suggest --fields as a fix when the narrowing is inside a nested column \
+             (mentioning it to explain why it won't help is fine): {out}"
+        );
+        assert!(
+            out.contains("--json"),
+            "must still point at --json as the real remedy: {out}"
+        );
+    }
+
+    #[test]
+    fn empty_nested_array_renders_no_results_indented() {
+        let map = json!({ "items": [] });
+        let columns = vec![
+            TableColumn::new("items", "Parameters").nested(vec![TableColumn::new("name", "Name")]),
+        ];
+
+        let (out, _notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert_eq!(out, "Parameters:\n  (no results)\n");
+    }
+
+    #[test]
+    fn nested_object_field_renders_as_indented_property_bag() {
+        let map = json!({ "owner": {"name": "Ada", "email": "ada@example.test"} });
+        let columns = vec![TableColumn::new("owner", "Owner").nested(vec![
+            TableColumn::new("name", "Name"),
+            TableColumn::new("email", "Email"),
+        ])];
+
+        let (out, _notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert_eq!(out, "Owner:\n  Name: Ada\n  Email: ada@example.test\n");
+    }
+
+    #[test]
+    fn unopted_in_nested_value_still_renders_as_raw_json_line() {
+        // A column with no `.nested(...)` is a strict no-op even when the
+        // runtime value happens to be list/object shaped — locks in the
+        // "opt-in, never automatic" guarantee.
+        let map = json!({
+            "parameters": {"items": [{"name": "limit"}], "total": 1},
+        });
+        let columns = vec![TableColumn::new("parameters", "Parameters")];
+
+        let (out, _notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert_eq!(
+            out,
+            format!(
+                "Parameters: {}\n",
+                format_value(map.get("parameters").expect("parameters"))
+            )
+        );
+        assert!(out.contains('{'), "unchanged raw-JSON fallback: {out}");
+    }
+
+    #[test]
+    fn nested_column_is_a_no_op_when_the_value_is_not_actually_nestable() {
+        // A column can opt into `.nested(...)` while still receiving a
+        // scalar or a mixed (non-uniform) array at runtime — e.g. a field
+        // that's usually a list of objects but is empty/absent for this row,
+        // or simply the wrong shape. Rendering must stay the same flat
+        // `header: value` line a column with `nested: None` would have
+        // produced, not a `header:\n  value` block — regression guard for a
+        // shape-drift bug where the header line alone changed to multi-line
+        // even though the value itself fell back to `format_value`.
+        let map = json!({
+            "scalar": "just a string",
+            "mixed": ["a", {"b": 1}],
+        });
+        let nested_columns = vec![TableColumn::new("x", "X")];
+        let columns = vec![
+            TableColumn::new("scalar", "Scalar").nested(nested_columns.clone()),
+            TableColumn::new("mixed", "Mixed").nested(nested_columns),
+        ];
+        let unnested_columns = vec![
+            TableColumn::new("scalar", "Scalar"),
+            TableColumn::new("mixed", "Mixed"),
+        ];
+
+        let (nested_out, _) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+        let (unnested_out, _) = render_object_with_columns(
+            map.as_object().expect("object fixture"),
+            &unnested_columns,
+            80,
+        );
+
+        assert_eq!(
+            nested_out, unnested_out,
+            "an opted-in column must render identically to an unopted-in one \
+             when the runtime value isn't list-of-objects or object shaped"
+        );
+        assert_eq!(nested_out, "Scalar: just a string\nMixed: a, {\"b\":1}\n");
     }
 }
