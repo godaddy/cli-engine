@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.6.0...cli-engine-v0.6.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* **workspace:** restructure into a true sibling Cargo workspace ([#77](https://github.com/godaddy/cli-engine/issues/77)) ([05b8b29](https://github.com/godaddy/cli-engine/commit/05b8b2955746e4fee938f4f4044e857688dae96e))
+
 ## [0.6.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.5.0...cli-engine-v0.6.0) (2026-07-31)
 
 
