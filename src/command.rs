@@ -37,6 +37,11 @@ pub type StreamingCommandFuture = Pin<Box<dyn Future<Output = Result<()>> + Send
 pub type StreamingCommandHandler =
     Arc<dyn Fn(CommandContext, StreamSender) -> StreamingCommandFuture + Send + Sync>;
 
+/// Callback invoked when a group is run bare (no subcommand). Returns the
+/// JSON value rendered in place of the default group help text; see
+/// [`RuntimeGroupSpec::with_bare_action`].
+pub type BareGroupAction = Arc<dyn Fn() -> Value + Send + Sync>;
+
 /// Data returned by a command handler.
 ///
 /// Command handlers should return renderable data and keep output metadata on
@@ -1100,6 +1105,11 @@ pub struct RuntimeGroupSpec {
     pub commands: Vec<RuntimeCommandSpec>,
     /// Executable nested groups under this group.
     pub groups: Vec<RuntimeGroupSpec>,
+    /// Optional callback invoked when this group is run bare (no
+    /// subcommand). When set, its return value is rendered as this
+    /// invocation's JSON envelope instead of the default group help text.
+    pub bare_action: Option<BareGroupAction>,
+}
 }
 
 impl RuntimeGroupSpec {
@@ -1123,6 +1133,18 @@ impl RuntimeGroupSpec {
     #[must_use]
     pub fn with_group(mut self, group: RuntimeGroupSpec) -> Self {
         self.groups.push(group);
+        self
+    }
+
+    /// Sets the callback invoked when this group is run bare (no
+    /// subcommand), replacing the default rendered help text with the
+    /// callback's JSON return value.
+    #[must_use]
+    pub fn with_bare_action<F>(mut self, action: F) -> Self
+    where
+        F: Fn() -> Value + Send + Sync + 'static,
+    {
+        self.bare_action = Some(Arc::new(action));
         self
     }
 
@@ -1154,10 +1176,14 @@ impl RuntimeGroupSpec {
         &self,
         prefix: &mut Vec<String>,
         out: &mut BTreeMap<String, RuntimeCommandSpec>,
+        group_actions: &mut BTreeMap<String, BareGroupAction>,
     ) {
         prefix.push(self.group.name.clone());
+        if let Some(action) = &self.bare_action {
+            group_actions.insert(prefix.join(":"), Arc::clone(action));
+        }
         for group in &self.groups {
-            group.register_commands(prefix, out);
+            group.register_commands(prefix, out, group_actions);
         }
         for command in &self.commands {
             prefix.push(command.spec.name.clone());
