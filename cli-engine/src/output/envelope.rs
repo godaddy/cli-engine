@@ -12,10 +12,14 @@ pub struct Envelope {
     /// Successful command data.
     #[serde(skip_serializing_if = "is_absent_or_null")]
     pub data: Option<Value>,
-    /// Client-side pagination facts, present whenever `--limit`/`--offset`
-    /// ran — regardless of `--verbose`. Unlike [`metadata`](Envelope::metadata),
-    /// this is not debugging output; a caller relies on it to know whether
-    /// more data exists at all.
+    /// Client-side pagination facts, present whenever pagination was
+    /// actually applied — an effective `--limit` or `--offset` greater than
+    /// zero, not merely a command that opted into
+    /// [`with_pagination`](crate::CommandSpec::with_pagination) — regardless
+    /// of `--verbose`. A `default_limit` of `0` ("unlimited") with neither
+    /// flag passed leaves this `None` even for a paginating command. Unlike
+    /// [`metadata`](Envelope::metadata), this is not debugging output; a
+    /// caller relies on it to know whether more data exists at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pagination: Option<PaginationMeta>,
     /// Optional execution metadata, controlled by `--verbose`.

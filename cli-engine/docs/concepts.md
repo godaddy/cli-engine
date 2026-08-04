@@ -496,8 +496,11 @@ command to run next.
 
 A command that opted into `--limit`/`--offset` pagination via `CommandSpec::with_pagination` gets
 a top-level `pagination` field on the envelope — `total`, `offset`, `limit`, `count`, and
-`has_more` — always present regardless of `--verbose`. Unlike `metadata`, this isn't debugging
-output; a caller relies on it to know whether more data exists at all. Human output merges it into
+`has_more` — whenever pagination is actually applied (an effective `--limit` or `--offset` greater
+than zero), regardless of `--verbose`. A `default_limit` of `0` ("unlimited") with neither flag
+passed leaves the field absent even for a paginating command. Unlike `metadata`, this isn't
+debugging output when it is present; a caller relies on it to know whether more data exists at
+all. Human output merges it into
 the table's row-count footer — `(N of M rows, offset O, limit L)` — rather than printing it twice;
 a paginated response that doesn't render as a table (e.g. a bare array of scalars) instead gets a
 standalone `Showing N of M (offset O, limit L)` line.
