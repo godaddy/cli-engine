@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.7.0...cli-engine-v0.8.0) (2026-08-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **output:** always surface pagination facts and suggest the next page ([#82](https://github.com/godaddy/cli-engine/issues/82))
+
+### Features
+
+* **output:** always surface pagination facts and suggest the next page ([#82](https://github.com/godaddy/cli-engine/issues/82)) ([dd6b13a](https://github.com/godaddy/cli-engine/commit/dd6b13a360e3834cf6616e86a8d6ee2d13776864))
+
 ## [0.7.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.6.1...cli-engine-v0.7.0) (2026-08-04)
 
 
