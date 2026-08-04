@@ -2589,8 +2589,9 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
 /// `page_size` vs flag `--page-size`), replays a multi-value arg as one
 /// flag occurrence per value (round-trips correctly whether the arg is a
 /// plain repeatable `ArgAction::Append` or also sets a `value_delimiter`),
-/// and quotes values containing whitespace. Deliberately omits
-/// `--limit`/`--offset` — those are added by the caller once it knows the
+/// and quotes/escapes values containing whitespace or shell metacharacters
+/// (see `quote_pagination_value`). Deliberately omits `--limit`/`--offset` —
+/// those are added by the caller once it knows the
 /// next page's offset.
 fn pagination_command_base(
     command_path: &str,
@@ -2676,9 +2677,24 @@ fn pagination_arg_display(value: &serde_json::Value) -> String {
     }
 }
 
+/// Quotes a value for the suggested next-page command, if it contains
+/// anything beyond a small safe-unquoted allowlist. Whitespace and shell
+/// metacharacters (`|`, `&`, `;`, `<`, `>`, ...) all fall outside that
+/// allowlist and so trigger quoting; once quoted, `\`, `"`, `$`, and `` ` ``
+/// are backslash-escaped (backslash first, so escaping the others doesn't
+/// re-escape the backslashes it just inserted) so the value can't break out
+/// of the double quotes or trigger POSIX-shell expansion (`$VAR`, `$(...)`,
+/// backticks) if the suggestion is copy-pasted into a shell.
 fn quote_pagination_value(value: &str) -> String {
-    if value.is_empty() || value.chars().any(char::is_whitespace) {
-        format!("\"{}\"", value.replace('"', "\\\""))
+    let safe_unquoted =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
+    if value.is_empty() || !value.chars().all(safe_unquoted) {
+        let escaped = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`");
+        format!("\"{escaped}\"")
     } else {
         value.to_owned()
     }

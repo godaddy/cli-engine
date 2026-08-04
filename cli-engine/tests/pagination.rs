@@ -576,3 +576,37 @@ async fn human_standalone_summary_shows_rows_actually_rendered_after_expr_reshap
         output.rendered
     );
 }
+
+#[tokio::test]
+async fn next_page_action_escapes_shell_metacharacters_and_expansions() {
+    // A value with a shell metacharacter (here `;`) must be quoted even
+    // though it has no whitespace, and `$`/backtick/backslash/`"` inside the
+    // quotes must be escaped so the suggestion can't trigger command
+    // substitution or break out of the quotes if copy-pasted into a shell.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("status").long("status"))
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--status",
+            "a;$(whoami)`x`\"y\"\\z",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        r#"list --status "a;\$(whoami)\`x\`\"y\"\\z" --limit 2 --offset 2"#
+    );
+}
