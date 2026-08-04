@@ -132,12 +132,10 @@ fn output_format_selectors_are_mutually_exclusive() {
 }
 
 #[test]
-fn global_flags_reject_invalid_bool_and_numeric_inputs() {
+fn global_flags_reject_invalid_bool_inputs() {
     for args in [
         ["my-cli", "--schema=maybe"].as_slice(),
         ["my-cli", "--dry-run=maybe"].as_slice(),
-        ["my-cli", "--limit", "abc"].as_slice(),
-        ["my-cli", "--offset", "abc"].as_slice(),
     ] {
         assert!(
             parser().try_get_matches_from(args).is_err(),

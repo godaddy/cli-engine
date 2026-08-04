@@ -130,7 +130,7 @@ pub use cli::{
 };
 pub use command::{
     CommandContext, CommandFuture, CommandHandler, CommandResult, CommandResultMetadata,
-    CommandSpec, GroupSpec, RuntimeCommandSpec, RuntimeGroupSpec, StreamSender,
+    CommandSpec, GroupSpec, PaginationConfig, RuntimeCommandSpec, RuntimeGroupSpec, StreamSender,
     StreamingCommandFuture, StreamingCommandHandler, command_args_from_matches,
     command_path_from_matches, command_path_from_parts, leaf_matches,
 };

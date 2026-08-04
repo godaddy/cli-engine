@@ -266,8 +266,6 @@ populate middleware:
 | `--fields` | `fields` | empty | Selects comma-separated output fields. |
 | `--filter` | `filter` | empty | JMESPath predicate evaluated against each list item. |
 | `--expr` | `expr` | empty | JMESPath query evaluated against the whole result. |
-| `--limit` | `limit` | `0` | Client-side page size for list output. |
-| `--offset` | `offset` | `0` | Client-side starting offset for list output. |
 | `--schema` | `schema` | `false` | Renders command schema instead of running business logic. |
 | `--reason` | `reason` | empty | Reason passed to authorization, audit, and activity. Only registered when `CliConfig` has an `authz`, `auditor`, or `activity` hook configured directly (not via `init_deps`, which runs after flag registration) — apps with none of those simply don't have the flag. |
 | `--timeout` | `timeout` | `0s` | Command deadline (e.g. `60s`, `5m`); default `0s` = no timeout. |
@@ -275,6 +273,16 @@ populate middleware:
 
 Applications can add additional global flags through `CliConfig::register_flags` and copy parsed
 values into middleware through `CliConfig::apply_flags`.
+
+`--limit`/`--offset` are not framework-global; a command only gets them by opting in:
+
+```rust
+CommandSpec::new("list", "List projects").with_pagination(PaginationConfig {
+    default_limit: 20,
+    max_limit: 100,
+    ..Default::default()
+})
+```
 
 ## Middleware
 
