@@ -9,7 +9,14 @@ use crate::{
 };
 
 /// Data rendered after a successful `auth login`.
+///
+/// Built by [`login_and_build`]/[`login_and_build_with_scopes`] from the
+/// dispatcher's [`Credential`]. Consumer code receives it as a command
+/// result and should not construct it directly — `#[non_exhaustive]` lets
+/// this framework add fields (as it did for [`refreshable`](Self::refreshable))
+/// without another breaking release.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthLoginResult {
     /// Provider used for login.
     pub provider: String,
@@ -25,10 +32,22 @@ pub struct AuthLoginResult {
     /// with a subsequent `auth status`.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Whether a renewal mechanism was issued for the new credential (e.g.
+    /// an OAuth refresh token) — reflects presence, not verified validity.
+    /// Mirrors [`AuthStatusEntry::refreshable`].
+    #[serde(default)]
+    pub refreshable: bool,
 }
 
 /// Data rendered by `auth status`.
+///
+/// Built by [`status_result`]/[`to_status_entry`] from the dispatcher's
+/// [`Credential`] (or its absence). Consumer code receives it as a command
+/// result and should not construct it directly — `#[non_exhaustive]` lets
+/// this framework add fields (as it did for [`refreshable`](Self::refreshable))
+/// without another breaking release.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthStatusEntry {
     /// Provider name.
     pub provider: String,
@@ -44,6 +63,16 @@ pub struct AuthStatusEntry {
     pub scopes: Vec<String>,
     /// Whether the cached credential is expired or unavailable.
     pub expired: bool,
+    /// Whether a renewal mechanism (e.g. an OAuth refresh token) is on file
+    /// for this credential — reflects presence, not verified validity, since
+    /// that's only discoverable by attempting a renewal. Always `false` when
+    /// there is no cached credential, or the provider has no such mechanism
+    /// (e.g. PATs) — `expired && !refreshable` means the next command
+    /// definitely needs `auth login`, while `expired && refreshable` means it
+    /// will attempt a silent renewal first and only fall back to an
+    /// interactive login if that fails.
+    #[serde(default)]
+    pub refreshable: bool,
 }
 
 /// Builds the built-in runtime `auth` command group.
@@ -206,6 +235,7 @@ pub async fn login_and_build_with_scopes(
         identity: credential.identity,
         expires_at: credential.expires_at,
         scopes: credential.scopes,
+        refreshable: credential.refreshable,
     })
 }
 
@@ -230,6 +260,7 @@ pub async fn status_result(dispatcher: &Dispatcher, provider: &str, env: &str) -
                     expires_at: String::new(),
                     scopes: Vec::new(),
                     expired: true,
+                    refreshable: false,
                 }
             } else {
                 to_status_entry(&entry.provider, &entry.env, entry.credential.as_ref())
@@ -264,6 +295,7 @@ pub fn to_status_entry(
             expires_at: String::new(),
             scopes: Vec::new(),
             expired: true,
+            refreshable: false,
         },
         |credential| AuthStatusEntry {
             provider: provider.to_owned(),
@@ -272,6 +304,7 @@ pub fn to_status_entry(
             expires_at: credential.expires_at.clone(),
             scopes: credential.scopes.clone(),
             expired: credential.is_expired(),
+            refreshable: credential.refreshable,
         },
     )
 }

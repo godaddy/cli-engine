@@ -416,6 +416,7 @@ impl PkceAuthProvider {
             identity,
             sub,
             scopes: granted_scopes(token),
+            refreshable: token.refresh_token.is_some(),
             ..Credential::default()
         }
     }
@@ -1689,6 +1690,23 @@ mod tests {
         token.scopes = vec!["a".to_owned(), "b".to_owned()];
         let credential = provider.build_credential("prod", &token);
         assert_eq!(credential.scopes, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn build_credential_sets_refreshable_when_refresh_token_present() {
+        let provider = test_provider();
+        let mut token = valid_token(&make_jwt(&json!({"sub": "subject-1"})));
+        token.refresh_token = Some("a-refresh-token".to_owned());
+        let credential = provider.build_credential("prod", &token);
+        assert!(credential.refreshable);
+    }
+
+    #[test]
+    fn build_credential_leaves_refreshable_false_without_refresh_token() {
+        let provider = test_provider();
+        let token = valid_token(&make_jwt(&json!({"sub": "subject-1"})));
+        let credential = provider.build_credential("prod", &token);
+        assert!(!credential.refreshable);
     }
 
     #[test]
