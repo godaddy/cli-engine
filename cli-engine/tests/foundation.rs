@@ -2809,7 +2809,8 @@ async fn cli_runtime_auth_login_uses_registered_provider_default() {
             "env": "prod",
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
-            "scopes": []
+            "scopes": [],
+            "refreshable": false
         })
     );
 
@@ -2852,7 +2853,8 @@ async fn cli_runtime_auth_login_uses_middleware_env_when_env_flag_omitted() {
             "env": "dev",
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
-            "scopes": []
+            "scopes": [],
+            "refreshable": false
         })
     );
 }
@@ -3014,7 +3016,8 @@ async fn cli_runtime_auth_status_and_logout_render_legacy_shapes() {
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
             "scopes": [],
-            "expired": false
+            "expired": false,
+            "refreshable": false
         })
     );
 
@@ -4701,7 +4704,8 @@ async fn auth_command_helpers_match_login_status_and_logout_shapes() {
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
             "scopes": [],
-            "expired": false
+            "expired": false,
+            "refreshable": false
         })
     );
 
@@ -4716,7 +4720,8 @@ async fn auth_command_helpers_match_login_status_and_logout_shapes() {
             "identity": "tester",
             "expires_at": "2099-01-01T00:00:00Z",
             "scopes": [],
-            "expired": false
+            "expired": false,
+            "refreshable": false
         }])
     );
 
@@ -5112,6 +5117,7 @@ fn auth_module_reexports_primary_auth_port_surfaces() {
         identity: "tester".to_owned(),
         expires_at: "2030-01-01T00:00:00Z".to_owned(),
         scopes: Vec::new(),
+        refreshable: false,
     };
     assert_eq!(login.identity, "tester");
 }
@@ -5124,6 +5130,7 @@ fn crate_root_reexports_auth_command_result_surfaces() {
         identity: "tester".to_owned(),
         expires_at: "2030-01-01T00:00:00Z".to_owned(),
         scopes: Vec::new(),
+        refreshable: false,
     };
     assert_eq!(login.provider, "primary");
 
@@ -5134,6 +5141,7 @@ fn crate_root_reexports_auth_command_result_surfaces() {
         expires_at: "2030-01-01T00:00:00Z".to_owned(),
         scopes: vec!["domains.domain:read".to_owned()],
         expired: false,
+        refreshable: true,
     };
     assert!(!status.expired);
 

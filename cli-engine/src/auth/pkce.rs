@@ -416,6 +416,7 @@ impl PkceAuthProvider {
             identity,
             sub,
             scopes: granted_scopes(token),
+            refreshable: token.refresh_token.is_some(),
             ..Credential::default()
         }
     }

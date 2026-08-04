@@ -42,6 +42,12 @@ pub struct Credential {
     /// enforced server-side).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
+    /// Whether an expired access token can be silently renewed (e.g. via an
+    /// OAuth refresh token) without an interactive re-login. `false` for
+    /// providers with no such mechanism (e.g. PATs) or when the credential
+    /// has none, even if the access token itself is still valid.
+    #[serde(default)]
+    pub refreshable: bool,
 }
 
 impl Credential {

@@ -25,6 +25,11 @@ pub struct AuthLoginResult {
     /// with a subsequent `auth status`.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Whether the new credential can be silently renewed without an
+    /// interactive re-login (e.g. an OAuth refresh token was issued).
+    /// Mirrors [`AuthStatusEntry::refreshable`].
+    #[serde(default)]
+    pub refreshable: bool,
 }
 
 /// Data rendered by `auth status`.
@@ -44,6 +49,14 @@ pub struct AuthStatusEntry {
     pub scopes: Vec<String>,
     /// Whether the cached credential is expired or unavailable.
     pub expired: bool,
+    /// Whether an expired credential can be silently renewed without an
+    /// interactive re-login (e.g. an OAuth refresh token is on file). Always
+    /// `false` when there is no cached credential, or the provider has no
+    /// such mechanism (e.g. PATs) — `expired && !refreshable` means the next
+    /// command needs `auth login`, while `expired && refreshable` means it
+    /// will renew itself transparently.
+    #[serde(default)]
+    pub refreshable: bool,
 }
 
 /// Builds the built-in runtime `auth` command group.
@@ -206,6 +219,7 @@ pub async fn login_and_build_with_scopes(
         identity: credential.identity,
         expires_at: credential.expires_at,
         scopes: credential.scopes,
+        refreshable: credential.refreshable,
     })
 }
 
@@ -230,6 +244,7 @@ pub async fn status_result(dispatcher: &Dispatcher, provider: &str, env: &str) -
                     expires_at: String::new(),
                     scopes: Vec::new(),
                     expired: true,
+                    refreshable: false,
                 }
             } else {
                 to_status_entry(&entry.provider, &entry.env, entry.credential.as_ref())
@@ -264,6 +279,7 @@ pub fn to_status_entry(
             expires_at: String::new(),
             scopes: Vec::new(),
             expired: true,
+            refreshable: false,
         },
         |credential| AuthStatusEntry {
             provider: provider.to_owned(),
@@ -272,6 +288,7 @@ pub fn to_status_entry(
             expires_at: credential.expires_at.clone(),
             scopes: credential.scopes.clone(),
             expired: credential.is_expired(),
+            refreshable: credential.refreshable,
         },
     )
 }
