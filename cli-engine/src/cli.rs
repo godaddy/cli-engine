@@ -1861,6 +1861,7 @@ impl Cli {
         }
 
         let leaf = leaf_matches(&matches);
+        apply_pagination_flags(&mut middleware, &command.spec, leaf);
         let args = command_args_from_matches(leaf, &command.spec, false);
         let user_args = command_args_from_matches(leaf, &command.spec, true);
         if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
@@ -2543,12 +2544,23 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
     middleware.fields = flags.fields.clone();
     middleware.filter = flags.filter.clone();
     middleware.expr = flags.expr.clone();
-    middleware.limit = flags.limit;
-    middleware.offset = flags.offset;
     middleware.reason = flags.reason.clone();
     middleware.schema = flags.schema;
     middleware.timeout = timeout;
     middleware.debug = flags.debug.clone();
+}
+
+/// Sets `middleware.limit`/`middleware.offset` from a paginating command's own
+/// `--limit`/`--offset`
+fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf: &ArgMatches) {
+    let Some(pagination) = spec.pagination else {
+        return;
+    };
+    middleware.limit = leaf
+        .get_one::<i64>("limit")
+        .copied()
+        .unwrap_or(pagination.default_limit);
+    middleware.offset = leaf.get_one::<i64>("offset").copied().unwrap_or(0);
 }
 
 /// Builds the transport debug logger implied by a parsed `--debug` pattern,
@@ -3536,6 +3548,7 @@ fn command_clap_command_with_schema_help(
 ) -> Command {
     let mut command = spec.clap_command();
     command = apply_dry_run_visibility(command, spec);
+    command = apply_pagination_args(command, spec);
     let schema = schemas.get_by_path(command_path);
     let default_fields = default_field_names(spec);
     command = apply_fields_arg(
@@ -3576,6 +3589,17 @@ fn apply_dry_run_visibility(command: Command, spec: &CommandSpec) -> Command {
             .hide(true)
             .help("Preview mutations without executing"),
     )
+}
+
+/// Registers `--limit`/`--offset` on this command's own `Command` when its
+/// spec opted in via [`CommandSpec::with_pagination`], and leaves the command
+/// untouched otherwise so a non-paginating command never sees those flags —
+/// in `--help` or on its command line. See [`flags::apply_pagination_args`].
+fn apply_pagination_args(command: Command, spec: &CommandSpec) -> Command {
+    let Some(pagination) = spec.pagination else {
+        return command;
+    };
+    crate::flags::apply_pagination_args(command, pagination.default_limit, pagination.max_limit)
 }
 
 /// Splits a command's raw `default_fields` string into individual field

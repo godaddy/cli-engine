@@ -386,6 +386,43 @@ pub struct CommandSpec {
     /// ancestor chain happens when a [`Cli`](crate::Cli) mounts the enclosing
     /// module or group.
     pub feature_flag: Option<FeatureFlag>,
+    /// This command's opt-in pagination policy, if any.
+    ///
+    /// `None` (the default) means the command does not paginate: `--limit`/
+    /// `--offset` are not registered for it, so they neither show up in its
+    /// `--help` nor parse on its command line. Set with
+    /// [`with_pagination`](CommandSpec::with_pagination).
+    pub pagination: Option<PaginationConfig>,
+}
+
+/// Opt-in pagination policy for a single command, set with
+/// [`CommandSpec::with_pagination`].
+///
+/// Registering this is what makes `--limit`/`--offset` exist for a command at
+/// all — without it, the engine does not register those flags, so they are
+/// absent from `--help` and rejected as unknown arguments if passed. Construct
+/// it with `..Default::default()`, as in the example below, so a future
+/// engine release can add fields without breaking existing callers.
+///
+/// ```
+/// use cli_engine::PaginationConfig;
+///
+/// let pagination = PaginationConfig {
+///     default_limit: 20,
+///     max_limit: 100,
+///     ..Default::default()
+/// };
+/// assert_eq!(pagination.default_limit, 20);
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaginationConfig {
+    /// Page size applied when the user passes neither `--limit` nor
+    /// `--offset`. `0` (the default) means unlimited — the same "no
+    /// pagination" sentinel used everywhere else in the output pipeline.
+    pub default_limit: i64,
+    /// Upper bound a user can request with an explicit `--limit`. `0` (the
+    /// default) means uncapped. Does not affect `default_limit` itself.
+    pub max_limit: i64,
 }
 
 impl CommandSpec {
@@ -554,6 +591,27 @@ impl CommandSpec {
     #[must_use]
     pub fn with_feature_flag(mut self, key: impl Into<String>, stage: Stage) -> Self {
         self.feature_flag = Some(FeatureFlag::new(key, stage));
+        self
+    }
+
+    /// Opts this command into paginated list output.
+    ///
+    /// Registers `--limit`/`--offset` for this command only — a command that
+    /// never calls this does not get those flags at all, in `--help` or on
+    /// the command line. When the user passes neither flag, `config.default_limit`
+    /// applies instead of the framework's "pagination disabled" default of
+    /// unlimited; an explicit `--limit` above `config.max_limit` (when set) is
+    /// rejected before the command runs. See [`PaginationConfig`].
+    #[must_use]
+    pub fn with_pagination(mut self, config: PaginationConfig) -> Self {
+        debug_assert!(
+            config.max_limit == 0 || config.default_limit <= config.max_limit,
+            "command {:?} has a default_limit ({}) greater than its max_limit ({})",
+            self.name,
+            config.default_limit,
+            config.max_limit
+        );
+        self.pagination = Some(config);
         self
     }
 

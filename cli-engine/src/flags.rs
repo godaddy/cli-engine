@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
 
-use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
 /// Parsed framework-global flags.
 ///
@@ -21,10 +21,6 @@ pub struct GlobalFlags {
     pub filter: String,
     /// JMESPath whole-result expression.
     pub expr: String,
-    /// Client-side page size.
-    pub limit: i64,
-    /// Client-side page offset.
-    pub offset: i64,
     /// Whether schema rendering was requested.
     pub schema: bool,
     /// User-provided command reason.
@@ -46,8 +42,6 @@ impl Default for GlobalFlags {
             fields: String::new(),
             filter: String::new(),
             expr: String::new(),
-            limit: 0,
-            offset: 0,
             schema: false,
             reason: String::new(),
             timeout: "0s".to_owned(),
@@ -77,6 +71,14 @@ impl Default for GlobalFlags {
 /// re-registers those three per-command (see `apply_fields_arg` and
 /// `apply_filter_and_expr_examples`) with contextual help text; they must
 /// reuse these same values or the override would drift out of position.
+///
+/// `LIMIT` and `OFFSET` are never registered by [`register_global_flags`]
+/// itself — unlike every other value here, `--limit`/`--offset` are not
+/// framework-global at all; `cli.rs` registers them directly on a single
+/// command's own `Command` (see `apply_pagination_args`), and only for a
+/// command that opted in via `CommandSpec::with_pagination`. These two
+/// constants exist purely so that per-command registration still parks the
+/// flags in the same relative `--help` position other engine flags occupy.
 ///
 /// `REASON` and `ENV` cover the two global flags `Cli::new` registers
 /// directly (conditionally, outside `register_global_flags`) rather than
@@ -202,26 +204,6 @@ pub fn register_global_flags(command: Command) -> Command {
                 .help("JMESPath query applied to the whole result"),
         )
         .arg(
-            Arg::new("limit")
-                .long("limit")
-                .global(true)
-                .value_parser(value_parser!(i64))
-                .allow_hyphen_values(true)
-                .default_value("0")
-                .display_order(global_flag_order::LIMIT)
-                .help("Max items to return (client-side, 0=all)"),
-        )
-        .arg(
-            Arg::new("offset")
-                .long("offset")
-                .global(true)
-                .value_parser(value_parser!(i64))
-                .allow_hyphen_values(true)
-                .default_value("0")
-                .display_order(global_flag_order::OFFSET)
-                .help("Skip N items before applying limit"),
-        )
-        .arg(
             Arg::new("schema")
                 .long("schema")
                 .global(true)
@@ -320,6 +302,71 @@ pub fn register_reason_flag(command: Command) -> Command {
             .display_order(global_flag_order::REASON)
             .help("Short explanation of why this command is being run (forwarded to your authorizer, auditor, or activity emitter)"),
     )
+}
+
+/// Registers `--limit`/`--offset` directly on one command's own `clap`
+/// `Command`, for a command whose [`CommandSpec`](crate::CommandSpec) opted
+/// into pagination via `with_pagination`.
+pub(crate) fn apply_pagination_args(
+    command: Command,
+    default_limit: i64,
+    max_limit: i64,
+) -> Command {
+    command
+        .arg(
+            Arg::new("limit")
+                .long("limit")
+                .value_parser(pagination_limit_value_parser(max_limit))
+                .allow_hyphen_values(true)
+                .default_value(default_limit.to_string())
+                .display_order(global_flag_order::LIMIT)
+                .help(pagination_limit_help(default_limit, max_limit)),
+        )
+        .arg(
+            Arg::new("offset")
+                .long("offset")
+                .value_parser(pagination_offset_value_parser())
+                .allow_hyphen_values(true)
+                .default_value("0")
+                .display_order(global_flag_order::OFFSET)
+                .help("Skip N items before applying limit"),
+        )
+}
+
+fn pagination_limit_help(default_limit: i64, max_limit: i64) -> String {
+    let mut help = format!("Max items to return (client-side, 0=all, default {default_limit}");
+    if max_limit > 0 {
+        help.push_str(&format!(", max {max_limit}"));
+    }
+    help.push(')');
+    help
+}
+
+fn pagination_limit_value_parser(max_limit: i64) -> ValueParser {
+    ValueParser::new(move |raw: &str| -> Result<i64, String> {
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("invalid limit value {raw:?}"))?;
+        if max_limit > 0 && value > max_limit {
+            return Err(format!("limit {value} exceeds the maximum of {max_limit}"));
+        }
+        Ok(value)
+    })
+}
+
+/// Rejects a negative `--offset` at parse time — a `clap` usage error — rather
+/// than letting it reach `apply_pagination` in `output/pipeline.rs`, which
+/// already rejects one, but only once the command has otherwise fully run.
+fn pagination_offset_value_parser() -> ValueParser {
+    ValueParser::new(|raw: &str| -> Result<i64, String> {
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("invalid offset value {raw:?}"))?;
+        if value < 0 {
+            return Err(format!("offset {value} must be non-negative"));
+        }
+        Ok(value)
+    })
 }
 
 /// Resolves the default output format when the user gave no explicit format.
@@ -444,8 +491,6 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
             .get_one::<String>("expr")
             .cloned()
             .unwrap_or_default(),
-        limit: matches.get_one::<i64>("limit").copied().unwrap_or(0),
-        offset: matches.get_one::<i64>("offset").copied().unwrap_or(0),
         schema: matches.get_one::<bool>("schema").copied().unwrap_or(false),
         // `--reason` is only registered when an authorizer/auditor/activity
         // emitter is configured.

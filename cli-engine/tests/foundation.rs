@@ -18,8 +18,8 @@ use cli_engine::{
     CommandContext, CommandMeta, CommandModule, CommandResult, CommandSpec, Credential,
     CredentialResolver, Dispatcher, FieldInfo, GroupSpec, GuideEntry, HumanViewDef,
     HumanViewRegistry, Middleware, MiddlewareRequest, Module, ModuleContext, ModuleHelpEntry,
-    OutputField, OutputSchema, Result, RuntimeCommandSpec, RuntimeGroupSpec, SchemaRegistry,
-    TableColumn, Tier, TreeNode,
+    OutputField, OutputSchema, PaginationConfig, Result, RuntimeCommandSpec, RuntimeGroupSpec,
+    SchemaRegistry, TableColumn, Tier, TreeNode,
     auth::commands::{
         auth_command_group, login_and_build, logout_result, status_result, to_status_entry,
     },
@@ -2733,7 +2733,9 @@ async fn cli_runtime_accepts_negative_limit_preserves_legacy_int_flag() {
         ..CliConfig::default()
     });
     cli.add_command(RuntimeCommandSpec::new(
-        CommandSpec::new("list", "List things").no_auth(true),
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig::default()),
         async |_credential, _args| {
             Ok(CommandResult::new(json!([
                     {"name": "alpha"},
@@ -3426,7 +3428,7 @@ async fn cli_runtime_schema_bypass_resolves_group_and_command_aliases() {
 }
 
 #[tokio::test]
-async fn cli_runtime_applies_global_output_pipeline_flags() {
+async fn cli_runtime_applies_output_pipeline_flags_including_opt_in_pagination() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
         short: "Developer tooling".to_owned(),
@@ -3437,7 +3439,9 @@ async fn cli_runtime_applies_global_output_pipeline_flags() {
         "Platform Systems",
         RuntimeGroupSpec::new(GroupSpec::new("things", "Manage things")).with_command(
             RuntimeCommandSpec::new(
-                CommandSpec::new("list", "List things").no_auth(true),
+                CommandSpec::new("list", "List things")
+                    .no_auth(true)
+                    .with_pagination(PaginationConfig::default()),
                 async |_credential, _args| {
                     Ok(CommandResult::new(json!([
                             {"name": "alpha", "status": "inactive", "enabled": false, "extra": "drop"},
@@ -4395,8 +4399,6 @@ fn global_flag_defaults_and_derived_flag_classes_cover_common_clap_actions() {
             fields: String::new(),
             filter: String::new(),
             expr: String::new(),
-            limit: 0,
-            offset: 0,
             schema: false,
             reason: String::new(),
             timeout: "0s".to_owned(),

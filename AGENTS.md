@@ -234,6 +234,11 @@ Command checklist:
 - Prefer `CommandSpec::from_args::<T>()` + `RuntimeCommandSpec::new_typed` when the command has many flags, needs clap validation attributes, or when porting existing derive-based commands. Use the builder path for simple commands with one or two flags.
 - Most commands need more than `new_typed`'s `(CredentialResolver, T)` shape — if the handler needs the command path, middleware, or `--dry-run` via `CommandContext`, use `RuntimeCommandSpec::new_typed_with_context` (handler: `Fn(CommandContext, T) -> Fut`) instead of `new_with_context` + `context.typed_args::<T>()`; for streaming commands, use `RuntimeCommandSpec::new_typed_streaming` (handler: `Fn(CommandContext, T, StreamSender) -> Fut`). Both eagerly parse `T` before the handler runs, same guarantee `new_typed` gives the credential-only case.
 - Use `CommandSpec::with_arg_group(ArgGroup::new(...).args([...]).required(true))` for "at least one of" or mutually-exclusive relationships between args, instead of a `required_unless_present_any`/`conflicts_with` chain. With `from_args::<T>()`, express the same thing declaratively via a struct-level `#[group(required = true, multiple = true)]` (or `multiple = false` for mutually exclusive) on the derive struct — but not on a struct that also has a `#[command(flatten)]` field; `clap_derive` empties that struct's implicit group's members in that case, so the constraint silently does nothing.
+- `--limit`/`--offset` are not framework-global: a command only gets them by calling
+  `.with_pagination(PaginationConfig { default_limit, max_limit, ..Default::default() })`. A
+  command with no `.with_pagination(...)` call never registers those flags — absent from its
+  `--help`, rejected as unknown arguments if passed. `default_limit` applies when the user passes
+  neither flag; `max_limit` (`0` = uncapped) rejects an explicit `--limit` above the cap.
 
 ## Output And Schemas
 
