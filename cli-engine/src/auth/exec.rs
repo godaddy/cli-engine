@@ -107,7 +107,7 @@ impl ExecProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = command.spawn().map_err(|err| self.exec_error(err, ""))?;
+        let mut child = self.spawn_retrying_text_busy(&mut command).await?;
         let Some(mut stdin) = child.stdin.take() else {
             return Err(CliCoreError::message("auth: provider stdin unavailable"));
         };
@@ -143,6 +143,33 @@ impl ExecProvider {
             self.command.display(),
             compat_exit_status(&output.status)
         )))
+    }
+
+    /// Spawns `command`, retrying on `ETXTBSY`.
+    ///
+    /// Linux can transiently report `ETXTBSY` for a just-written, freshly
+    /// chmod'd script when another thread in this process forks at the same
+    /// moment, even though nothing holds the file open for writing. The
+    /// retry with backoff clears once the kernel releases the transient
+    /// hold; a real "busy" (e.g. another process genuinely writing the
+    /// file) will still exhaust the attempts and surface as an error.
+    async fn spawn_retrying_text_busy(
+        &self,
+        command: &mut Command,
+    ) -> Result<tokio::process::Child> {
+        const MAX_RETRIES: u32 = 5;
+        let mut delay = Duration::from_millis(1);
+        for retry in 0..=MAX_RETRIES {
+            match command.spawn() {
+                Ok(child) => return Ok(child),
+                Err(err) if err.kind() == ErrorKind::ExecutableFileBusy && retry < MAX_RETRIES => {
+                    time::sleep(delay).await;
+                    delay *= 2;
+                }
+                Err(err) => return Err(self.exec_error(err, "")),
+            }
+        }
+        unreachable!("the loop above always returns before its range is exhausted")
     }
 
     fn request(&self, action: &str, env: &str, command: &str, tier: &str) -> AuthnRequest {
