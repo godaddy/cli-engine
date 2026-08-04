@@ -157,19 +157,19 @@ impl ExecProvider {
         &self,
         command: &mut Command,
     ) -> Result<tokio::process::Child> {
-        const MAX_ATTEMPTS: u32 = 5;
+        const MAX_RETRIES: u32 = 5;
         let mut delay = Duration::from_millis(1);
-        for _ in 1..MAX_ATTEMPTS {
+        for retry in 0..=MAX_RETRIES {
             match command.spawn() {
                 Ok(child) => return Ok(child),
-                Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => {
+                Err(err) if err.kind() == ErrorKind::ExecutableFileBusy && retry < MAX_RETRIES => {
                     time::sleep(delay).await;
                     delay *= 2;
                 }
                 Err(err) => return Err(self.exec_error(err, "")),
             }
         }
-        command.spawn().map_err(|err| self.exec_error(err, ""))
+        unreachable!("the loop above always returns before its range is exhausted")
     }
 
     fn request(&self, action: &str, env: &str, command: &str, tier: &str) -> AuthnRequest {
