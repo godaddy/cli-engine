@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.6.1...cli-engine-v0.7.0) (2026-08-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** surface refresh-token availability on Credential/auth status ([#79](https://github.com/godaddy/cli-engine/issues/79))
+
+### Features
+
+* **auth:** surface refresh-token availability on Credential/auth status ([#79](https://github.com/godaddy/cli-engine/issues/79)) ([d88d30c](https://github.com/godaddy/cli-engine/commit/d88d30cad950003af53ab74f09c3c7279db9bea5))
+* **command:** add opt-in pagination via CommandSpec::with_pagination ([#81](https://github.com/godaddy/cli-engine/issues/81)) ([d829f90](https://github.com/godaddy/cli-engine/commit/d829f90d6d4df81b42a9c951237133af99d593b1))
+
 ## [0.6.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.6.0...cli-engine-v0.6.1) (2026-08-03)
 
 
