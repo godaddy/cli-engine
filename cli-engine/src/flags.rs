@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
 
-use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
 /// Parsed framework-global flags.
 ///
@@ -325,7 +325,7 @@ pub(crate) fn apply_pagination_args(
         .arg(
             Arg::new("offset")
                 .long("offset")
-                .value_parser(value_parser!(i64))
+                .value_parser(pagination_offset_value_parser())
                 .allow_hyphen_values(true)
                 .default_value("0")
                 .display_order(global_flag_order::OFFSET)
@@ -349,6 +349,21 @@ fn pagination_limit_value_parser(max_limit: i64) -> ValueParser {
             .map_err(|_| format!("invalid limit value {raw:?}"))?;
         if max_limit > 0 && value > max_limit {
             return Err(format!("limit {value} exceeds the maximum of {max_limit}"));
+        }
+        Ok(value)
+    })
+}
+
+/// Rejects a negative `--offset` at parse time — a `clap` usage error — rather
+/// than letting it reach `apply_pagination` in `output/pipeline.rs`, which
+/// already rejects one, but only once the command has otherwise fully run.
+fn pagination_offset_value_parser() -> ValueParser {
+    ValueParser::new(|raw: &str| -> Result<i64, String> {
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("invalid offset value {raw:?}"))?;
+        if value < 0 {
+            return Err(format!("offset {value} must be non-negative"));
         }
         Ok(value)
     })

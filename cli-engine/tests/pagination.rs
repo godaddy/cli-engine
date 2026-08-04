@@ -173,12 +173,38 @@ async fn max_limit_does_not_constrain_a_negative_limit() {
     assert_eq!(rendered["data"], json!(items()));
 }
 
+#[tokio::test]
+async fn negative_offset_is_rejected_at_parse_time_not_at_runtime() {
+    // Unlike `--limit`, a negative `--offset` has no meaning downstream —
+    // `apply_pagination` in `output/pipeline.rs` rejects it unconditionally.
+    // Reject it as a `clap` usage error (exit code 2) up front instead of
+    // letting the command run and fail partway through.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig::default()),
+    );
+
+    let output = cli.run(["my-cli", "list", "--offset", "-1"]).await;
+    assert_eq!(
+        output.exit_code, 2,
+        "negative --offset should be a usage error: {}",
+        output.rendered
+    );
+}
+
 /// A command author setting `default_limit` above `max_limit` is a
 /// misconfiguration that can never satisfy an unset `--limit`; caught at
 /// registration time as a development-time safety net, same idiom as
-/// `CommandSpec::from_args`'s empty-required-`ArgGroup` debug_assert.
+/// `CommandSpec::from_args`'s empty-required-`ArgGroup` debug_assert. The
+/// check is a `debug_assert!` (compiled out in release builds, same as that
+/// precedent), so this test only holds under `debug_assertions` — skip it
+/// under `cargo test --release` rather than have it fail there.
 #[test]
-#[should_panic(expected = "greater than its max_limit")]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "greater than its max_limit")
+)]
 fn with_pagination_panics_when_default_limit_exceeds_max_limit() {
     let _unused = CommandSpec::new("list", "List things").with_pagination(PaginationConfig {
         default_limit: 10,

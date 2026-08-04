@@ -292,7 +292,11 @@ Framework global flags populate middleware and apply consistently to every comma
 Applications can add their own global flags with `CliConfig::with_register_flags` and copy parsed
 values into middleware with `CliConfig::with_apply_flags`.
 
-`--limit`/`--offset` are enabled when a command opts in with `CommandSpec::with_pagination(PaginationConfig { default_limit, max_limit, .. })`;
+`--limit`/`--offset` are the one exception: they are not global at all. A command registers them
+for itself with `CommandSpec::with_pagination(PaginationConfig { default_limit, max_limit, ..Default::default() })`;
+a command that never calls this has neither flag, in `--help` or on its command line.
+`default_limit` applies when the user passes neither flag; `max_limit` (when non-zero) rejects an
+explicit `--limit` above the cap.
 
 ## Middleware
 
