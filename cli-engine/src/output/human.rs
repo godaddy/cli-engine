@@ -520,9 +520,12 @@ fn append_render_notes(out: &mut String, notes: &RenderNotes) {
 /// `shown` is the caller's actual rendered item count (from `envelope.data`,
 /// post-pipeline), used in place of `pagination.count` — which is only the
 /// pre-`--expr` slice size and can go stale once `--expr` reshapes the array
-/// after pagination ran (mirrors the same fix in `render_table`). Falls back
-/// to `pagination.count` on the `None` it should never actually see in
-/// practice, since pagination only ever applies to array data.
+/// after pagination ran (mirrors the same fix in `render_table`). `None`
+/// means `--expr` reshaped the data into something that's no longer even an
+/// array (e.g. `length(@)` turning it into a number) — pagination still ran,
+/// but there's no rendered row count left to describe, so this falls back to
+/// a more neutral line instead of a "Showing N of M" claim that would no
+/// longer match what's actually displayed above it.
 fn append_pagination_summary(
     out: &mut String,
     pagination: Option<&PaginationMeta>,
@@ -531,11 +534,16 @@ fn append_pagination_summary(
     let Some(pagination) = pagination else {
         return;
     };
-    let count = shown.unwrap_or(pagination.count);
-    out.push_str(&format!(
-        "\nShowing {count} of {} (offset {}, limit {})\n",
-        pagination.total, pagination.offset, pagination.limit
-    ));
+    match shown {
+        Some(count) => out.push_str(&format!(
+            "\nShowing {count} of {} (offset {}, limit {})\n",
+            pagination.total, pagination.offset, pagination.limit
+        )),
+        None => out.push_str(&format!(
+            "\n(pagination: {} total, offset {}, limit {})\n",
+            pagination.total, pagination.offset, pagination.limit
+        )),
+    }
 }
 
 /// Append a "Next steps:" footer listing suggested follow-up commands to `out`

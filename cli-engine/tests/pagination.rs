@@ -610,3 +610,32 @@ async fn next_page_action_escapes_shell_metacharacters_and_expansions() {
         r#"list --status "a;\$(whoami)\`x\`\"y\"\\z" --limit 2 --offset 2"#
     );
 }
+
+#[tokio::test]
+async fn human_output_uses_a_neutral_pagination_line_when_expr_leaves_no_array() {
+    // `--expr` can reshape the paginated array into something that isn't a
+    // list at all (e.g. `length(@)` -> a number). Pagination still ran, but
+    // there's no rendered row count to describe, so the fallback must not
+    // claim "Showing N of M" next to output that no longer looks like a list.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--expr", "length(@)", "--output", "human"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("(pagination: 4 total, offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+    assert!(!output.rendered.contains("Showing"), "{}", output.rendered);
+}
