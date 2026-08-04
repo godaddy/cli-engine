@@ -13,7 +13,7 @@ mod completion;
 mod help;
 mod tree_render;
 
-use clap::{ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command};
 
 use crate::{
     ActivityEmitter, Auditor, AuthProvider, Authorizer, CliCoreError, CommandMeta, CommandSpec,
@@ -948,7 +948,7 @@ impl Cli {
         }
         if config.environments.is_some() {
             root = root.arg(
-                clap::Arg::new("env")
+                Arg::new("env")
                     .long("env")
                     .global(true)
                     .value_name("ENV")
@@ -1864,6 +1864,11 @@ impl Cli {
         apply_pagination_flags(&mut middleware, &command.spec, leaf);
         let args = command_args_from_matches(leaf, &command.spec, false);
         let user_args = command_args_from_matches(leaf, &command.spec, true);
+        let pagination_command = command
+            .spec
+            .pagination
+            .is_some()
+            .then(|| pagination_command_base(&command_path, &command.spec, &user_args));
         if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
@@ -1895,6 +1900,7 @@ impl Cli {
                         default_fields: &default_fields,
                         view_id: view_id.as_deref(),
                         auth: command.spec.auth,
+                        pagination_command,
                     },
                     Arc::new(leaf.clone()),
                     streaming_handler,
@@ -1926,6 +1932,7 @@ impl Cli {
                     default_fields: &default_fields,
                     view_id: view_id.as_deref(),
                     auth: command.spec.auth,
+                    pagination_command,
                 },
                 async move |credential| {
                     handler(CommandContext {
@@ -2561,6 +2568,82 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
         .copied()
         .unwrap_or(pagination.default_limit);
     middleware.offset = leaf.get_one::<i64>("offset").copied().unwrap_or(0);
+}
+
+/// Replays a paginating command's own explicit args as `--flag value` text —
+/// the base a "view the next page" [`crate::NextAction`] is built from once
+/// the response's [`crate::PaginationMeta`] is known.
+///
+/// Best-effort, not a fully general clap-args reconstruction: it uses each
+/// arg's real `get_long()`/`get_short()` name (never the value-map key,
+/// which for derive-based args can differ from the flag — e.g. id
+/// `page_size` vs flag `--page-size`), joins array values into one
+/// comma-separated flag occurrence, and quotes values containing whitespace.
+/// Deliberately omits `--limit`/`--offset` — those are added by the caller
+/// once it knows the next page's offset.
+fn pagination_command_base(
+    command_path: &str,
+    spec: &CommandSpec,
+    user_args: &crate::middleware::ValueMap,
+) -> String {
+    let mut parts = vec![command_path.replace(':', " ")];
+    for arg in &spec.args {
+        let id = arg.get_id().as_str();
+        if let Some(value) = user_args.get(id) {
+            push_pagination_arg(&mut parts, arg, value);
+        }
+    }
+    parts.join(" ")
+}
+
+fn push_pagination_arg(parts: &mut Vec<String>, arg: &Arg, value: &serde_json::Value) {
+    let flag = arg
+        .get_long()
+        .map(|long| format!("--{long}"))
+        .or_else(|| arg.get_short().map(|short| format!("-{short}")));
+    match value {
+        serde_json::Value::Bool(enabled) => {
+            if let Some(flag) = flag {
+                parts.push(if *enabled {
+                    flag
+                } else {
+                    format!("{flag}=false")
+                });
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let joined = items
+                .iter()
+                .map(pagination_arg_display)
+                .collect::<Vec<_>>()
+                .join(",");
+            push_flagged_value(parts, flag, &joined);
+        }
+        serde_json::Value::Null => {}
+        other => push_flagged_value(parts, flag, &pagination_arg_display(other)),
+    }
+}
+
+fn push_flagged_value(parts: &mut Vec<String>, flag: Option<String>, value: &str) {
+    if let Some(flag) = flag {
+        parts.push(flag);
+    }
+    parts.push(quote_pagination_value(value));
+}
+
+fn pagination_arg_display(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn quote_pagination_value(value: &str) -> String {
+    if value.is_empty() || value.chars().any(char::is_whitespace) {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_owned()
+    }
 }
 
 /// Builds the transport debug logger implied by a parsed `--debug` pattern,
@@ -3578,7 +3661,7 @@ fn apply_dry_run_visibility(command: Command, spec: &CommandSpec) -> Command {
         return command;
     }
     command.arg(
-        clap::Arg::new("dry-run")
+        Arg::new("dry-run")
             .long("dry-run")
             .num_args(0..=1)
             .require_equals(true)
@@ -3652,7 +3735,7 @@ fn apply_fields_arg(
         help.push_str(table.trim_end());
     }
 
-    let mut arg = clap::Arg::new("fields")
+    let mut arg = Arg::new("fields")
         .long("fields")
         .value_name("FIELDS")
         // Must match `global_flag_order::FIELDS` — this re-registers the
@@ -3696,7 +3779,7 @@ fn apply_filter_and_expr_examples(mut command: Command, fields: &[FieldInfo]) ->
             help.push_str(&format!("\ne.g. --filter '{name}'"));
         }
         command = command.arg(
-            clap::Arg::new("filter")
+            Arg::new("filter")
                 .long("filter")
                 .value_name("EXPR")
                 .display_order(crate::flags::global_flag_order::FILTER)
@@ -3710,7 +3793,7 @@ fn apply_filter_and_expr_examples(mut command: Command, fields: &[FieldInfo]) ->
         expr_help.push_str(&format!("\ne.g. --expr '[].{name}'"));
     }
     command.arg(
-        clap::Arg::new("expr")
+        Arg::new("expr")
             .long("expr")
             .value_name("EXPR")
             .display_order(crate::flags::global_flag_order::EXPR)

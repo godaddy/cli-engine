@@ -12,6 +12,12 @@ pub struct Envelope {
     /// Successful command data.
     #[serde(skip_serializing_if = "is_absent_or_null")]
     pub data: Option<Value>,
+    /// Client-side pagination facts, present whenever `--limit`/`--offset`
+    /// ran — regardless of `--verbose`. Unlike [`metadata`](Envelope::metadata),
+    /// this is not debugging output; a caller relies on it to know whether
+    /// more data exists at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pagination: Option<PaginationMeta>,
     /// Optional execution metadata, controlled by `--verbose`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Metadata>,
@@ -123,9 +129,6 @@ pub struct Metadata {
     /// Whether the command was a dry-run response.
     #[serde(skip_serializing_if = "is_false")]
     pub dry_run: bool,
-    /// Pagination metadata when client-side pagination ran.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pagination: Option<PaginationMeta>,
     /// Colon-separated command path.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub command: String,
@@ -157,6 +160,8 @@ pub struct PaginationMeta {
     pub limit: i64,
     /// Item count after pagination.
     pub count: i64,
+    /// Whether items beyond this page remain (`offset + count < total`).
+    pub has_more: bool,
 }
 
 /// Structured error payload in an [`Envelope`].
@@ -184,6 +189,7 @@ impl Envelope {
         };
         Self {
             data,
+            pagination: None,
             metadata: Some(Metadata::new(system)),
             error: None,
             warnings: Vec::new(),
@@ -203,6 +209,7 @@ impl Envelope {
         let system = system.into();
         Self {
             data: None,
+            pagination: None,
             metadata: Some(Metadata::new(system.clone())),
             error: Some(ErrorEnvelope {
                 code: code.into(),
@@ -229,6 +236,7 @@ impl Envelope {
         let request_id = request_id.into();
         Self {
             data: None,
+            pagination: None,
             metadata: Some(Metadata {
                 request_id: request_id.clone(),
                 ..Metadata::new(system.clone())
@@ -331,7 +339,6 @@ impl Metadata {
             timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             request_id: String::new(),
             dry_run: false,
-            pagination: None,
             command: String::new(),
             duration: String::new(),
             env: String::new(),
@@ -352,10 +359,6 @@ impl Metadata {
             timestamp: keep_string(&wanted, "timestamp", &self.timestamp),
             request_id: keep_string(&wanted, "request_id", &self.request_id),
             dry_run: wanted.contains(&"dry_run") && self.dry_run,
-            pagination: wanted
-                .contains(&"pagination")
-                .then(|| self.pagination.clone())
-                .flatten(),
             command: keep_string(&wanted, "command", &self.command),
             duration: keep_string(&wanted, "duration", &self.duration),
             env: keep_string(&wanted, "env", &self.env),
@@ -382,6 +385,7 @@ pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &st
         }
         return Envelope {
             data: None,
+            pagination: None,
             metadata: Some(Metadata {
                 request_id: request_id.clone(),
                 ..Metadata::new(sys.clone())
@@ -509,6 +513,7 @@ pub fn build_detailed_error_envelope(err: &dyn DetailedError, system: &str) -> E
         .map_or_else(String::new, std::borrow::Cow::into_owned);
     Envelope {
         data: None,
+        pagination: None,
         metadata: Some(Metadata {
             request_id: request_id.clone(),
             ..Metadata::new(sys.clone())

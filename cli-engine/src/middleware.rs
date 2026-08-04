@@ -15,7 +15,7 @@ use crate::{
     SchemaRegistry, Tier,
     error::{CliCoreError, exit_code_for_error},
     output::{
-        Envelope, HumanViewRegistry, OutputFormat, PipelineOpts, apply_pipeline,
+        Envelope, HumanViewRegistry, NextAction, OutputFormat, PipelineOpts, apply_pipeline,
         build_error_envelope, is_valid_output_format, render_human_with_registry_selected,
     },
 };
@@ -573,6 +573,18 @@ pub struct MiddlewareRequest<'request> {
     pub view_id: Option<&'request str>,
     /// Authentication requirement enforced by the engine for this command.
     pub auth: AuthRequirement,
+    /// The invoked command replayed as `--flag value` text — command path
+    /// plus every flag the user explicitly passed, using clap's own
+    /// long-flag names — with `--limit`/`--offset` deliberately omitted.
+    ///
+    /// `Some` only for a command that opted into
+    /// [`CommandSpec::with_pagination`](crate::CommandSpec::with_pagination);
+    /// the engine appends `--limit`/`--offset` for the next page and surfaces
+    /// it as a `next_actions` entry when the response has more data. `None`
+    /// for every other command, and for any caller driving [`Middleware`]
+    /// directly (e.g. [`Middleware::run_no_auth`]) instead of through
+    /// [`Cli`](crate::Cli), which is what computes this.
+    pub pagination_command: Option<String>,
 }
 
 impl Middleware {
@@ -603,6 +615,7 @@ impl Middleware {
             default_fields,
             view_id,
             auth,
+            pagination_command,
         } = request;
         let no_auth = auth.is_none();
         let command_system = effective_request_system(system, command_path);
@@ -724,6 +737,7 @@ impl Middleware {
                 &user_args,
                 &args,
                 identity,
+                None,
             );
         }
 
@@ -829,6 +843,7 @@ impl Middleware {
             &user_args,
             &args,
             identity,
+            pagination_command.as_deref(),
         )
     }
 
@@ -856,6 +871,7 @@ impl Middleware {
                 default_fields,
                 view_id: None,
                 auth: AuthRequirement::None,
+                pagination_command: None,
             },
             async move |_resolver| command().await,
         )
@@ -952,6 +968,7 @@ impl Middleware {
                     user_args,
                     effective_args,
                     identity,
+                    None,
                 )
                 .map(Some);
         }
@@ -969,6 +986,7 @@ impl Middleware {
         user_args: &ValueMap,
         effective_args: &ValueMap,
         identity: &str,
+        pagination_command: Option<&str>,
     ) -> Result<MiddlewareOutput> {
         if !is_valid_output_format(&self.output_format) {
             let err = CliCoreError::InvalidOutputFormat(self.output_format.clone());
@@ -1007,10 +1025,20 @@ impl Middleware {
                     fields: projection_fields.to_owned(),
                 },
             )?;
-            if let Some(pagination) = pagination
-                && let Some(metadata) = &mut envelope.metadata
-            {
-                metadata.pagination = Some(pagination);
+            if let Some(pagination) = pagination {
+                if pagination.has_more
+                    && let Some(base) = pagination_command
+                {
+                    let next_offset = pagination.offset + pagination.count;
+                    envelope.next_actions.push(NextAction::new(
+                        format!("{base} --limit {} --offset {next_offset}", pagination.limit),
+                        format!(
+                            "View the next page (offset {next_offset} of {} total)",
+                            pagination.total
+                        ),
+                    ));
+                }
+                envelope.pagination = Some(pagination);
             }
         }
         envelope.with_context(

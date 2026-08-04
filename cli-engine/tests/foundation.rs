@@ -63,6 +63,7 @@ fn middleware_request<'request>(
         default_fields,
         view_id: None,
         auth: auth_requirement(no_auth),
+        pagination_command: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn middleware_request_with_view<'request>(
         default_fields,
         view_id: Some(view_id),
         auth: auth_requirement(no_auth),
+        pagination_command: None,
     }
 }
 
@@ -120,6 +122,7 @@ fn middleware_request_with_system<'request>(
         default_fields,
         view_id: None,
         auth: auth_requirement(no_auth),
+        pagination_command: None,
     }
 }
 
@@ -2747,16 +2750,7 @@ async fn cli_runtime_accepts_negative_limit_preserves_legacy_int_flag() {
 
     let output = cli
         .run([
-            "my-cli",
-            "list",
-            "--offset",
-            "1",
-            "--limit",
-            "-1",
-            "--verbose",
-            "pagination",
-            "--output",
-            "json",
+            "my-cli", "list", "--offset", "1", "--limit", "-1", "--output", "json",
         ])
         .await;
 
@@ -2770,8 +2764,8 @@ async fn cli_runtime_accepts_negative_limit_preserves_legacy_int_flag() {
         ])
     );
     assert_eq!(
-        rendered["metadata"]["pagination"],
-        json!({"total": 3, "offset": 1, "limit": -1, "count": 2})
+        rendered["pagination"],
+        json!({"total": 3, "offset": 1, "limit": -1, "count": 2, "has_more": false})
     );
 }
 
@@ -3466,8 +3460,6 @@ async fn cli_runtime_applies_output_pipeline_flags_including_opt_in_pagination()
             "1",
             "--fields",
             "name,enabled",
-            "--verbose",
-            "pagination",
             "--output",
             "json",
         ])
@@ -3480,8 +3472,8 @@ async fn cli_runtime_applies_output_pipeline_flags_including_opt_in_pagination()
         json!([{"name": "gamma", "enabled": true}])
     );
     assert_eq!(
-        rendered["metadata"]["pagination"],
-        json!({"total": 2, "offset": 1, "limit": 1, "count": 1})
+        rendered["pagination"],
+        json!({"total": 2, "offset": 1, "limit": 1, "count": 1, "has_more": false})
     );
 }
 
@@ -7525,16 +7517,12 @@ async fn middleware_success_records_pagination_metadata() {
         .expect("paginated output should render");
 
     assert_eq!(output.envelope.data, Some(json!([{"id": 2}, {"id": 3}])));
-    let pagination = output
-        .envelope
-        .metadata
-        .expect("metadata")
-        .pagination
-        .expect("pagination");
+    let pagination = output.envelope.pagination.expect("pagination");
     assert_eq!(pagination.total, 4);
     assert_eq!(pagination.offset, 1);
     assert_eq!(pagination.limit, 2);
     assert_eq!(pagination.count, 2);
+    assert!(pagination.has_more, "offset 1 + count 2 = 3 < total 4");
 }
 
 #[tokio::test]
@@ -9307,6 +9295,7 @@ fn output_pipeline_applies_filter_pagination_expr_and_fields_in_order() {
             offset: 1,
             limit: 1,
             count: 1,
+            has_more: false,
         })
     );
 }
@@ -9370,6 +9359,7 @@ fn output_pipeline_negative_limit_with_positive_offset_matches_legacy() {
             offset: 1,
             limit: -1,
             count: 2,
+            has_more: false,
         })
     );
 }
@@ -10636,6 +10626,7 @@ async fn optional_skips_auth_when_handler_ignores_credential() {
                 default_fields: "",
                 view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
+                pagination_command: None,
             },
             async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
         )
@@ -10673,6 +10664,7 @@ async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() 
                 default_fields: "",
                 view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
+                pagination_command: None,
             },
             async |resolver: CredentialResolver| {
                 // Best-effort identity; the missing provider makes this fail, and
@@ -10723,6 +10715,7 @@ async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
                 default_fields: "",
                 view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
+                pagination_command: None,
             },
             async |resolver: CredentialResolver| {
                 resolver.resolve().await?;

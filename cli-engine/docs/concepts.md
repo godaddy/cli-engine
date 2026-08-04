@@ -470,8 +470,8 @@ with data, metadata, errors, and warnings.
 
 Command handlers can attach a list of follow-on command suggestions to any result using
 `CommandResult::with_next_actions`. The framework includes these suggestions in the output
-envelope under the `next_actions` key in JSON and TOON output formats. Human output does not
-display `next_actions`.
+envelope under the `next_actions` key in JSON and TOON output formats, and renders them as a
+"Next steps:" footer in human output.
 
 ```rust
 use cli_engine::{CommandResult, NextAction, NextActionParam};
@@ -491,6 +491,21 @@ Ok(CommandResult::new(json!({ "id": "app-1", "name": "my-app" }))
 `NextAction` parameters are optional and carry `value`, `enum`, `required`, `default`, and
 `description` fields. This is the primary mechanism for agent-first CLIs to tell callers what
 command to run next.
+
+### pagination
+
+A command that opted into `--limit`/`--offset` pagination via `CommandSpec::with_pagination` gets
+a top-level `pagination` field on the envelope — `total`, `offset`, `limit`, `count`, and
+`has_more` — always present regardless of `--verbose`. Unlike `metadata`, this isn't debugging
+output; a caller relies on it to know whether more data exists at all. Human output merges it into
+the table's row-count footer — `(N of M rows, offset O, limit L)` — rather than printing it twice;
+a paginated response that doesn't render as a table (e.g. a bare array of scalars) instead gets a
+standalone `Showing N of M (offset O, limit L)` line.
+
+When `has_more` is `true`, the engine also appends a `next_actions` entry that replays the command
+the user ran — including every flag they passed — with `--limit`/`--offset` updated for the next
+page, so both agent callers (`next_actions[]`) and human callers (the "Next steps:" footer) get a
+literal follow-up command instead of having to compute the next offset themselves.
 
 ### fix
 
@@ -513,7 +528,8 @@ it.
 The output pipeline runs in this order:
 
 1. **Filtering**: `--filter` evaluates a JMESPath predicate against each item in list data.
-2. **Pagination**: `--limit` and `--offset` slice list data and attach pagination metadata.
+2. **Pagination**: `--limit` and `--offset` slice list data and attach the envelope's top-level
+   `pagination` field (see [pagination](#pagination) above).
 3. **Expression**: `--expr` evaluates a JMESPath query against the whole current result.
 4. **Field selection**: `--fields` selects comma-separated fields and nested dot paths.
 5. **Formatting**: `--output` renders `json`, `human`, or `toon`.

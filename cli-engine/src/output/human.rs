@@ -8,7 +8,7 @@ use std::{
 
 use serde_json::Value;
 
-use super::{Envelope, NextAction, NextActionParam};
+use super::{Envelope, NextAction, NextActionParam, PaginationMeta};
 
 /// Column definition for registered human table views.
 ///
@@ -377,12 +377,21 @@ pub fn render_human_with_view(
     let available_width = terminal_width();
     let (mut body, notes) = match &envelope.data {
         None => ("(no data)\n".to_owned(), RenderNotes::default()),
-        Some(data) => render_data_body(data, columns, fields, available_width),
+        Some(data) => render_data_body(
+            data,
+            columns,
+            fields,
+            available_width,
+            envelope.pagination.as_ref(),
+        ),
     };
     // Footers are appended in place: the common no-footer path leaves `body`
     // untouched (no realloc/copy), and non-empty content is written directly
     // into it (no per-footer temporaries).
     append_render_notes(&mut body, &notes);
+    if !notes.pagination_shown {
+        append_pagination_summary(&mut body, envelope.pagination.as_ref());
+    }
     append_next_actions(&mut body, &envelope.next_actions);
     body
 }
@@ -393,10 +402,13 @@ fn render_data_body(
     columns: Option<&[TableColumn]>,
     fields: &str,
     available_width: usize,
+    pagination: Option<&PaginationMeta>,
 ) -> (String, RenderNotes) {
     if let Some(columns) = columns {
         return match data {
-            Value::Array(items) => render_array_with_columns(items, columns, available_width),
+            Value::Array(items) => {
+                render_array_with_columns(items, columns, available_width, pagination)
+            }
             Value::Object(map) => render_object_with_columns(map, columns, available_width),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 (format!("{}\n", format_value(data)), RenderNotes::default())
@@ -404,7 +416,7 @@ fn render_data_body(
         };
     }
     match data {
-        Value::Array(items) => render_array(items, fields, available_width),
+        Value::Array(items) => render_array(items, fields, available_width, pagination),
         Value::Object(map) => {
             let columns = dynamic_columns(fields, || map.keys().cloned().collect());
             render_object_with_columns(map, &columns, available_width)
@@ -480,6 +492,28 @@ fn append_render_notes(out: &mut String, notes: &RenderNotes) {
             notes.hidden_columns.join(", "),
         ));
     }
+}
+
+/// Appends a one-line pagination summary to `out` (a no-op when the response
+/// wasn't paginated). Unlike `next_actions`, this always shows the underlying
+/// facts even on the last page, where there's no follow-up command to
+/// suggest.
+///
+/// Only a fallback: when the data rendered as a table, `render_table` already
+/// merged these same facts into its `(N of M rows, ...)` footer
+/// (`RenderNotes::pagination_shown` signals that to
+/// [`render_human_with_view`]), so this only actually prints anything for a
+/// paginated response that *didn't* render as a table (e.g. a bare array of
+/// scalars) — otherwise the two would repeat the same count/offset/limit on
+/// consecutive lines.
+fn append_pagination_summary(out: &mut String, pagination: Option<&PaginationMeta>) {
+    let Some(pagination) = pagination else {
+        return;
+    };
+    out.push_str(&format!(
+        "\nShowing {} of {} (offset {}, limit {})\n",
+        pagination.count, pagination.total, pagination.offset, pagination.limit
+    ));
 }
 
 /// Append a "Next steps:" footer listing suggested follow-up commands to `out`
@@ -584,6 +618,11 @@ struct RenderNotes {
     /// as a fix when this is set, even though `hidden_columns`/`truncated`
     /// are otherwise reported identically either way.
     nested_narrowing: bool,
+    /// Whether the table footer already merged in the pagination summary
+    /// (`render_table`'s `(N of M rows, offset O, limit L)` line) — so
+    /// [`render_human_with_view`] doesn't also append the standalone
+    /// `append_pagination_summary` line and duplicate the same facts.
+    pagination_shown: bool,
 }
 
 /// Chooses how many leading columns (priority order, most important first),
@@ -676,6 +715,7 @@ fn render_array_with_columns(
     items: &[Value],
     columns: &[TableColumn],
     available_width: usize,
+    pagination: Option<&PaginationMeta>,
 ) -> (String, RenderNotes) {
     if items.is_empty() || columns.is_empty() {
         // Empty columns happens when every item is `{}` (the no-view
@@ -765,6 +805,7 @@ fn render_array_with_columns(
             .collect::<Vec<_>>(),
         &fitted,
         &rows,
+        pagination,
     );
     (
         table,
@@ -772,6 +813,7 @@ fn render_array_with_columns(
             truncated,
             hidden_columns,
             nested_narrowing: false,
+            pagination_shown: pagination.is_some(),
         },
     )
 }
@@ -822,7 +864,12 @@ fn render_object_with_columns(
     (out, notes)
 }
 
-fn render_array(items: &[Value], fields: &str, available_width: usize) -> (String, RenderNotes) {
+fn render_array(
+    items: &[Value],
+    fields: &str,
+    available_width: usize,
+    pagination: Option<&PaginationMeta>,
+) -> (String, RenderNotes) {
     if items.is_empty() {
         return ("(no results)\n".to_owned(), RenderNotes::default());
     }
@@ -833,7 +880,7 @@ fn render_array(items: &[Value], fields: &str, available_width: usize) -> (Strin
         return (render_array_lines(items), RenderNotes::default());
     }
     let columns = dynamic_columns(fields, || first_map.keys().cloned().collect());
-    render_array_with_columns(items, &columns, available_width)
+    render_array_with_columns(items, &columns, available_width, pagination)
 }
 
 fn render_array_lines(items: &[Value]) -> String {
@@ -844,7 +891,12 @@ fn render_array_lines(items: &[Value]) -> String {
     out
 }
 
-fn render_table(headers: &[String], widths: &[usize], rows: &[Vec<String>]) -> String {
+fn render_table(
+    headers: &[String],
+    widths: &[usize],
+    rows: &[Vec<String>],
+    pagination: Option<&PaginationMeta>,
+) -> String {
     let mut out = String::new();
     for (index, header) in headers.iter().enumerate() {
         if index > 0 {
@@ -877,7 +929,16 @@ fn render_table(headers: &[String], widths: &[usize], rows: &[Vec<String>]) -> S
         }
         out.push('\n');
     }
-    out.push_str(&format!("\n({} rows)\n", rows.len()));
+    // Merge the pagination facts into this footer rather than letting
+    // `append_pagination_summary` print a second, redundant line right below
+    // it — both would otherwise state the same shown/total count.
+    match pagination {
+        Some(pagination) => out.push_str(&format!(
+            "\n({} of {} rows, offset {}, limit {})\n",
+            pagination.count, pagination.total, pagination.offset, pagination.limit
+        )),
+        None => out.push_str(&format!("\n({} rows)\n", rows.len())),
+    }
     out
 }
 
@@ -952,7 +1013,9 @@ fn render_nested_value(
     available_width: usize,
 ) -> (String, RenderNotes) {
     match value {
-        Value::Array(items) => render_array_with_columns(items, nested_columns, available_width),
+        Value::Array(items) => {
+            render_array_with_columns(items, nested_columns, available_width, None)
+        }
         Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
         other => (format!("{}\n", format_value(other)), RenderNotes::default()),
     }
@@ -1114,7 +1177,7 @@ mod tests {
             TableColumn::new("title", "Title"),
         ];
 
-        let (out, notes) = render_array_with_columns(&items, &columns, 80);
+        let (out, notes) = render_array_with_columns(&items, &columns, 80, None);
 
         assert!(
             out.contains(long_url),
@@ -1137,7 +1200,7 @@ mod tests {
         let items = vec![json!({ "url": huge_value })];
         let columns = vec![TableColumn::new("url", "URL").no_truncate(true)];
 
-        let (out, _notes) = render_array_with_columns(&items, &columns, 80);
+        let (out, _notes) = render_array_with_columns(&items, &columns, 80, None);
 
         assert!(
             out.contains("..."),
@@ -1157,7 +1220,7 @@ mod tests {
 
         // Deliberately far narrower than the header: the header must still
         // render in full even though the row ends up wider than the terminal.
-        let (out, _notes) = render_array_with_columns(&items, &columns, 10);
+        let (out, _notes) = render_array_with_columns(&items, &columns, 10, None);
         let header_line = out.lines().next().expect("header line");
         let separator_line = out.lines().nth(1).expect("separator line");
 
@@ -1182,7 +1245,7 @@ mod tests {
             TableColumn::new("description", "Description"),
         ];
 
-        let (out, notes) = render_array_with_columns(&items, &columns, 200);
+        let (out, notes) = render_array_with_columns(&items, &columns, 200, None);
 
         assert!(
             !notes.truncated,
@@ -1203,7 +1266,7 @@ mod tests {
         let items = vec![json!({ "description": description })];
         let columns = vec![TableColumn::new("description", "Description")];
 
-        let (out, notes) = render_array_with_columns(&items, &columns, 20);
+        let (out, notes) = render_array_with_columns(&items, &columns, 20, None);
 
         assert!(
             notes.truncated,
@@ -1229,7 +1292,7 @@ mod tests {
             TableColumn::new("c", "C"),
         ];
 
-        let (out, notes) = render_array_with_columns(&items, &columns, 10);
+        let (out, notes) = render_array_with_columns(&items, &columns, 10, None);
 
         assert!(
             !notes.truncated,
@@ -1258,7 +1321,7 @@ mod tests {
             TableColumn::new("created_at", "Created At"),
         ];
 
-        let (out, notes) = render_array_with_columns(&items, &columns, 10);
+        let (out, notes) = render_array_with_columns(&items, &columns, 10, None);
 
         assert_eq!(
             notes.hidden_columns,
@@ -1472,7 +1535,7 @@ mod tests {
 
         // Exactly enough room for the URL alone (40 chars), not enough for
         // the URL plus even a 1-char trailing column and its gutter (43).
-        let (out, notes) = render_array_with_columns(&items, &columns, 42);
+        let (out, notes) = render_array_with_columns(&items, &columns, 42, None);
 
         assert_eq!(
             notes.hidden_columns,
@@ -1492,7 +1555,7 @@ mod tests {
         // build a table from, so this must report "no results" rather than
         // a blank header/rows table.
         let items = vec![json!({ "a": "1" })];
-        let (out, notes) = render_array_with_columns(&items, &[], 80);
+        let (out, notes) = render_array_with_columns(&items, &[], 80, None);
 
         assert_eq!(out, "(no results)\n");
         assert!(!notes.truncated, "{out}");
@@ -1520,7 +1583,7 @@ mod tests {
         // keys to derive columns from — same "no columns" case as above,
         // reached through the no-view path instead.
         let items = vec![json!({}), json!({})];
-        let (out, notes) = render_array(&items, "", 80);
+        let (out, notes) = render_array(&items, "", 80, None);
 
         assert_eq!(out, "(no results)\n");
         assert!(notes.hidden_columns.is_empty(), "{out}");

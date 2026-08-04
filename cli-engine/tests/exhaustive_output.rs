@@ -112,6 +112,7 @@ fn pagination_matrix_covers_offsets_limits_and_errors() {
                         offset,
                         limit,
                         count: i64::try_from(end - start).expect("small count"),
+                        has_more: end < len,
                     }
                 );
                 let actual = data

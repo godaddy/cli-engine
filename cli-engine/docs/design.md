@@ -356,6 +356,7 @@ success, auth failures, authorization denials, dry-runs, command errors, and com
 Handlers return JSON-serializable data and a system id. Middleware wraps the result in an envelope:
 
 - `data`
+- `pagination` (present whenever `--limit`/`--offset` ran, regardless of `--verbose`)
 - `metadata`
 - `error`
 - `warnings`
@@ -363,7 +364,8 @@ Handlers return JSON-serializable data and a system id. Middleware wraps the res
 - `fix` (optional recovery guidance on failed commands)
 
 Metadata is omitted unless `--verbose` is requested. Selective metadata is supported with
-comma-separated verbose fields.
+comma-separated verbose fields. `pagination`, unlike `metadata`, is never gated by `--verbose` —
+a caller relies on it to know whether more data exists at all.
 
 The output pipeline runs in this order:
 
