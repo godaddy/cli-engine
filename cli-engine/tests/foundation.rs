@@ -5085,8 +5085,8 @@ fn authn_request_serializes_compat_fields() {
     );
 }
 
-#[test]
-fn auth_module_reexports_primary_auth_port_surfaces() {
+#[tokio::test]
+async fn auth_module_reexports_primary_auth_port_surfaces() {
     use cli_engine::auth::{
         ACTION_AUTHENTICATE as REEXPORTED_AUTHENTICATE, AuthLoginResult,
         AuthnRequest as ReexportedAuthnRequest, ExecProvider as ReexportedExecProvider,
@@ -5111,38 +5111,34 @@ fn auth_module_reexports_primary_auth_port_surfaces() {
     let auth_group = reexported_auth_command_group("primary", &["primary".to_owned()]);
     assert_eq!(auth_group.group.name, "auth");
 
-    let login = AuthLoginResult {
-        provider: "primary".to_owned(),
-        env: "prod".to_owned(),
-        identity: "tester".to_owned(),
-        expires_at: "2030-01-01T00:00:00Z".to_owned(),
-        scopes: Vec::new(),
-        refreshable: false,
-    };
+    // AuthLoginResult is #[non_exhaustive], so it's obtained through the real
+    // login flow (as any consumer must) rather than a struct literal.
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register(Arc::new(FakeProvider::new("primary", "tester")));
+    let login: AuthLoginResult = login_and_build(&dispatcher, "primary", "prod")
+        .await
+        .expect("login result should build");
     assert_eq!(login.identity, "tester");
 }
 
-#[test]
-fn crate_root_reexports_auth_command_result_surfaces() {
-    let login = cli_engine::AuthLoginResult {
-        provider: "primary".to_owned(),
-        env: "prod".to_owned(),
-        identity: "tester".to_owned(),
-        expires_at: "2030-01-01T00:00:00Z".to_owned(),
-        scopes: Vec::new(),
-        refreshable: false,
-    };
+#[tokio::test]
+async fn crate_root_reexports_auth_command_result_surfaces() {
+    // AuthLoginResult/AuthStatusEntry are #[non_exhaustive], so they're
+    // obtained through the real login/status flow (as any consumer must)
+    // rather than a struct literal.
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register(Arc::new(FakeProvider::new("primary", "tester")));
+
+    let login: cli_engine::AuthLoginResult = login_and_build(&dispatcher, "primary", "prod")
+        .await
+        .expect("login result should build");
     assert_eq!(login.provider, "primary");
 
-    let status = cli_engine::AuthStatusEntry {
-        provider: "primary".to_owned(),
-        env: "prod".to_owned(),
-        identity: "tester".to_owned(),
-        expires_at: "2030-01-01T00:00:00Z".to_owned(),
-        scopes: vec!["domains.domain:read".to_owned()],
-        expired: false,
-        refreshable: true,
-    };
+    let credential = dispatcher
+        .status("primary", "prod")
+        .await
+        .expect("status should resolve");
+    let status: cli_engine::AuthStatusEntry = to_status_entry("primary", "prod", Some(&credential));
     assert!(!status.expired);
 
     let group = auth_command_group("primary", &["primary".to_owned()]);

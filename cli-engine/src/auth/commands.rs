@@ -9,7 +9,14 @@ use crate::{
 };
 
 /// Data rendered after a successful `auth login`.
+///
+/// Built by [`login_and_build`]/[`login_and_build_with_scopes`] from the
+/// dispatcher's [`Credential`]. Consumer code receives it as a command
+/// result and should not construct it directly — `#[non_exhaustive]` lets
+/// this framework add fields (as it did for [`refreshable`](Self::refreshable))
+/// without another breaking release.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthLoginResult {
     /// Provider used for login.
     pub provider: String,
@@ -33,7 +40,14 @@ pub struct AuthLoginResult {
 }
 
 /// Data rendered by `auth status`.
+///
+/// Built by [`status_result`]/[`to_status_entry`] from the dispatcher's
+/// [`Credential`] (or its absence). Consumer code receives it as a command
+/// result and should not construct it directly — `#[non_exhaustive]` lets
+/// this framework add fields (as it did for [`refreshable`](Self::refreshable))
+/// without another breaking release.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthStatusEntry {
     /// Provider name.
     pub provider: String,
