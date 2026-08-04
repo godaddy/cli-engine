@@ -25,8 +25,8 @@ pub struct AuthLoginResult {
     /// with a subsequent `auth status`.
     #[serde(default)]
     pub scopes: Vec<String>,
-    /// Whether the new credential can be silently renewed without an
-    /// interactive re-login (e.g. an OAuth refresh token was issued).
+    /// Whether a renewal mechanism was issued for the new credential (e.g.
+    /// an OAuth refresh token) — reflects presence, not verified validity.
     /// Mirrors [`AuthStatusEntry::refreshable`].
     #[serde(default)]
     pub refreshable: bool,
@@ -49,12 +49,14 @@ pub struct AuthStatusEntry {
     pub scopes: Vec<String>,
     /// Whether the cached credential is expired or unavailable.
     pub expired: bool,
-    /// Whether an expired credential can be silently renewed without an
-    /// interactive re-login (e.g. an OAuth refresh token is on file). Always
-    /// `false` when there is no cached credential, or the provider has no
-    /// such mechanism (e.g. PATs) — `expired && !refreshable` means the next
-    /// command needs `auth login`, while `expired && refreshable` means it
-    /// will renew itself transparently.
+    /// Whether a renewal mechanism (e.g. an OAuth refresh token) is on file
+    /// for this credential — reflects presence, not verified validity, since
+    /// that's only discoverable by attempting a renewal. Always `false` when
+    /// there is no cached credential, or the provider has no such mechanism
+    /// (e.g. PATs) — `expired && !refreshable` means the next command
+    /// definitely needs `auth login`, while `expired && refreshable` means it
+    /// will attempt a silent renewal first and only fall back to an
+    /// interactive login if that fails.
     #[serde(default)]
     pub refreshable: bool,
 }

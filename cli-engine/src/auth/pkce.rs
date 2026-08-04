@@ -1693,6 +1693,23 @@ mod tests {
     }
 
     #[test]
+    fn build_credential_sets_refreshable_when_refresh_token_present() {
+        let provider = test_provider();
+        let mut token = valid_token(&make_jwt(&json!({"sub": "subject-1"})));
+        token.refresh_token = Some("a-refresh-token".to_owned());
+        let credential = provider.build_credential("prod", &token);
+        assert!(credential.refreshable);
+    }
+
+    #[test]
+    fn build_credential_leaves_refreshable_false_without_refresh_token() {
+        let provider = test_provider();
+        let token = valid_token(&make_jwt(&json!({"sub": "subject-1"})));
+        let credential = provider.build_credential("prod", &token);
+        assert!(!credential.refreshable);
+    }
+
+    #[test]
     fn build_credential_leaves_identity_blank_for_opaque_token() {
         let provider = test_provider();
         let token = valid_token("opaque-token");
