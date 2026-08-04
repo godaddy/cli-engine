@@ -931,11 +931,18 @@ fn render_table(
     }
     // Merge the pagination facts into this footer rather than letting
     // `append_pagination_summary` print a second, redundant line right below
-    // it — both would otherwise state the same shown/total count.
+    // it — both would otherwise state the same shown/total count. The shown
+    // count comes from `rows.len()`, not `pagination.count`: a later
+    // pipeline step (`--expr`) can still reshape `envelope.data` after
+    // pagination ran, so `rows.len()` is what's actually rendered above,
+    // while `total`/`offset`/`limit` stay pagination's own facts.
     match pagination {
         Some(pagination) => out.push_str(&format!(
             "\n({} of {} rows, offset {}, limit {})\n",
-            pagination.count, pagination.total, pagination.offset, pagination.limit
+            rows.len(),
+            pagination.total,
+            pagination.offset,
+            pagination.limit
         )),
         None => out.push_str(&format!("\n({} rows)\n", rows.len())),
     }

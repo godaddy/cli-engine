@@ -399,3 +399,103 @@ async fn human_output_on_last_page_shows_summary_but_no_next_steps() {
         output.rendered
     );
 }
+
+#[tokio::test]
+async fn next_page_action_preserves_filter_expr_and_fields() {
+    // `--filter`/`--expr`/`--fields` sit in the same output pipeline as
+    // pagination and change what data comes back — dropping them from the
+    // suggested next-page command would make it return different results
+    // than the command the user actually ran.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--filter",
+            "name != 'alpha'",
+            "--expr",
+            "sort_by(@, &name)",
+            "--fields",
+            "name",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --filter \"name != 'alpha'\" --expr \"sort_by(@, &name)\" --fields name --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_replays_a_set_false_flag_as_a_bare_switch() {
+    // A `SetFalse` flag (e.g. `--no-cache`) never takes an explicit
+    // `=value` token — its mere presence sets the value to `false`. Emitting
+    // `--no-cache=false` would be an invalid replay.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(
+                Arg::new("no_cache")
+                    .long("no-cache")
+                    .action(clap::ArgAction::SetFalse),
+            )
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--no-cache", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --no-cache --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn human_footer_shows_rows_actually_rendered_after_expr_reshapes_data() {
+    // `--expr` runs after pagination in the output pipeline, so it can
+    // change the rendered row count independently of `pagination.count`
+    // (which reflects the pre-`--expr` slice). The footer's "shown" number
+    // must track what's actually in the table, not the stale pagination count.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--expr",
+            "[?name=='alpha']",
+            "--output",
+            "human",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output.rendered.contains("(1 of 4 rows, offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+}

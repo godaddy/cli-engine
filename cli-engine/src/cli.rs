@@ -1868,7 +1868,7 @@ impl Cli {
             .spec
             .pagination
             .is_some()
-            .then(|| pagination_command_base(&command_path, &command.spec, &user_args));
+            .then(|| pagination_command_base(&command_path, &command.spec, &user_args, &flags));
         if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
@@ -2570,9 +2570,18 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
     middleware.offset = leaf.get_one::<i64>("offset").copied().unwrap_or(0);
 }
 
-/// Replays a paginating command's own explicit args as `--flag value` text —
-/// the base a "view the next page" [`crate::NextAction`] is built from once
-/// the response's [`crate::PaginationMeta`] is known.
+/// Replays a paginating command's own explicit args, plus the global
+/// `--filter`/`--expr`/`--fields` flags, as `--flag value` text — the base a
+/// "view the next page" [`crate::NextAction`] is built from once the
+/// response's [`crate::PaginationMeta`] is known.
+///
+/// `--filter`/`--expr`/`--fields` sit in the same output pipeline as
+/// pagination itself (filter -> paginate -> expr -> fields) and change what
+/// data comes back, so dropping them would make the suggested next-page
+/// command return different results than the command the user actually ran.
+/// Other global flags (`--output`, `--verbose`, `--env`, ...) don't affect
+/// *which* data is returned, so they're intentionally left out — the caller
+/// is already running under them.
 ///
 /// Best-effort, not a fully general clap-args reconstruction: it uses each
 /// arg's real `get_long()`/`get_short()` name (never the value-map key,
@@ -2585,12 +2594,23 @@ fn pagination_command_base(
     command_path: &str,
     spec: &CommandSpec,
     user_args: &crate::middleware::ValueMap,
+    flags: &GlobalFlags,
 ) -> String {
     let mut parts = vec![command_path.replace(':', " ")];
     for arg in &spec.args {
         let id = arg.get_id().as_str();
         if let Some(value) = user_args.get(id) {
             push_pagination_arg(&mut parts, arg, value);
+        }
+    }
+    for (flag, value) in [
+        ("--filter", &flags.filter),
+        ("--expr", &flags.expr),
+        ("--fields", &flags.fields),
+    ] {
+        if !value.is_empty() {
+            parts.push(flag.to_owned());
+            parts.push(quote_pagination_value(value));
         }
     }
     parts.join(" ")
@@ -2603,12 +2623,23 @@ fn push_pagination_arg(parts: &mut Vec<String>, arg: &Arg, value: &serde_json::V
         .or_else(|| arg.get_short().map(|short| format!("-{short}")));
     match value {
         serde_json::Value::Bool(enabled) => {
-            if let Some(flag) = flag {
-                parts.push(if *enabled {
-                    flag
-                } else {
-                    format!("{flag}=false")
-                });
+            if matches!(
+                arg.get_action(),
+                clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+            ) {
+                // A switch-style flag's presence in `user_args` already means
+                // the user typed exactly this flag — `SetTrue` implies `true`,
+                // `SetFalse` implies `false` (e.g. a `--no-foo`-style arg) —
+                // and neither accepts an explicit `=value` token, so replay
+                // the bare flag rather than appending one.
+                if let Some(flag) = flag {
+                    parts.push(flag);
+                }
+            } else {
+                // A custom bool-valued arg (`ArgAction::Set` with a bool
+                // value parser) takes an explicit token, so replay it like
+                // any other scalar.
+                push_flagged_value(parts, flag, &enabled.to_string());
             }
         }
         serde_json::Value::Array(items) => {
