@@ -390,7 +390,17 @@ pub fn render_human_with_view(
     // into it (no per-footer temporaries).
     append_render_notes(&mut body, &notes);
     if !notes.pagination_shown {
-        append_pagination_summary(&mut body, envelope.pagination.as_ref());
+        // `envelope.data` already reflects the fully piped result (filter ->
+        // paginate -> expr -> fields), so its length is what this non-table
+        // path actually rendered — unlike `pagination.count`, which is only
+        // the pre-`--expr` slice size and can go stale once `--expr` reshapes
+        // the array (mirrors the same fix in `render_table`).
+        let shown = envelope
+            .data
+            .as_ref()
+            .and_then(Value::as_array)
+            .and_then(|items| i64::try_from(items.len()).ok());
+        append_pagination_summary(&mut body, envelope.pagination.as_ref(), shown);
     }
     append_next_actions(&mut body, &envelope.next_actions);
     body
@@ -506,13 +516,25 @@ fn append_render_notes(out: &mut String, notes: &RenderNotes) {
 /// paginated response that *didn't* render as a table (e.g. a bare array of
 /// scalars) — otherwise the two would repeat the same count/offset/limit on
 /// consecutive lines.
-fn append_pagination_summary(out: &mut String, pagination: Option<&PaginationMeta>) {
+///
+/// `shown` is the caller's actual rendered item count (from `envelope.data`,
+/// post-pipeline), used in place of `pagination.count` — which is only the
+/// pre-`--expr` slice size and can go stale once `--expr` reshapes the array
+/// after pagination ran (mirrors the same fix in `render_table`). Falls back
+/// to `pagination.count` on the `None` it should never actually see in
+/// practice, since pagination only ever applies to array data.
+fn append_pagination_summary(
+    out: &mut String,
+    pagination: Option<&PaginationMeta>,
+    shown: Option<i64>,
+) {
     let Some(pagination) = pagination else {
         return;
     };
+    let count = shown.unwrap_or(pagination.count);
     out.push_str(&format!(
-        "\nShowing {} of {} (offset {}, limit {})\n",
-        pagination.count, pagination.total, pagination.offset, pagination.limit
+        "\nShowing {count} of {} (offset {}, limit {})\n",
+        pagination.total, pagination.offset, pagination.limit
     ));
 }
 

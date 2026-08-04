@@ -2586,10 +2586,12 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
 /// Best-effort, not a fully general clap-args reconstruction: it uses each
 /// arg's real `get_long()`/`get_short()` name (never the value-map key,
 /// which for derive-based args can differ from the flag — e.g. id
-/// `page_size` vs flag `--page-size`), joins array values into one
-/// comma-separated flag occurrence, and quotes values containing whitespace.
-/// Deliberately omits `--limit`/`--offset` — those are added by the caller
-/// once it knows the next page's offset.
+/// `page_size` vs flag `--page-size`), replays a multi-value arg as one
+/// flag occurrence per value (round-trips correctly whether the arg is a
+/// plain repeatable `ArgAction::Append` or also sets a `value_delimiter`),
+/// and quotes values containing whitespace. Deliberately omits
+/// `--limit`/`--offset` — those are added by the caller once it knows the
+/// next page's offset.
 fn pagination_command_base(
     command_path: &str,
     spec: &CommandSpec,
@@ -2643,12 +2645,17 @@ fn push_pagination_arg(parts: &mut Vec<String>, arg: &Arg, value: &serde_json::V
             }
         }
         serde_json::Value::Array(items) => {
-            let joined = items
-                .iter()
-                .map(pagination_arg_display)
-                .collect::<Vec<_>>()
-                .join(",");
-            push_flagged_value(parts, flag, &joined);
+            // Repeat the flag once per value rather than joining into one
+            // comma-separated token: clap collects a repeatable flag
+            // (`ArgAction::Append`, the common way a command declares a
+            // multi-value arg) the same way whether or not it also sets
+            // `value_delimiter(',')`, so `--scope a --scope b` round-trips
+            // correctly either way. A single `--scope a,b` only works when
+            // a delimiter was configured — for a plain `Append` arg it's
+            // parsed as one literal value, changing the replay's meaning.
+            for item in items {
+                push_flagged_value(parts, flag.clone(), &pagination_arg_display(item));
+            }
         }
         serde_json::Value::Null => {}
         other => push_flagged_value(parts, flag, &pagination_arg_display(other)),

@@ -499,3 +499,80 @@ async fn human_footer_shows_rows_actually_rendered_after_expr_reshapes_data() {
         output.rendered
     );
 }
+
+#[tokio::test]
+async fn next_page_action_replays_a_multi_value_arg_as_repeated_flags() {
+    // A repeatable flag (`ArgAction::Append`, the common way a command
+    // declares a multi-value arg) collects `--scope a --scope b` into the
+    // same value whether or not a `value_delimiter` is also configured —
+    // but a single comma-joined `--scope a,b` only round-trips correctly
+    // when a delimiter *is* configured, so replaying via repeated
+    // occurrences is the one form that's always correct.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(
+                Arg::new("scope")
+                    .long("scope")
+                    .action(clap::ArgAction::Append),
+            )
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli", "list", "--scope", "a", "--scope", "b", "--output", "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --scope a --scope b --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn human_standalone_summary_shows_rows_actually_rendered_after_expr_reshapes_data() {
+    // Mirrors `human_footer_shows_rows_actually_rendered_after_expr_reshapes_data`
+    // for the *non-table* fallback: a bare array of scalars renders via
+    // `render_array_lines`, not `render_table`, so the standalone "Showing..."
+    // line — not the merged table footer — is the one that must track the
+    // actual rendered count instead of the stale `pagination.count`.
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+        async |_credential, _args| {
+            Ok(CommandResult::new(json!([
+                "alpha", "beta", "gamma", "delta"
+            ])))
+        },
+    ));
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--expr",
+            "[?@=='alpha']",
+            "--output",
+            "human",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("Showing 1 of 4 (offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+}
