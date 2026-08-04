@@ -88,6 +88,7 @@ fn apply_pagination(data: &mut Value, offset: i64, limit: i64) -> Result<Option<
                 ));
             }
         },
+        has_more: end < total,
     }))
 }
 

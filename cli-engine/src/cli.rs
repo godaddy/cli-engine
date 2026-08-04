@@ -13,7 +13,7 @@ mod completion;
 mod help;
 mod tree_render;
 
-use clap::{ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command};
 
 use crate::{
     ActivityEmitter, Auditor, AuthProvider, Authorizer, CliCoreError, CommandMeta, CommandSpec,
@@ -948,7 +948,7 @@ impl Cli {
         }
         if config.environments.is_some() {
             root = root.arg(
-                clap::Arg::new("env")
+                Arg::new("env")
                     .long("env")
                     .global(true)
                     .value_name("ENV")
@@ -1864,6 +1864,11 @@ impl Cli {
         apply_pagination_flags(&mut middleware, &command.spec, leaf);
         let args = command_args_from_matches(leaf, &command.spec, false);
         let user_args = command_args_from_matches(leaf, &command.spec, true);
+        let pagination_command = command
+            .spec
+            .pagination
+            .is_some()
+            .then(|| pagination_command_base(&command_path, &command.spec, &user_args, &flags));
         if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
@@ -1895,6 +1900,7 @@ impl Cli {
                         default_fields: &default_fields,
                         view_id: view_id.as_deref(),
                         auth: command.spec.auth,
+                        pagination_command,
                     },
                     Arc::new(leaf.clone()),
                     streaming_handler,
@@ -1926,6 +1932,7 @@ impl Cli {
                     default_fields: &default_fields,
                     view_id: view_id.as_deref(),
                     auth: command.spec.auth,
+                    pagination_command,
                 },
                 async move |credential| {
                     handler(CommandContext {
@@ -2561,6 +2568,136 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
         .copied()
         .unwrap_or(pagination.default_limit);
     middleware.offset = leaf.get_one::<i64>("offset").copied().unwrap_or(0);
+}
+
+/// Replays a paginating command's own explicit args, plus the global
+/// `--filter`/`--expr`/`--fields` flags, as `--flag value` text — the base a
+/// "view the next page" [`crate::NextAction`] is built from once the
+/// response's [`crate::PaginationMeta`] is known.
+///
+/// `--filter`/`--expr`/`--fields` sit in the same output pipeline as
+/// pagination itself (filter -> paginate -> expr -> fields) and change what
+/// data comes back, so dropping them would make the suggested next-page
+/// command return different results than the command the user actually ran.
+/// Other global flags (`--output`, `--verbose`, `--env`, ...) don't affect
+/// *which* data is returned, so they're intentionally left out — the caller
+/// is already running under them.
+///
+/// Best-effort, not a fully general clap-args reconstruction: it uses each
+/// arg's real `get_long()`/`get_short()` name (never the value-map key,
+/// which for derive-based args can differ from the flag — e.g. id
+/// `page_size` vs flag `--page-size`), replays a multi-value arg as one
+/// flag occurrence per value (round-trips correctly whether the arg is a
+/// plain repeatable `ArgAction::Append` or also sets a `value_delimiter`),
+/// and quotes/escapes values containing whitespace or shell metacharacters
+/// (see `quote_pagination_value`). Deliberately omits `--limit`/`--offset` —
+/// those are added by the caller once it knows the
+/// next page's offset.
+fn pagination_command_base(
+    command_path: &str,
+    spec: &CommandSpec,
+    user_args: &crate::middleware::ValueMap,
+    flags: &GlobalFlags,
+) -> String {
+    let mut parts = vec![command_path.replace(':', " ")];
+    for arg in &spec.args {
+        let id = arg.get_id().as_str();
+        if let Some(value) = user_args.get(id) {
+            push_pagination_arg(&mut parts, arg, value);
+        }
+    }
+    for (flag, value) in [
+        ("--filter", &flags.filter),
+        ("--expr", &flags.expr),
+        ("--fields", &flags.fields),
+    ] {
+        if !value.is_empty() {
+            parts.push(flag.to_owned());
+            parts.push(quote_pagination_value(value));
+        }
+    }
+    parts.join(" ")
+}
+
+fn push_pagination_arg(parts: &mut Vec<String>, arg: &Arg, value: &serde_json::Value) {
+    let flag = arg
+        .get_long()
+        .map(|long| format!("--{long}"))
+        .or_else(|| arg.get_short().map(|short| format!("-{short}")));
+    match value {
+        serde_json::Value::Bool(enabled) => {
+            if matches!(
+                arg.get_action(),
+                clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+            ) {
+                // A switch-style flag's presence in `user_args` already means
+                // the user typed exactly this flag — `SetTrue` implies `true`,
+                // `SetFalse` implies `false` (e.g. a `--no-foo`-style arg) —
+                // and neither accepts an explicit `=value` token, so replay
+                // the bare flag rather than appending one.
+                if let Some(flag) = flag {
+                    parts.push(flag);
+                }
+            } else {
+                // A custom bool-valued arg (`ArgAction::Set` with a bool
+                // value parser) takes an explicit token, so replay it like
+                // any other scalar.
+                push_flagged_value(parts, flag, &enabled.to_string());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            // Repeat the flag once per value rather than joining into one
+            // comma-separated token: clap collects a repeatable flag
+            // (`ArgAction::Append`, the common way a command declares a
+            // multi-value arg) the same way whether or not it also sets
+            // `value_delimiter(',')`, so `--scope a --scope b` round-trips
+            // correctly either way. A single `--scope a,b` only works when
+            // a delimiter was configured — for a plain `Append` arg it's
+            // parsed as one literal value, changing the replay's meaning.
+            for item in items {
+                push_flagged_value(parts, flag.clone(), &pagination_arg_display(item));
+            }
+        }
+        serde_json::Value::Null => {}
+        other => push_flagged_value(parts, flag, &pagination_arg_display(other)),
+    }
+}
+
+fn push_flagged_value(parts: &mut Vec<String>, flag: Option<String>, value: &str) {
+    if let Some(flag) = flag {
+        parts.push(flag);
+    }
+    parts.push(quote_pagination_value(value));
+}
+
+fn pagination_arg_display(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Quotes a value for the suggested next-page command, if it contains
+/// anything beyond a small safe-unquoted allowlist. Whitespace and shell
+/// metacharacters (`|`, `&`, `;`, `<`, `>`, ...) all fall outside that
+/// allowlist and so trigger quoting; once quoted, `\`, `"`, `$`, and `` ` ``
+/// are backslash-escaped (backslash first, so escaping the others doesn't
+/// re-escape the backslashes it just inserted) so the value can't break out
+/// of the double quotes or trigger POSIX-shell expansion (`$VAR`, `$(...)`,
+/// backticks) if the suggestion is copy-pasted into a shell.
+fn quote_pagination_value(value: &str) -> String {
+    let safe_unquoted =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
+    if value.is_empty() || !value.chars().all(safe_unquoted) {
+        let escaped = value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`");
+        format!("\"{escaped}\"")
+    } else {
+        value.to_owned()
+    }
 }
 
 /// Builds the transport debug logger implied by a parsed `--debug` pattern,
@@ -3578,7 +3715,7 @@ fn apply_dry_run_visibility(command: Command, spec: &CommandSpec) -> Command {
         return command;
     }
     command.arg(
-        clap::Arg::new("dry-run")
+        Arg::new("dry-run")
             .long("dry-run")
             .num_args(0..=1)
             .require_equals(true)
@@ -3652,7 +3789,7 @@ fn apply_fields_arg(
         help.push_str(table.trim_end());
     }
 
-    let mut arg = clap::Arg::new("fields")
+    let mut arg = Arg::new("fields")
         .long("fields")
         .value_name("FIELDS")
         // Must match `global_flag_order::FIELDS` — this re-registers the
@@ -3696,7 +3833,7 @@ fn apply_filter_and_expr_examples(mut command: Command, fields: &[FieldInfo]) ->
             help.push_str(&format!("\ne.g. --filter '{name}'"));
         }
         command = command.arg(
-            clap::Arg::new("filter")
+            Arg::new("filter")
                 .long("filter")
                 .value_name("EXPR")
                 .display_order(crate::flags::global_flag_order::FILTER)
@@ -3710,7 +3847,7 @@ fn apply_filter_and_expr_examples(mut command: Command, fields: &[FieldInfo]) ->
         expr_help.push_str(&format!("\ne.g. --expr '[].{name}'"));
     }
     command.arg(
-        clap::Arg::new("expr")
+        Arg::new("expr")
             .long("expr")
             .value_name("EXPR")
             .display_order(crate::flags::global_flag_order::EXPR)

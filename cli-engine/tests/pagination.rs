@@ -6,8 +6,10 @@
 //! `PaginationConfig`. These tests pin that gating, plus `default_limit` and
 //! `max_limit` behavior, at the only surface a real consumer CLI uses.
 
+use clap::Arg;
 use cli_engine::{
-    Cli, CliConfig, CommandResult, CommandSpec, PaginationConfig, RuntimeCommandSpec,
+    Cli, CliConfig, CommandResult, CommandSpec, CredentialResolver, PaginationConfig,
+    RuntimeCommandSpec,
 };
 use serde_json::json;
 
@@ -88,10 +90,21 @@ async fn default_limit_applies_when_neither_flag_is_passed() {
         rendered["data"],
         json!([{"name": "alpha"}, {"name": "beta"}])
     );
+    // Pagination facts and the next-page suggestion are always present — no
+    // `--verbose` needed, unlike `metadata`.
+    assert_eq!(
+        rendered["pagination"],
+        json!({"total": 4, "offset": 0, "limit": 2, "count": 2, "has_more": true})
+    );
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --limit 2 --offset 2"
+    );
+    assert!(rendered.get("metadata").is_none(), "{}", output.rendered);
 }
 
 #[tokio::test]
-async fn explicit_limit_and_offset_override_the_default_and_attach_pagination_metadata() {
+async fn explicit_limit_and_offset_override_the_default_and_expose_pagination() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
@@ -103,16 +116,7 @@ async fn explicit_limit_and_offset_override_the_default_and_attach_pagination_me
 
     let output = cli
         .run([
-            "my-cli",
-            "list",
-            "--offset",
-            "1",
-            "--limit",
-            "2",
-            "--verbose",
-            "pagination",
-            "--output",
-            "json",
+            "my-cli", "list", "--offset", "1", "--limit", "2", "--output", "json",
         ])
         .await;
     assert_eq!(output.exit_code, 0, "{}", output.rendered);
@@ -122,8 +126,131 @@ async fn explicit_limit_and_offset_override_the_default_and_attach_pagination_me
         json!([{"name": "beta"}, {"name": "gamma"}])
     );
     assert_eq!(
-        rendered["metadata"]["pagination"],
-        json!({"total": 4, "offset": 1, "limit": 2, "count": 2})
+        rendered["pagination"],
+        json!({"total": 4, "offset": 1, "limit": 2, "count": 2, "has_more": true})
+    );
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --limit 2 --offset 3"
+    );
+    assert_eq!(
+        rendered["next_actions"][0]["description"],
+        "View the next page (offset 3 of 4 total)"
+    );
+}
+
+#[tokio::test]
+async fn last_page_has_no_next_action_and_has_more_is_false() {
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli", "list", "--offset", "2", "--limit", "2", "--output", "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["pagination"]["has_more"], false);
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "no next page exists: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_replays_other_flags_the_user_passed() {
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("status").long("status"))
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--status", "active", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --status active --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_quotes_values_with_whitespace() {
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("status").long("status"))
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--status",
+            "in review",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --status \"in review\" --limit 2 --offset 2"
+    );
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct ListArgs {
+    #[arg(long)]
+    sort_order: String,
+}
+
+#[tokio::test]
+async fn next_page_action_uses_the_real_long_flag_not_the_value_map_key() {
+    // `sort_order`'s clap id is the field name, but its long flag is
+    // kebab-cased (`--sort-order`) — the reconstructed command must use the
+    // real flag, not the value-map key (see `tests/derive_bridge.rs` for the
+    // same id/flag mismatch on `page_size`/`--page-size`).
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
+        CommandSpec::from_args::<ListArgs>("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+        async |_credential: CredentialResolver, _args: ListArgs| {
+            Ok(CommandResult::new(json!(items())))
+        },
+    ));
+
+    let output = cli
+        .run(["my-cli", "list", "--sort-order", "asc", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --sort-order asc --limit 2 --offset 2"
     );
 }
 
@@ -210,4 +337,305 @@ fn with_pagination_panics_when_default_limit_exceeds_max_limit() {
         default_limit: 10,
         max_limit: 5,
     });
+}
+
+#[tokio::test]
+async fn human_output_shows_pagination_summary_and_next_steps() {
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    // The pagination facts are merged into the table's row-count footer
+    // rather than repeated on a separate line.
+    assert!(
+        output.rendered.contains("(2 of 4 rows, offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        output.rendered.contains("Next steps:"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        output.rendered.contains("list --limit 2 --offset 2"),
+        "{}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn human_output_on_last_page_shows_summary_but_no_next_steps() {
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli", "list", "--offset", "2", "--limit", "2", "--output", "human",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output.rendered.contains("(2 of 4 rows, offset 2, limit 2)"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        !output.rendered.contains("Next steps:"),
+        "no next page exists: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_preserves_filter_expr_and_fields() {
+    // `--filter`/`--expr`/`--fields` sit in the same output pipeline as
+    // pagination and change what data comes back — dropping them from the
+    // suggested next-page command would make it return different results
+    // than the command the user actually ran.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--filter",
+            "name != 'alpha'",
+            "--expr",
+            "sort_by(@, &name)",
+            "--fields",
+            "name",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --filter \"name != 'alpha'\" --expr \"sort_by(@, &name)\" --fields name --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_replays_a_set_false_flag_as_a_bare_switch() {
+    // A `SetFalse` flag (e.g. `--no-cache`) never takes an explicit
+    // `=value` token — its mere presence sets the value to `false`. Emitting
+    // `--no-cache=false` would be an invalid replay.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(
+                Arg::new("no_cache")
+                    .long("no-cache")
+                    .action(clap::ArgAction::SetFalse),
+            )
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--no-cache", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --no-cache --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn human_footer_shows_rows_actually_rendered_after_expr_reshapes_data() {
+    // `--expr` runs after pagination in the output pipeline, so it can
+    // change the rendered row count independently of `pagination.count`
+    // (which reflects the pre-`--expr` slice). The footer's "shown" number
+    // must track what's actually in the table, not the stale pagination count.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--expr",
+            "[?name=='alpha']",
+            "--output",
+            "human",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output.rendered.contains("(1 of 4 rows, offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_replays_a_multi_value_arg_as_repeated_flags() {
+    // A repeatable flag (`ArgAction::Append`, the common way a command
+    // declares a multi-value arg) collects `--scope a --scope b` into the
+    // same value whether or not a `value_delimiter` is also configured —
+    // but a single comma-joined `--scope a,b` only round-trips correctly
+    // when a delimiter *is* configured, so replaying via repeated
+    // occurrences is the one form that's always correct.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(
+                Arg::new("scope")
+                    .long("scope")
+                    .action(clap::ArgAction::Append),
+            )
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli", "list", "--scope", "a", "--scope", "b", "--output", "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "list --scope a --scope b --limit 2 --offset 2"
+    );
+}
+
+#[tokio::test]
+async fn human_standalone_summary_shows_rows_actually_rendered_after_expr_reshapes_data() {
+    // Mirrors `human_footer_shows_rows_actually_rendered_after_expr_reshapes_data`
+    // for the *non-table* fallback: a bare array of scalars renders via
+    // `render_array_lines`, not `render_table`, so the standalone "Showing..."
+    // line — not the merged table footer — is the one that must track the
+    // actual rendered count instead of the stale `pagination.count`.
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+        async |_credential, _args| {
+            Ok(CommandResult::new(json!([
+                "alpha", "beta", "gamma", "delta"
+            ])))
+        },
+    ));
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--expr",
+            "[?@=='alpha']",
+            "--output",
+            "human",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("Showing 1 of 4 (offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_escapes_shell_metacharacters_and_expansions() {
+    // A value with a shell metacharacter (here `;`) must be quoted even
+    // though it has no whitespace, and `$`/backtick/backslash/`"` inside the
+    // quotes must be escaped so the suggestion can't trigger command
+    // substitution or break out of the quotes if copy-pasted into a shell.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("status").long("status"))
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--status",
+            "a;$(whoami)`x`\"y\"\\z",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        r#"list --status "a;\$(whoami)\`x\`\"y\"\\z" --limit 2 --offset 2"#
+    );
+}
+
+#[tokio::test]
+async fn human_output_uses_a_neutral_pagination_line_when_expr_leaves_no_array() {
+    // `--expr` can reshape the paginated array into something that isn't a
+    // list at all (e.g. `length(@)` -> a number). Pagination still ran, but
+    // there's no rendered row count to describe, so the fallback must not
+    // claim "Showing N of M" next to output that no longer looks like a list.
+    let cli = cli_with_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--expr", "length(@)", "--output", "human"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("(pagination: 4 total, offset 0, limit 2)"),
+        "{}",
+        output.rendered
+    );
+    assert!(!output.rendered.contains("Showing"), "{}", output.rendered);
 }
