@@ -655,7 +655,7 @@ let shared = HumanViewDef::new(
 let spec = CommandSpec::new("get", "Get a project").with_view_id("projects-table");
 ```
 
-A column can nest a child table under an object field. Given a response shaped like `{ "name": "getPets", "parameters": { "items": [...], "total": 2 } }`:
+A column can nest a child table under an object field. Given a response shaped like `{ "name": "getPets", "parameters": { "items": [...], "pagination": { "total": 5, "offset": 0, "limit": 2, "count": 2, "has_more": true } } }`:
 
 ```rust
 use cli_engine::{CommandSpec, TableColumn};
@@ -679,8 +679,10 @@ Parameters:
   limit  query
   id     path
 
-  (2 rows)
+  (2 of 5 rows, offset 0, limit 2)
 ```
+
+That `(2 of 5 rows, ...)` footer comes from a `pagination` sibling on the object that directly holds the nested array (here, `parameters.pagination`) — the exact same `PaginationMeta` shape (`total`/`offset`/`limit`/`count`/`has_more`) `Envelope::pagination` already uses for a top-level paginated array, not a new bespoke convention: build one the same way you would for a top-level response. `render_table` renders it identically either way, using the rendered item count for the shown-row half of the footer and the sibling's `total`/`offset`/`limit` for the rest. A parent object with no `pagination` sibling — or one that doesn't deserialize as a `PaginationMeta` — renders a plain `"(N rows)"` footer, unchanged.
 
 ### Column order is priority
 

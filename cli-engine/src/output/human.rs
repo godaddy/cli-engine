@@ -869,7 +869,18 @@ fn render_object_with_columns(
             (Some(nested_columns), Some(value)) if is_nestable(value) => {
                 out.push_str(&format!("{}:\n", column.header));
                 let child_width = available_width.saturating_sub(NESTED_INDENT.len());
-                let (block, child_notes) = render_nested_value(value, nested_columns, child_width);
+                let nested_pagination = match value {
+                    Value::Array(_) => {
+                        resolve_field_parent(map, &column.field).and_then(resolve_nested_pagination)
+                    }
+                    _ => None,
+                };
+                let (block, child_notes) = render_nested_value(
+                    value,
+                    nested_columns,
+                    child_width,
+                    nested_pagination.as_ref(),
+                );
                 out.push_str(&indent_block(&block, NESTED_INDENT));
                 if child_notes.truncated
                     || !child_notes.hidden_columns.is_empty()
@@ -1007,6 +1018,32 @@ fn resolve_field_path<'value>(
     Some(current)
 }
 
+/// Resolves the object that directly contains `field`'s leaf segment — e.g.
+/// for `"parameters.items"`, the object at `"parameters"` (the one whose keys
+/// include `"items"` as a direct child). A field with no `.` has `map` itself
+/// as its parent, since the leaf is already one of `map`'s direct keys.
+///
+/// Used to reach a nested array's `pagination` sibling (see
+/// [`resolve_nested_pagination`]) that `resolve_field_path` alone can't see,
+/// since that function only ever returns the leaf.
+fn resolve_field_parent<'value>(
+    map: &'value serde_json::Map<String, Value>,
+    field: &str,
+) -> Option<&'value serde_json::Map<String, Value>> {
+    match field.rsplit_once('.') {
+        None => Some(map),
+        Some((parent_path, _leaf)) => resolve_field_path(map, parent_path)?.as_object(),
+    }
+}
+
+/// Resolves a `pagination` field on `parent` — the same object that directly
+/// contains a [`TableColumn::nested`] column's array — as a [`PaginationMeta`],
+/// so nested tables get the exact same `"(N of M rows, offset O, limit L)"`
+/// footer a top-level paginated array gets.
+fn resolve_nested_pagination(parent: &serde_json::Map<String, Value>) -> Option<PaginationMeta> {
+    serde_json::from_value(parent.get("pagination")?.clone()).ok()
+}
+
 /// Prefixes every non-empty line of `block` with `indent`, leaving blank
 /// lines (e.g. the blank line before a table's `(N rows)` footer) bare so no
 /// line ever carries trailing-whitespace-only indent. Round-trips a block's
@@ -1048,10 +1085,11 @@ fn render_nested_value(
     value: &Value,
     nested_columns: &[TableColumn],
     available_width: usize,
+    pagination: Option<&PaginationMeta>,
 ) -> (String, RenderNotes) {
     match value {
         Value::Array(items) => {
-            render_array_with_columns(items, nested_columns, available_width, None)
+            render_array_with_columns(items, nested_columns, available_width, pagination)
         }
         Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
         other => (format!("{}\n", format_value(other)), RenderNotes::default()),
@@ -1656,6 +1694,75 @@ mod tests {
     }
 
     #[test]
+    fn resolve_field_parent_returns_parent_object_for_dotted_and_bare_fields() {
+        let map = json!({
+            "parameters": { "items": [], "total": 2 },
+            "owner": "not-an-object",
+        });
+        let map = map.as_object().expect("object fixture");
+
+        assert_eq!(
+            resolve_field_parent(map, "parameters.items"),
+            map.get("parameters").and_then(Value::as_object)
+        );
+        assert_eq!(
+            resolve_field_parent(map, "items"),
+            Some(map),
+            "a field with no dot has the object being rendered as its own parent"
+        );
+        assert_eq!(
+            resolve_field_parent(map, "owner.name"),
+            None,
+            "intermediate value is a string, not an object"
+        );
+        assert_eq!(resolve_field_parent(map, "missing.items"), None);
+    }
+
+    #[test]
+    fn resolve_nested_pagination_deserializes_a_pagination_meta_shaped_sibling() {
+        let parent = json!({
+            "pagination": { "total": 26, "offset": 0, "limit": 2, "count": 2, "has_more": true },
+        });
+        let parent = parent.as_object().expect("object fixture");
+
+        let meta = resolve_nested_pagination(parent).expect("pagination sibling present");
+        assert_eq!(
+            meta,
+            PaginationMeta {
+                total: 26,
+                offset: 0,
+                limit: 2,
+                count: 2,
+                has_more: true,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_nested_pagination_is_none_when_the_sibling_is_absent_or_malformed() {
+        let no_sibling = json!({ "items": [] });
+        assert_eq!(
+            resolve_nested_pagination(no_sibling.as_object().expect("object fixture")),
+            None,
+            "no pagination field at all"
+        );
+
+        let wrong_shape = json!({ "pagination": { "total": 26 } });
+        assert_eq!(
+            resolve_nested_pagination(wrong_shape.as_object().expect("object fixture")),
+            None,
+            "missing required PaginationMeta fields fails to deserialize"
+        );
+
+        let not_an_object = json!({ "pagination": "26 total" });
+        assert_eq!(
+            resolve_nested_pagination(not_an_object.as_object().expect("object fixture")),
+            None,
+            "pagination field present but not object-shaped"
+        );
+    }
+
+    #[test]
     fn nested_array_of_objects_renders_as_indented_child_table() {
         let map = json!({
             "name": "getPets",
@@ -1664,7 +1771,6 @@ mod tests {
                     {"name": "limit", "in": "query"},
                     {"name": "id", "in": "path"},
                 ],
-                "total": 2,
             },
         });
         let columns = vec![
@@ -1689,6 +1795,70 @@ mod tests {
             "no raw JSON should leak into output: {out}"
         );
         assert!(!notes.truncated, "{out}");
+        assert!(
+            out.contains("(2 rows)"),
+            "no pagination sibling means the plain row-count footer, unchanged: {out}"
+        );
+    }
+
+    #[test]
+    fn nested_array_with_pagination_sibling_renders_pagination_style_footer() {
+        let map = json!({
+            "name": "getPets",
+            "parameters": {
+                "items": [
+                    {"name": "limit", "in": "query"},
+                    {"name": "id", "in": "path"},
+                ],
+                "pagination": { "total": 26, "offset": 0, "limit": 2, "count": 2, "has_more": true },
+            },
+        });
+        let columns = vec![
+            TableColumn::new("name", "Name"),
+            TableColumn::new("parameters.items", "Parameters").nested(vec![
+                TableColumn::new("name", "Name"),
+                TableColumn::new("in", "In"),
+            ]),
+        ];
+
+        let (out, _notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert!(
+            out.contains("(2 of 26 rows, offset 0, limit 2)"),
+            "nested table should reuse the pagination sibling's PaginationMeta facts: {out}"
+        );
+    }
+
+    #[test]
+    fn nested_array_without_pagination_sibling_keeps_the_plain_row_count_footer() {
+        let map = json!({ "items": [{"name": "limit"}] });
+        let columns =
+            vec![TableColumn::new("items", "Items").nested(vec![TableColumn::new("name", "Name")])];
+
+        let (out, _notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert!(
+            out.contains("(1 rows)"),
+            "no pagination sibling means no opt-in — behavior is unchanged: {out}"
+        );
+    }
+
+    #[test]
+    fn nested_array_with_malformed_pagination_sibling_keeps_the_plain_row_count_footer() {
+        let map =
+            json!({ "items": [{"name": "limit"}], "pagination": { "total": "not-a-number" } });
+        let columns =
+            vec![TableColumn::new("items", "Items").nested(vec![TableColumn::new("name", "Name")])];
+
+        let (out, _notes) =
+            render_object_with_columns(map.as_object().expect("object fixture"), &columns, 80);
+
+        assert!(
+            out.contains("(1 rows)"),
+            "a pagination sibling that fails to deserialize degrades to the plain footer: {out}"
+        );
     }
 
     #[test]
