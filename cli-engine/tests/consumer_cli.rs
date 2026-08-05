@@ -695,3 +695,61 @@ async fn human_output_renders_nested_view_column_as_indented_child_table() {
         human.rendered
     );
 }
+
+// Same shape as `nested_view_operation_cli`, except `parameters` also carries
+// a `pagination` field — the same `PaginationMeta` shape (`total`/`offset`/
+// `limit`/`count`/`has_more`) `Envelope::pagination` already uses at the top
+// level — so the nested column's child table gets the same truncation footer
+// a top-level paginated array gets (DEVEX-985).
+fn nested_view_operation_with_truncated_parameters_cli() -> Cli {
+    Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli")
+            .with_build(BuildInfo::new("0.1.0"))
+            .with_module(Module::new("Demo", |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("operation", "Inspect operations"))
+                    .with_command(RuntimeCommandSpec::new(
+                        CommandSpec::new("get", "Get an operation")
+                            .with_view(vec![
+                                TableColumn::new("name", "Name"),
+                                TableColumn::new("parameters.items", "Parameters").nested(vec![
+                                    TableColumn::new("name", "Name"),
+                                    TableColumn::new("in", "In"),
+                                ]),
+                            ])
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!({
+                                "name": "getPets",
+                                "parameters": {
+                                    "items": [
+                                        {"name": "limit", "in": "query"},
+                                        {"name": "id", "in": "path"},
+                                    ],
+                                    "pagination": {
+                                        "total": 26,
+                                        "offset": 0,
+                                        "limit": 2,
+                                        "count": 2,
+                                        "has_more": true,
+                                    },
+                                },
+                            })))
+                        },
+                    ))
+            })),
+    )
+}
+
+#[tokio::test]
+async fn human_output_renders_nested_view_column_truncation_footer_from_pagination_sibling() {
+    let cli = nested_view_operation_with_truncated_parameters_cli();
+    let human = cli
+        .run(["my-cli", "operation", "get", "--output", "human"])
+        .await;
+    assert_eq!(human.exit_code, 0, "{}", human.rendered);
+    assert!(
+        human.rendered.contains("(2 of 26 rows, offset 0, limit 2)"),
+        "{}",
+        human.rendered
+    );
+}
