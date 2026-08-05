@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.0...cli-engine-v0.8.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **auth:** retry ExecProvider spawn on transient ETXTBSY ([#84](https://github.com/godaddy/cli-engine/issues/84)) ([b2be4f3](https://github.com/godaddy/cli-engine/commit/b2be4f38bb6c7ae610fea50e55e2ec2b67abdfe1))
+* **output:** prefix pagination next_actions with the binary name ([#86](https://github.com/godaddy/cli-engine/issues/86)) ([f65ae91](https://github.com/godaddy/cli-engine/commit/f65ae91468c0e85d2ff00b1cb71990002417f44c))
+
 ## [0.8.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.7.0...cli-engine-v0.8.0) (2026-08-04)
 
 
