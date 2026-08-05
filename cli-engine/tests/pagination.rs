@@ -98,7 +98,7 @@ async fn default_limit_applies_when_neither_flag_is_passed() {
     );
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --limit 2 --offset 2"
+        "my-cli list --limit 2 --offset 2"
     );
     assert!(rendered.get("metadata").is_none(), "{}", output.rendered);
 }
@@ -131,7 +131,7 @@ async fn explicit_limit_and_offset_override_the_default_and_expose_pagination() 
     );
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --limit 2 --offset 3"
+        "my-cli list --limit 2 --offset 3"
     );
     assert_eq!(
         rendered["next_actions"][0]["description"],
@@ -184,7 +184,7 @@ async fn next_page_action_replays_other_flags_the_user_passed() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --status active --limit 2 --offset 2"
+        "my-cli list --status active --limit 2 --offset 2"
     );
 }
 
@@ -214,7 +214,7 @@ async fn next_page_action_quotes_values_with_whitespace() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --status \"in review\" --limit 2 --offset 2"
+        "my-cli list --status \"in review\" --limit 2 --offset 2"
     );
 }
 
@@ -250,7 +250,7 @@ async fn next_page_action_uses_the_real_long_flag_not_the_value_map_key() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --sort-order asc --limit 2 --offset 2"
+        "my-cli list --sort-order asc --limit 2 --offset 2"
     );
 }
 
@@ -365,7 +365,7 @@ async fn human_output_shows_pagination_summary_and_next_steps() {
         output.rendered
     );
     assert!(
-        output.rendered.contains("list --limit 2 --offset 2"),
+        output.rendered.contains("my-cli list --limit 2 --offset 2"),
         "{}",
         output.rendered
     );
@@ -433,7 +433,7 @@ async fn next_page_action_preserves_filter_expr_and_fields() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --filter \"name != 'alpha'\" --expr \"sort_by(@, &name)\" --fields name --limit 2 --offset 2"
+        "my-cli list --filter \"name != 'alpha'\" --expr \"sort_by(@, &name)\" --fields name --limit 2 --offset 2"
     );
 }
 
@@ -463,7 +463,7 @@ async fn next_page_action_replays_a_set_false_flag_as_a_bare_switch() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --no-cache --limit 2 --offset 2"
+        "my-cli list --no-cache --limit 2 --offset 2"
     );
 }
 
@@ -531,7 +531,7 @@ async fn next_page_action_replays_a_multi_value_arg_as_repeated_flags() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "list --scope a --scope b --limit 2 --offset 2"
+        "my-cli list --scope a --scope b --limit 2 --offset 2"
     );
 }
 
@@ -607,7 +607,7 @@ async fn next_page_action_escapes_shell_metacharacters_and_expansions() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        r#"list --status "a;\$(whoami)\`x\`\"y\"\\z" --limit 2 --offset 2"#
+        r#"my-cli list --status "a;\$(whoami)\`x\`\"y\"\\z" --limit 2 --offset 2"#
     );
 }
 

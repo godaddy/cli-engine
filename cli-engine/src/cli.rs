@@ -1864,11 +1864,15 @@ impl Cli {
         apply_pagination_flags(&mut middleware, &command.spec, leaf);
         let args = command_args_from_matches(leaf, &command.spec, false);
         let user_args = command_args_from_matches(leaf, &command.spec, true);
-        let pagination_command = command
-            .spec
-            .pagination
-            .is_some()
-            .then(|| pagination_command_base(&command_path, &command.spec, &user_args, &flags));
+        let pagination_command = command.spec.pagination.is_some().then(|| {
+            pagination_command_base(
+                &self.config.name,
+                &command_path,
+                &command.spec,
+                &user_args,
+                &flags,
+            )
+        });
         if let Err(err) = self.run_pre_run(&mut middleware, &command_path, &args) {
             return self.finish_run(render_cli_error(&middleware, &err, &self.config.app_id));
         }
@@ -2571,9 +2575,12 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
 }
 
 /// Replays a paginating command's own explicit args, plus the global
-/// `--filter`/`--expr`/`--fields` flags, as `--flag value` text — the base a
-/// "view the next page" [`crate::NextAction`] is built from once the
-/// response's [`crate::PaginationMeta`] is known.
+/// `--filter`/`--expr`/`--fields` flags, as `--flag value` text, prefixed
+/// with the CLI's binary name — the base a "view the next page"
+/// [`crate::NextAction`] is built from once the response's
+/// [`crate::PaginationMeta`] is known. Leading with the binary name keeps the
+/// suggested command copy-pastable rather than a fragment starting at the
+/// noun/verb path.
 ///
 /// `--filter`/`--expr`/`--fields` sit in the same output pipeline as
 /// pagination itself (filter -> paginate -> expr -> fields) and change what
@@ -2594,12 +2601,13 @@ fn apply_pagination_flags(middleware: &mut Middleware, spec: &CommandSpec, leaf:
 /// those are added by the caller once it knows the
 /// next page's offset.
 fn pagination_command_base(
+    binary_name: &str,
     command_path: &str,
     spec: &CommandSpec,
     user_args: &crate::middleware::ValueMap,
     flags: &GlobalFlags,
 ) -> String {
-    let mut parts = vec![command_path.replace(':', " ")];
+    let mut parts = vec![binary_name.to_owned(), command_path.replace(':', " ")];
     for arg in &spec.args {
         let id = arg.get_id().as_str();
         if let Some(value) = user_args.get(id) {
