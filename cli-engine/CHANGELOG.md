@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.1...cli-engine-v0.8.2) (2026-08-05)
+
+
+### Bug Fixes
+
+* **output:** render truncation footer for nested tables via a pagination sibling ([#87](https://github.com/godaddy/cli-engine/issues/87)) ([d448ce3](https://github.com/godaddy/cli-engine/commit/d448ce3750c51338abf53f19d89b79b2bb4c4773))
+
 ## [0.8.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.0...cli-engine-v0.8.1) (2026-08-05)
 
 
