@@ -2607,7 +2607,10 @@ fn pagination_command_base(
     user_args: &crate::middleware::ValueMap,
     flags: &GlobalFlags,
 ) -> String {
-    let mut parts = vec![binary_name.to_owned(), command_path.replace(':', " ")];
+    let mut parts = vec![
+        quote_pagination_value(binary_name),
+        command_path.replace(':', " "),
+    ];
     for arg in &spec.args {
         let id = arg.get_id().as_str();
         if let Some(value) = user_args.get(id) {

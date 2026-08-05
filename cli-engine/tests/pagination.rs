@@ -218,6 +218,28 @@ async fn next_page_action_quotes_values_with_whitespace() {
     );
 }
 
+#[tokio::test]
+async fn next_page_action_quotes_a_binary_name_with_whitespace() {
+    let mut cli = Cli::new(CliConfig::new("my cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_pagination(PaginationConfig {
+                default_limit: 2,
+                ..PaginationConfig::default()
+            }),
+        async |_credential, _args| Ok(CommandResult::new(json!(items()))),
+    ));
+
+    let output = cli.run(["my cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "\"my cli\" list --limit 2 --offset 2"
+    );
+}
+
 #[derive(Debug, Clone, clap::Args)]
 struct ListArgs {
     #[arg(long)]
