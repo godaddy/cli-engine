@@ -13,7 +13,7 @@ mod completion;
 mod help;
 mod tree_render;
 
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command, builder::PossibleValuesParser};
 
 use crate::{
     ActivityEmitter, Auditor, AuthProvider, Authorizer, CliCoreError, CommandMeta, CommandSpec,
@@ -1342,6 +1342,7 @@ impl Cli {
         if has_guide && self.guide_entries.is_empty() && !has_subcommand(&self.root, "guide") {
             self.root = self.root.clone().subcommand(guide_command());
         }
+        self.sync_guide_topic_values();
         self.refresh_root_long();
         self
     }
@@ -1361,8 +1362,39 @@ impl Cli {
         if !self.guide_entries.is_empty() && !has_subcommand(&self.root, "guide") {
             self.root = self.root.clone().subcommand(guide_command());
         }
+        self.sync_guide_topic_values();
         self.refresh_root_long();
         self
+    }
+
+    /// Re-attaches the `guide` subcommand's `topic` arg possible values from
+    /// the current [`Self::guide_entries`], so `<bin> guide <TAB>` completes
+    /// real topic names. Guides can arrive across several calls (config-time,
+    /// then per-module), so this re-syncs on every change rather than once.
+    ///
+    /// Declaring possible values makes clap itself reject an unrecognized
+    /// topic at parse time (exit code 2, clap's own "invalid value ...
+    /// possible values: ..." message) rather than reaching
+    /// [`crate::guide::guide_content`]'s own "unknown guide topic" error —
+    /// an intentional trade: clap's generic parse error in exchange for shell
+    /// completion, since clap has no stable way to advertise values without
+    /// also enforcing them. A no-op when there are no guides yet, leaving the
+    /// bare arg clap adds by default.
+    fn sync_guide_topic_values(&mut self) {
+        if self.guide_entries.is_empty() {
+            return;
+        }
+        let names = self
+            .guide_entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        if let Some(guide_cmd) = self.root.find_subcommand_mut("guide") {
+            let taken = std::mem::replace(guide_cmd, Command::new("guide"));
+            *guide_cmd = taken.mut_arg("topic", |arg| {
+                arg.value_parser(PossibleValuesParser::new(names))
+            });
+        }
     }
 
     /// Resolves busybox/git-style `argv[0]` dispatch before the normal pipeline.
