@@ -69,6 +69,7 @@ pub fn build_root_long(intro: &str, entries: &[ModuleHelpEntry], has_guide: bool
             "Search all commands and guides by keyword",
         ),
         ("tree", "Display full command tree"),
+        ("completion", "Generate or install shell completion scripts"),
     ];
     if has_guide {
         find_commands.push(("guide", "Built-in guides for AI agents and developers"));

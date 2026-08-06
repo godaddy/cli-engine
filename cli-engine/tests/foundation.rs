@@ -2366,11 +2366,54 @@ async fn cli_runtime_guide_command_errors_with_valid_topics() {
 
     let output = cli.run(["my-cli", "guide", "missing"]).await;
 
-    assert_eq!(output.exit_code, 1);
-    assert_eq!(
-        output.rendered,
-        "unknown guide topic \"missing\" — valid topics: deploy"
+    // The `topic` arg declares its guide names as clap possible values (so
+    // `guide <TAB>` completes them), which makes clap itself reject an
+    // unrecognized topic at parse time — exit code 2, clap's own message —
+    // rather than reaching `guide::guide_content`'s custom error.
+    assert_eq!(output.exit_code, 2);
+    assert!(
+        output.rendered.contains("invalid value 'missing'") && output.rendered.contains("deploy"),
+        "{}",
+        output.rendered
     );
+}
+
+#[tokio::test]
+async fn cli_runtime_guide_topics_are_completable_and_stay_in_sync_across_add_guides_calls() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_guides([GuideEntry {
+        name: "deploy".to_owned(),
+        summary: "Deploy safely".to_owned(),
+        content: "# Deploy\n".to_owned(),
+    }]);
+    // A second, later call (e.g. a module contributing its own guides) must
+    // also be reflected — not just the first guide-entries transition.
+    cli.add_guides([GuideEntry {
+        name: "rollback".to_owned(),
+        summary: "Roll back safely".to_owned(),
+        content: "# Rollback\n".to_owned(),
+    }]);
+
+    let script = cli.run(["my-cli", "completion", "bash"]).await;
+    assert_eq!(script.exit_code, 0, "{}", script.rendered);
+    for topic in ["deploy", "rollback"] {
+        assert!(
+            script.rendered.contains(topic),
+            "generated script should list {topic} as a completable guide topic; got: {}",
+            script.rendered
+        );
+    }
+
+    // Both topics still resolve correctly through the normal dispatch path.
+    let rollback = cli
+        .run(["my-cli", "guide", "rollback", "--output", "json"])
+        .await;
+    assert_eq!(rollback.exit_code, 0, "{}", rollback.rendered);
+    assert_eq!(rollback.rendered, "# Rollback\n");
 }
 
 #[tokio::test]
@@ -10143,7 +10186,7 @@ fn tree_node_json_shape_and_human_rendering_match_source_contract() {
             .iter()
             .map(|child| child.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["visible"]
+        vec!["visible", "completion"]
     );
 }
 

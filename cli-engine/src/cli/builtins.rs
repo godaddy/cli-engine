@@ -1,4 +1,4 @@
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValuesParser};
 use serde_json::Value;
 
 use crate::{
@@ -42,7 +42,20 @@ pub(crate) fn guide_args(matches: &ArgMatches) -> ValueMap {
 pub(crate) fn completion_command() -> Command {
     Command::new("completion")
         .about("Generate or install shell completion scripts")
-        .arg(Arg::new("shell").value_name("shell").num_args(0..=1))
+        .arg(
+            Arg::new("shell")
+                .value_name("shell")
+                .num_args(0..=1)
+                .ignore_case(true)
+                .value_parser(PossibleValuesParser::new([
+                    "bash",
+                    "zsh",
+                    "fish",
+                    "powershell",
+                    "pwsh",
+                    "elvish",
+                ])),
+        )
         .arg(
             Arg::new("install")
                 .long("install")

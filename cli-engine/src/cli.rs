@@ -13,7 +13,7 @@ mod completion;
 mod help;
 mod tree_render;
 
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgMatches, Command, builder::PossibleValuesParser};
 
 use crate::{
     ActivityEmitter, Auditor, AuthProvider, Authorizer, CliCoreError, CommandMeta, CommandSpec,
@@ -1342,6 +1342,7 @@ impl Cli {
         if has_guide && self.guide_entries.is_empty() && !has_subcommand(&self.root, "guide") {
             self.root = self.root.clone().subcommand(guide_command());
         }
+        self.sync_guide_topic_values();
         self.refresh_root_long();
         self
     }
@@ -1361,8 +1362,29 @@ impl Cli {
         if !self.guide_entries.is_empty() && !has_subcommand(&self.root, "guide") {
             self.root = self.root.clone().subcommand(guide_command());
         }
+        self.sync_guide_topic_values();
         self.refresh_root_long();
         self
+    }
+
+    /// Re-attaches the `guide` subcommand's `topic` arg possible values from
+    /// the current [`Self::guide_entries`], so shell completion knows about
+    /// guide names, which are not all registered up front.
+    fn sync_guide_topic_values(&mut self) {
+        if self.guide_entries.is_empty() {
+            return;
+        }
+        let names = self
+            .guide_entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        if let Some(guide_cmd) = self.root.find_subcommand_mut("guide") {
+            let taken = std::mem::replace(guide_cmd, Command::new("guide"));
+            *guide_cmd = taken.mut_arg("topic", |arg| {
+                arg.value_parser(PossibleValuesParser::new(names))
+            });
+        }
     }
 
     /// Resolves busybox/git-style `argv[0]` dispatch before the normal pipeline.
