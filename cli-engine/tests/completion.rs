@@ -174,6 +174,45 @@ mod completion_integration {
     }
 
     // =========================================================================
+    // (a.1) The `shell` positional declares possible values so
+    //       `<bin> completion <TAB>` suggests real shell names; parsing still
+    //       accepts them case-insensitively and via the `pwsh` alias, matching
+    //       `parse_shell`.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn completion_shell_arg_advertises_possible_values_in_generated_script() {
+        let cli = demo_cli();
+        let out = cli.run(["demo", "completion", "bash"]).await;
+        assert_eq!(out.exit_code, 0, "bash: {}", out.rendered);
+        for shell in ["bash", "zsh", "fish", "powershell", "pwsh", "elvish"] {
+            assert!(
+                out.rendered.contains(shell),
+                "generated script should list {shell} as a completable value; got: {}",
+                out.rendered
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_print_accepts_uppercase_shell_name() {
+        let cli = demo_cli();
+        let out = cli.run(["demo", "completion", "BASH"]).await;
+        assert_eq!(
+            out.exit_code, 0,
+            "possible-values arg must stay case-insensitive: {}",
+            out.rendered
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_print_accepts_pwsh_alias() {
+        let cli = demo_cli();
+        let out = cli.run(["demo", "completion", "pwsh"]).await;
+        assert_eq!(out.exit_code, 0, "pwsh: {}", out.rendered);
+    }
+
+    // =========================================================================
     // (b) Auto-detect: set $SHELL, call `completion` with no shell arg.
     // =========================================================================
 
