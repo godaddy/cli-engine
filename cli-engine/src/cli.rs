@@ -1368,18 +1368,8 @@ impl Cli {
     }
 
     /// Re-attaches the `guide` subcommand's `topic` arg possible values from
-    /// the current [`Self::guide_entries`], so `<bin> guide <TAB>` completes
-    /// real topic names. Guides can arrive across several calls (config-time,
-    /// then per-module), so this re-syncs on every change rather than once.
-    ///
-    /// Declaring possible values makes clap itself reject an unrecognized
-    /// topic at parse time (exit code 2, clap's own "invalid value ...
-    /// possible values: ..." message) rather than reaching
-    /// [`crate::guide::guide_content`]'s own "unknown guide topic" error —
-    /// an intentional trade: clap's generic parse error in exchange for shell
-    /// completion, since clap has no stable way to advertise values without
-    /// also enforcing them. A no-op when there are no guides yet, leaving the
-    /// bare arg clap adds by default.
+    /// the current [`Self::guide_entries`], so shell completion knows about
+    /// guide names, which are not all registered up front.
     fn sync_guide_topic_values(&mut self) {
         if self.guide_entries.is_empty() {
             return;

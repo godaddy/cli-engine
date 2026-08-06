@@ -233,11 +233,6 @@ The framework registers built-in commands for common CLI behavior:
 | `guide [topic]` | Guides are registered | Lists and displays embedded guides. |
 | `flags list` / `flags info <key>` | Always, unless a consumer module already registers a top-level `flags` group (the built-in group yields to it) | Inspects declared feature flags and the active policy; see [Feature Flags & Stages](#feature-flags--stages). |
 
-`guide` accepts zero or one topic. Additional positional arguments are rejected before guide content
-is rendered. The topic's registered names are declared as clap possible values, so
-`<bin> guide <TAB>` completes real topics and an unrecognized topic is rejected by clap itself
-(exit code 2) rather than reaching a command-specific error.
-
 Application `pre_run` hooks run for executable commands, including bare command groups that render
 group help, `help`, `tree`, `guide`, and auth commands. `init_deps` is narrower: it initializes
 runtime dependencies for real command execution and auth provider loading, but search/schema
