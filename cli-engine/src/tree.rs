@@ -67,7 +67,7 @@ pub fn build_tree_from_clap(command: &Command) -> TreeNode {
 fn build_tree_from_clap_with_path(command: &Command, path: String) -> TreeNode {
     let children = command
         .get_subcommands()
-        .filter(|child| !child.is_hide_set() && child.get_name() != "completion")
+        .filter(|child| !child.is_hide_set())
         .map(|child| {
             let child_path = format!("{path} {}", child.get_name());
             build_tree_from_clap_with_path(child, child_path)

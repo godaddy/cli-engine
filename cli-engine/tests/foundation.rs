@@ -10143,7 +10143,7 @@ fn tree_node_json_shape_and_human_rendering_match_source_contract() {
             .iter()
             .map(|child| child.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["visible"]
+        vec!["visible", "completion"]
     );
 }
 

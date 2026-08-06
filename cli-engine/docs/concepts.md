@@ -228,6 +228,7 @@ The framework registers built-in commands for common CLI behavior:
 | --- | --- | --- |
 | `help` | Always | Displays usage for root, groups, and commands. |
 | `tree` | Always | Displays the full command hierarchy. |
+| `completion [shell] [--install]` | Always | Prints or installs a shell completion script generated from the command tree via `clap_complete`; see [Shell Completion](completion.md). |
 | `auth login` / `auth status` / `auth logout` | Auth providers are registered or a default provider is configured | Manages credentials. |
 | `guide [topic]` | Guides are registered | Lists and displays embedded guides. |
 | `flags list` / `flags info <key>` | Always, unless a consumer module already registers a top-level `flags` group (the built-in group yields to it) | Inspects declared feature flags and the active policy; see [Feature Flags & Stages](#feature-flags--stages). |
