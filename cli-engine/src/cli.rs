@@ -1840,10 +1840,11 @@ impl Cli {
                         &self.config.app_id,
                     ));
                 }
-                return self.finish_run(CliRunOutput {
-                    exit_code: 0,
-                    rendered: group.clone().render_long_help().to_string(),
-                });
+                return self.finish_run(self.render_bare_group_discovery(
+                    group,
+                    &command_path,
+                    &middleware,
+                ));
             }
             if command_path.is_empty()
                 && let Some(root_next_actions) = &self.root_next_actions
@@ -2032,6 +2033,39 @@ impl Cli {
                 rendered: err.to_string(),
             },
         }
+    }
+
+    /// Renders a bare group invocation (no subcommand given).
+    ///
+    /// Human output keeps the existing clap help text; every other format,
+    /// explicit `--output json`/`--toon`, or the non-TTY default an agent
+    /// sees with no `--output` flag at all — gets an explicit JSON
+    /// command-tree subset scoped to this group, built with the same
+    /// [`crate::tree`] machinery as the top-level `tree` command.
+    fn render_bare_group_discovery(
+        &self,
+        group: &Command,
+        command_path: &str,
+        middleware: &Middleware,
+    ) -> CliRunOutput {
+        let format: crate::output::OutputFormat = match middleware.output_format.parse() {
+            Ok(format) => format,
+            Err(err) => {
+                return CliRunOutput {
+                    exit_code: exit_code_for_error(&err),
+                    rendered: err.to_string(),
+                };
+            }
+        };
+        if format == crate::output::OutputFormat::Human {
+            return CliRunOutput {
+                exit_code: 0,
+                rendered: group.clone().render_long_help().to_string(),
+            };
+        }
+        let path = format!("{} {}", self.config.name, command_path.replace(':', " "));
+        let tree = crate::tree::build_tree_from_clap_with_path(group, path);
+        tree_render::render_tree_envelope(tree, &self.config.app_id, middleware, format)
     }
 
     fn render_search(&self, query: &str, scope: &str, output_format: &str) -> CliRunOutput {

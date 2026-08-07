@@ -209,7 +209,10 @@ async fn bare_invocation_human_shows_help_with_next_actions() {
 async fn group_help_keeps_subcommands_but_drops_global_options() {
     let cli = consumer_cli();
 
-    let group = cli.run(["my-cli", "project"]).await;
+    // `--human` forces the interactive format (under `cargo test` stdout is
+    // not a TTY, so the default would otherwise resolve to json — see
+    // `bare_group_discovery_defaults_to_json_tree_off_a_tty` below).
+    let group = cli.run(["my-cli", "project", "--human"]).await;
     assert_eq!(group.exit_code, 0);
     // Group page lists its child commands...
     assert!(group.rendered.contains("Commands:"), "{}", group.rendered);
@@ -221,6 +224,44 @@ async fn group_help_keeps_subcommands_but_drops_global_options() {
     // Leaf commands keep their full flag set.
     let leaf = cli.run(["my-cli", "project", "list", "--help"]).await;
     assert!(leaf.rendered.contains("--fields"), "{}", leaf.rendered);
+}
+
+#[tokio::test]
+async fn bare_group_discovery_defaults_to_json_tree_off_a_tty() {
+    let cli = consumer_cli();
+
+    // No explicit `--output`/`--human`/`--json`: under `cargo test` stdout is
+    // not a TTY, so this resolves to the same JSON-tree discovery an agent
+    // gets by default.
+    let group = cli.run(["my-cli", "project"]).await;
+    assert_eq!(group.exit_code, 0, "{}", group.rendered);
+    let data =
+        &serde_json::from_str::<Value>(&group.rendered).expect("expected a JSON envelope")["data"];
+    assert_eq!(data["name"], "project");
+    assert_eq!(data["path"], "my-cli project");
+    let children = data["children"].as_array().expect("children array");
+    assert!(
+        children
+            .iter()
+            .any(|child| child["name"] == "list" && child["description"] == "List projects"),
+        "{}",
+        group.rendered
+    );
+    assert!(
+        children.iter().any(|child| child["name"] == "delete"),
+        "{}",
+        group.rendered
+    );
+}
+
+#[tokio::test]
+async fn bare_group_discovery_explicit_json_matches_tty_default() {
+    let cli = consumer_cli();
+
+    let explicit = cli.run(["my-cli", "project", "--json"]).await;
+    let default = cli.run(["my-cli", "project"]).await;
+    assert_eq!(explicit.exit_code, 0, "{}", explicit.rendered);
+    assert_eq!(explicit.rendered, default.rendered);
 }
 
 #[tokio::test]

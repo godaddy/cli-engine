@@ -4,7 +4,7 @@ use crate::{
     CliRunOutput, Envelope, Middleware,
     error::exit_code_for_error,
     output::{OutputFormat, render},
-    tree::{build_tree_from_clap, render_tree_human},
+    tree::{TreeNode, build_tree_from_clap, render_tree_human},
 };
 
 pub(crate) fn render_tree(root: &Command, app_id: &str, middleware: &Middleware) -> CliRunOutput {
@@ -24,6 +24,19 @@ pub(crate) fn render_tree(root: &Command, app_id: &str, middleware: &Middleware)
             rendered: render_tree_human(&tree),
         };
     }
+    render_tree_envelope(tree, app_id, middleware, format)
+}
+
+/// Renders a [`TreeNode`] as a JSON/TOON envelope. Shared by [`render_tree`]
+/// (the full-CLI `tree` command) and the bare-group discovery fallback,
+/// which scopes the same tree-building machinery to a single group's
+/// subtree instead of the whole CLI.
+pub(crate) fn render_tree_envelope(
+    tree: TreeNode,
+    app_id: &str,
+    middleware: &Middleware,
+    format: OutputFormat,
+) -> CliRunOutput {
     let envelope =
         Envelope::success(tree, app_id.to_owned()).prepare_for_render(&middleware.verbose);
     match render(format, &envelope) {
