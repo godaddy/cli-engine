@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.3...cli-engine-v0.8.4) (2026-08-10)
+
+
+### Features
+
+* **command:** add CommandSpec::raw_output for verbatim stdout commands ([#92](https://github.com/godaddy/cli-engine/issues/92)) ([84b0f00](https://github.com/godaddy/cli-engine/commit/84b0f007b5f6bc5bb888f5c5766c4e8c70475546))
+
 ## [0.8.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.2...cli-engine-v0.8.3) (2026-08-10)
 
 
