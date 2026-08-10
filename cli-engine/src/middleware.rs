@@ -1012,7 +1012,11 @@ impl Middleware {
         if raw_output {
             match &envelope.data {
                 Some(Value::String(text)) => {
-                    let rendered = format!("{text}\n");
+                    // Guarantee exactly one trailing newline without doubling
+                    // one the handler already included (e.g. text read from
+                    // a file that already ends in "\n").
+                    let body = text.strip_suffix('\n').unwrap_or(text);
+                    let rendered = format!("{body}\n");
                     envelope.with_context(
                         command_path,
                         &self.env,

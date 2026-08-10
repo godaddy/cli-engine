@@ -22,6 +22,15 @@ fn build_cli() -> Cli {
             .raw_output(true),
         async |_credential, _args| Ok(CommandResult::new(json!(VERBATIM))),
     ));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new(
+            "dump-pretrailed",
+            "Print verbatim text that already ends in a newline",
+        )
+        .no_auth(true)
+        .raw_output(true),
+        async |_credential, _args| Ok(CommandResult::new(json!(format!("{VERBATIM}\n")))),
+    ));
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("dump-preview", "Print verbatim text, previewably")
             .no_auth(true)
@@ -73,6 +82,16 @@ async fn raw_output_ignores_no_flag_default() {
     // No `--output`/`--json`/`--human`/`--toon` at all: TTY/env/config
     // resolution never gets a chance to matter.
     let out = build_cli().run(["my-cli", "dump"]).await;
+    assert_eq!(out.exit_code, 0, "{}", out.rendered);
+    assert_eq!(out.rendered, expected());
+}
+
+#[tokio::test]
+async fn raw_output_does_not_double_a_trailing_newline_the_handler_already_included() {
+    // Regression: the render guarantees exactly one trailing newline, so a
+    // handler string that already ends in "\n" (e.g. read from a file) must
+    // not come out as "...\n\n".
+    let out = build_cli().run(["my-cli", "dump-pretrailed"]).await;
     assert_eq!(out.exit_code, 0, "{}", out.rendered);
     assert_eq!(out.rendered, expected());
 }
