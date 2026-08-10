@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.2...cli-engine-v0.8.3) (2026-08-10)
+
+
+### Bug Fixes
+
+* **command:** preserve typed version arguments ([#90](https://github.com/godaddy/cli-engine/issues/90)) ([50f1b5f](https://github.com/godaddy/cli-engine/commit/50f1b5f7640811352ca3810e4a37038b2ae823ba))
+* **tree:** show completion built-in in tree output ([#89](https://github.com/godaddy/cli-engine/issues/89)) ([b80406e](https://github.com/godaddy/cli-engine/commit/b80406eedec579d159550c28b5a665f003a52e2a))
+
 ## [0.8.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.1...cli-engine-v0.8.2) (2026-08-05)
 
 
