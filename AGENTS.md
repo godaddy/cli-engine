@@ -239,6 +239,7 @@ Command checklist:
   command with no `.with_pagination(...)` call never registers those flags — absent from its
   `--help`, rejected as unknown arguments if passed. `default_limit` applies when the user passes
   neither flag; `max_limit` (`0` = uncapped) rejects an explicit `--limit` above the cap.
+- Use `.raw_output(true)` for a command whose only correct output is verbatim text (e.g. printing a schema/config blob to pipe to a file), not a JSON reconstruction of it. The handler's `CommandResult` data must be a JSON string; this removes the `--output`/`--fields`/`--filter`/`--expr`/pagination flags and is incompatible with streaming commands.
 
 ## Output And Schemas
 

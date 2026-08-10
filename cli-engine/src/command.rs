@@ -348,6 +348,8 @@ pub struct CommandSpec {
     /// development-time safety net, not the actual guarantee — only pair this
     /// field with one of the four context-aware constructors above.
     pub handles_dry_run: bool,
+    /// Forces this command's successful output to print verbatim to stdout.
+    pub raw_output: bool,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// Command-specific `clap` arguments.
@@ -720,6 +722,13 @@ impl CommandSpec {
         self
     }
 
+    /// Forces this command's successful output to print verbatim to stdout.
+    #[must_use]
+    pub fn raw_output(mut self, raw_output: bool) -> Self {
+        self.raw_output = raw_output;
+        self
+    }
+
     /// Builds middleware metadata from the spec.
     #[must_use]
     pub fn metadata(&self) -> CommandMeta {
@@ -1001,6 +1010,13 @@ impl RuntimeCommandSpec {
         F: Fn(CommandContext, StreamSender) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
+        debug_assert!(
+            !spec.raw_output,
+            "command {:?} sets raw_output but RuntimeCommandSpec::new_streaming writes \
+             chunked NDJSON events, which does not fit a single-verbatim-string contract; \
+             raw_output is only supported on non-streaming commands",
+            spec.name
+        );
         let streaming: StreamingCommandHandler = Arc::new(move |context, sender| {
             let future = handler(context, sender);
             Box::pin(future)
@@ -1128,6 +1144,13 @@ impl RuntimeCommandSpec {
         F: Fn(CommandContext, T, StreamSender) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
+        debug_assert!(
+            !spec.raw_output,
+            "command {:?} sets raw_output but RuntimeCommandSpec::new_typed_streaming writes \
+             chunked NDJSON events, which does not fit a single-verbatim-string contract; \
+             raw_output is only supported on non-streaming commands",
+            spec.name
+        );
         let handler = Arc::new(handler);
         let streaming: StreamingCommandHandler = Arc::new(move |context, sender| {
             let parsed = T::from_arg_matches(context.raw_matches.as_ref());
