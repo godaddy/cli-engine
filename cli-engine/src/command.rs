@@ -456,7 +456,10 @@ impl CommandSpec {
         let augmented = T::augment_args(placeholder);
         let args: Vec<Arg> = augmented
             .get_arguments()
-            .filter(|a| !matches!(a.get_id().as_str(), "help" | "version"))
+            // `cli-engine` registers its own global `--help` flag. Retain a
+            // command-specific `--version` flag: it may represent a resource
+            // version rather than the CLI binary version.
+            .filter(|arg| arg.get_id().as_str() != "help")
             .cloned()
             .collect();
         let arg_groups: Vec<ArgGroup> = augmented.get_groups().cloned().collect();
@@ -1461,5 +1464,23 @@ mod tests {
         let group = &spec.arg_groups[0];
         assert!(group.is_required_set());
         assert_eq!(group.get_args().count(), 2);
+    }
+
+    #[test]
+    fn command_spec_from_args_preserves_version_argument() {
+        #[derive(clap::Args)]
+        struct ReleaseArgs {
+            #[arg(long)]
+            version: String,
+        }
+
+        let spec = CommandSpec::from_args::<ReleaseArgs>("release", "Create a release");
+
+        assert!(
+            spec.clap_command()
+                .try_get_matches_from(["release", "--version", "1.0.0"])
+                .is_ok(),
+            "typed command arguments named `version` must remain available as `--version`"
+        );
     }
 }
