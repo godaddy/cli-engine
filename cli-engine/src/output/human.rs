@@ -1162,6 +1162,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn format_plain_value_round_trips_a_bare_string_verbatim() {
+        // No quoting/escaping — the exact convention `raw_output` bypass
+        // relies on to render a `CommandResult` string byte-for-byte.
+        assert_eq!(
+            format_plain_value(&Value::String("some\nverbatim\ntext".to_owned())),
+            "some\nverbatim\ntext"
+        );
+    }
+
+    #[test]
     fn human_output_appends_next_steps_footer() {
         let envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
             .with_next_actions(vec![NextAction::new(

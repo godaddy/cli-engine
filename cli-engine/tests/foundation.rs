@@ -63,6 +63,7 @@ fn middleware_request<'request>(
         default_fields,
         view_id: None,
         auth: auth_requirement(no_auth),
+        raw_output: false,
         pagination_command: None,
     }
 }
@@ -89,6 +90,7 @@ fn middleware_request_with_view<'request>(
         default_fields,
         view_id: Some(view_id),
         auth: auth_requirement(no_auth),
+        raw_output: false,
         pagination_command: None,
     }
 }
@@ -122,6 +124,7 @@ fn middleware_request_with_system<'request>(
         default_fields,
         view_id: None,
         auth: auth_requirement(no_auth),
+        raw_output: false,
         pagination_command: None,
     }
 }
@@ -3828,6 +3831,56 @@ fn runtime_command_spec_new_typed_panics_when_paired_with_handles_dry_run() {
             .mutates(true)
             .handles_dry_run(true),
         async |_credential: CredentialResolver, _args: EmptyArgs| Ok(CommandResult::new(json!({}))),
+    );
+}
+
+/// A single verbatim string has no pages, so pairing `raw_output` with
+/// `with_pagination` is a contract violation caught at registration time
+/// (inside `Cli::add_command`'s clap-tree build), not left as a silent
+/// no-op.
+#[test]
+#[should_panic(expected = "mutually exclusive")]
+fn raw_output_paired_with_pagination_panics_on_registration() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        app_id: "my-cli".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("bad", "Bad")
+            .no_auth(true)
+            .raw_output(true)
+            .with_pagination(PaginationConfig::default()),
+        async |_credential, _args| Ok(CommandResult::new(json!("text"))),
+    ));
+}
+
+/// Streaming writes chunked NDJSON events, which doesn't fit a
+/// single-verbatim-string contract.
+#[test]
+#[should_panic(expected = "does not fit a single-verbatim-string contract")]
+fn runtime_command_spec_new_streaming_panics_when_paired_with_raw_output() {
+    let _unused = RuntimeCommandSpec::new_streaming(
+        CommandSpec::new("bad", "Bad")
+            .no_auth(true)
+            .raw_output(true),
+        async |_context, _sender| Ok(()),
+    );
+}
+
+/// Same footgun as above, for the typed-args streaming constructor.
+#[test]
+#[should_panic(expected = "does not fit a single-verbatim-string contract")]
+fn runtime_command_spec_new_typed_streaming_panics_when_paired_with_raw_output() {
+    #[derive(Debug, Clone, clap::Args)]
+    struct EmptyArgs {}
+
+    let _unused = RuntimeCommandSpec::new_typed_streaming::<EmptyArgs, _, _>(
+        CommandSpec::new("bad", "Bad")
+            .no_auth(true)
+            .raw_output(true),
+        async |_context, _args: EmptyArgs, _sender| Ok(()),
     );
 }
 
@@ -10669,6 +10722,7 @@ async fn optional_skips_auth_when_handler_ignores_credential() {
                 default_fields: "",
                 view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
+                raw_output: false,
                 pagination_command: None,
             },
             async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
@@ -10707,6 +10761,7 @@ async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() 
                 default_fields: "",
                 view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
+                raw_output: false,
                 pagination_command: None,
             },
             async |resolver: CredentialResolver| {
@@ -10758,6 +10813,7 @@ async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
                 default_fields: "",
                 view_id: None,
                 auth: cli_engine::AuthRequirement::Optional,
+                raw_output: false,
                 pagination_command: None,
             },
             async |resolver: CredentialResolver| {

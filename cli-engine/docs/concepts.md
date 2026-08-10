@@ -560,6 +560,21 @@ the top-level `fix` field (`CliCoreError::with_fix`, `DetailedError::error_fix`,
 system, or the top-level command path when no system is configured, so error envelopes preserve the
 same backend attribution as success envelopes.
 
+### Raw output
+
+Some commands have exactly one correct output: verbatim text. For example, a command that prints a schema definition, a config file, or another blob meant to be piped straight to a file or another tool should not be wrapped in an output envelope or reformatted. `CommandSpec::raw_output(true)` opts a command into this: its successful result skips all five pipeline steps above, instead printing the handler's
+`CommandResult` data followed by exactly one trailing newline.
+
+```rust
+use cli_engine::{CommandResult, CommandSpec, RuntimeCommandSpec};
+use serde_json::json;
+
+let command = RuntimeCommandSpec::new(
+    CommandSpec::new("get", "Print the schema verbatim").raw_output(true),
+    async |_credential, _args| Ok(CommandResult::new(json!("type Query { ... }"))),
+);
+```
+
 ## Schemas
 
 Commands can publish output schemas for help text and agent comprehension. The preferred schema path

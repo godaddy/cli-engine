@@ -1926,6 +1926,7 @@ impl Cli {
                         default_fields: &default_fields,
                         view_id: view_id.as_deref(),
                         auth: command.spec.auth,
+                        raw_output: command.spec.raw_output,
                         pagination_command,
                     },
                     Arc::new(leaf.clone()),
@@ -1958,6 +1959,7 @@ impl Cli {
                     default_fields: &default_fields,
                     view_id: view_id.as_deref(),
                     auth: command.spec.auth,
+                    raw_output: command.spec.raw_output,
                     pagination_command,
                 },
                 async move |credential| {
@@ -3716,6 +3718,12 @@ fn command_clap_command_with_schema_help(
     command_path: &str,
     schemas: &SchemaRegistry,
 ) -> Command {
+    debug_assert!(
+        !(spec.raw_output && spec.pagination.is_some()),
+        "command {:?} sets both raw_output and with_pagination; a single verbatim string \
+         has no pages, so the two are mutually exclusive",
+        spec.name
+    );
     let mut command = spec.clap_command();
     command = apply_dry_run_visibility(command, spec);
     command = apply_pagination_args(command, spec);
@@ -3727,10 +3735,35 @@ fn command_clap_command_with_schema_help(
         schema.as_ref().map(|schema| schema.fields.as_slice()),
         &default_fields,
     );
-    let Some(schema) = schema else {
+    command = apply_output_format_visibility(command, spec);
+    let filter_expr_fields = schema
+        .as_ref()
+        .map_or(&[][..], |schema| schema.fields.as_slice());
+    apply_filter_and_expr_examples(command, spec, filter_expr_fields)
+}
+
+/// Hides this command's inherited `--output` flag when it opted into
+/// [`CommandSpec::raw_output`].
+fn apply_output_format_visibility(command: Command, spec: &CommandSpec) -> Command {
+    if !spec.raw_output {
         return command;
-    };
-    apply_filter_and_expr_examples(command, &schema.fields)
+    }
+    use std::io::IsTerminal;
+    command.arg(
+        Arg::new("output")
+            .long("output")
+            .short('o')
+            .value_name("FORMAT")
+            .default_value(if std::io::stdout().is_terminal() {
+                "human"
+            } else {
+                "json"
+            })
+            .conflicts_with_all(["json", "toon", "human"])
+            .display_order(crate::flags::global_flag_order::OUTPUT)
+            .hide(true)
+            .help("Ignored — this command always prints raw text"),
+    )
 }
 
 /// Hides this command's inherited `--dry-run` flag when the command isn't
@@ -3803,6 +3836,16 @@ fn apply_fields_arg(
     schema_fields: Option<&[FieldInfo]>,
     default_fields: &[&str],
 ) -> Command {
+    if spec.raw_output {
+        return command.arg(
+            Arg::new("fields")
+                .long("fields")
+                .value_name("FIELDS")
+                .display_order(crate::flags::global_flag_order::FIELDS)
+                .hide(true)
+                .help("Ignored — this command always prints raw text"),
+        );
+    }
     let default_value = spec
         .default_fields
         .as_deref()
@@ -3844,7 +3887,30 @@ fn apply_fields_arg(
 /// demonstrate. Mirrors [`apply_fields_arg`]: a subcommand-local arg of the
 /// same name shadows the framework's global one, and must carry the same
 /// `global_flag_order` value as that global one for the same reason.
-fn apply_filter_and_expr_examples(mut command: Command, fields: &[FieldInfo]) -> Command {
+fn apply_filter_and_expr_examples(
+    mut command: Command,
+    spec: &CommandSpec,
+    fields: &[FieldInfo],
+) -> Command {
+    if spec.raw_output {
+        return command
+            .arg(
+                Arg::new("filter")
+                    .long("filter")
+                    .value_name("EXPR")
+                    .display_order(crate::flags::global_flag_order::FILTER)
+                    .hide(true)
+                    .help("Ignored — this command always prints raw text"),
+            )
+            .arg(
+                Arg::new("expr")
+                    .long("expr")
+                    .value_name("EXPR")
+                    .display_order(crate::flags::global_flag_order::EXPR)
+                    .hide(true)
+                    .help("Ignored — this command always prints raw text"),
+            );
+    }
     if fields.is_empty() {
         return command;
     }

@@ -573,6 +573,10 @@ pub struct MiddlewareRequest<'request> {
     pub view_id: Option<&'request str>,
     /// Authentication requirement enforced by the engine for this command.
     pub auth: AuthRequirement,
+    /// Mirrors [`CommandSpec::raw_output`](crate::CommandSpec::raw_output):
+    /// when `true`, a successful string result renders verbatim, bypassing
+    /// the format/pipeline machinery entirely.
+    pub raw_output: bool,
     /// The invoked command replayed as `--flag value` text — command path
     /// plus every flag the user explicitly passed, using clap's own
     /// long-flag names — with `--limit`/`--offset` deliberately omitted.
@@ -615,6 +619,7 @@ impl Middleware {
             default_fields,
             view_id,
             auth,
+            raw_output,
             pagination_command,
         } = request;
         let no_auth = auth.is_none();
@@ -738,6 +743,7 @@ impl Middleware {
                 &args,
                 identity,
                 None,
+                false,
             );
         }
 
@@ -844,6 +850,7 @@ impl Middleware {
             &args,
             identity,
             pagination_command.as_deref(),
+            raw_output && !is_dry_run,
         )
     }
 
@@ -871,6 +878,7 @@ impl Middleware {
                 default_fields,
                 view_id: None,
                 auth: AuthRequirement::None,
+                raw_output: false,
                 pagination_command: None,
             },
             async move |_resolver| command().await,
@@ -969,6 +977,7 @@ impl Middleware {
                     effective_args,
                     identity,
                     None,
+                    false,
                 )
                 .map(Some);
         }
@@ -987,6 +996,7 @@ impl Middleware {
         effective_args: &ValueMap,
         identity: &str,
         pagination_command: Option<&str>,
+        raw_output: bool,
     ) -> Result<MiddlewareOutput> {
         if !is_valid_output_format(&self.output_format) {
             let err = CliCoreError::InvalidOutputFormat(self.output_format.clone());
@@ -998,6 +1008,38 @@ impl Middleware {
                 effective_args,
                 identity,
             );
+        }
+        if raw_output {
+            match &envelope.data {
+                Some(Value::String(text)) => {
+                    // Guarantee exactly one trailing newline without doubling
+                    // one the handler already included (e.g. text read from
+                    // a file that already ends in "\n").
+                    let body = text.strip_suffix('\n').unwrap_or(text);
+                    let rendered = format!("{body}\n");
+                    envelope.with_context(
+                        command_path,
+                        &self.env,
+                        identity,
+                        start.elapsed(),
+                        Some(Value::Object(user_args.clone())),
+                        Some(Value::Object(effective_args.clone())),
+                    );
+                    let prepared = envelope.prepare_for_render(&self.verbose);
+                    return Ok(MiddlewareOutput {
+                        envelope: prepared,
+                        rendered,
+                        exit_code: 0,
+                    });
+                }
+                other => {
+                    debug_assert!(
+                        false,
+                        "command {command_path:?} set raw_output but its handler returned \
+                         non-string data ({other:?}); rendering normally instead"
+                    );
+                }
+            }
         }
         let output_format = self.output_format.parse::<OutputFormat>()?;
         // The effective field selection: an explicit `--fields` wins, otherwise
