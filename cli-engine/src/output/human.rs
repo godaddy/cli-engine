@@ -95,8 +95,8 @@ impl TableColumn {
 
     /// Sets this column's header and cell alignment. Defaults to
     /// `Alignment::Left`; use `Alignment::Right` for numeric or price
-    /// columns so decimal points and digits line up instead of ragging on
-    /// the left.
+    /// columns so decimal points and digits line up instead of looking
+    /// ragged on the left.
     #[must_use]
     pub fn align(mut self, alignment: Alignment) -> Self {
         self.align = alignment;
@@ -1367,7 +1367,7 @@ mod tests {
     }
 
     #[test]
-    fn right_aligned_column_defaults_to_left() {
+    fn column_alignment_defaults_to_left() {
         let items = vec![json!({ "name": "a" }), json!({ "name": "bb" })];
         let columns = vec![TableColumn::new("name", "Name")];
 
