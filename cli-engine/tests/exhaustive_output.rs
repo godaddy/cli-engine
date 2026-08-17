@@ -1,10 +1,11 @@
 use std::{sync::Arc, thread};
 
 use cli_engine::{
-    Envelope, FieldInfo, HumanViewDef, OutputFormat, PaginationMeta, PipelineOpts, SchemaInfo,
-    TableColumn, TreeNode, apply_pipeline, filter_fields, global_human_view_registry_snapshot,
-    global_schema_registry_snapshot, is_valid_output_format, register_global_human_view,
-    register_global_schema_info, render, render_format, render_human_with_view,
+    Alignment, Envelope, FieldInfo, HumanViewDef, OutputFormat, PaginationMeta, PipelineOpts,
+    SchemaInfo, TableColumn, TreeNode, apply_pipeline, filter_fields,
+    global_human_view_registry_snapshot, global_schema_registry_snapshot, is_valid_output_format,
+    register_global_human_view, register_global_schema_info, render, render_format,
+    render_human_with_view,
 };
 use serde_json::{Value, json};
 
@@ -240,6 +241,26 @@ fn human_view_no_truncate_column_preserves_long_values_in_table_output() {
     assert!(
         !rendered.contains("..."),
         "no column in this fixture should be truncated: {rendered}"
+    );
+}
+
+#[test]
+fn human_view_right_aligned_column_lines_up_prices_in_table_output() {
+    let columns = vec![
+        TableColumn::new("period", "Period"),
+        TableColumn::new("price", "Price").align(Alignment::Right),
+    ];
+    let envelope = Envelope::success(
+        json!([
+            {"period": "1 year", "price": "71.99"},
+            {"period": "2 years", "price": "143.99"}
+        ]),
+        "domain:terms",
+    );
+
+    assert_eq!(
+        render_human_with_view(&envelope, Some(&columns), ""),
+        "PERIOD    PRICE\n-------  ------\n1 year    71.99\n2 years  143.99\n\n(2 rows)\n"
     );
 }
 

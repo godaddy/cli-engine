@@ -160,7 +160,7 @@ pub use middleware::{
 };
 pub use module::{CommandModule, Module, ModuleContext, ModuleRegister, build_module_group};
 pub use output::{
-    Envelope, ErrorEnvelope, FieldInfo, HumanViewDef, HumanViewFn, HumanViewRegistry,
+    Alignment, Envelope, ErrorEnvelope, FieldInfo, HumanViewDef, HumanViewFn, HumanViewRegistry,
     HumanViewRenderer, Metadata, NextAction, NextActionParam, OutputField, OutputFormat,
     OutputSchema, PaginationMeta, PipelineOpts, RendererFactory, SchemaInfo, SchemaRegistry,
     TableColumn, apply_pipeline, build_detailed_error_envelope, build_error_envelope, fields_for,

@@ -10,6 +10,22 @@ use serde_json::Value;
 
 use super::{Envelope, NextAction, NextActionParam, PaginationMeta};
 
+/// Column text alignment for the human table view.
+///
+/// Only affects the array/table rendering path (`render_array_with_columns`
+/// via `render_table`) — property-bag rendering (`render_object_with_columns`)
+/// prints `header: value` with no column widths to align, so alignment is a
+/// no-op there.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Alignment {
+    /// Left-aligned (the default) — appropriate for text-like columns.
+    #[default]
+    Left,
+    /// Right-aligned — use for numeric/price columns so values line up on
+    /// their least-significant digit.
+    Right,
+}
+
 /// Column definition for registered human table views.
 ///
 /// Column order is a priority order, most important first: table rendering
@@ -52,6 +68,8 @@ pub struct TableColumn {
     /// default from [`TableColumn::new`]) is a complete no-op: rendering is
     /// identical to a column with no opinion about nesting.
     pub nested: Option<Vec<TableColumn>>,
+    /// Header and cell text alignment — see [`TableColumn::align`].
+    pub align: Alignment,
 }
 
 impl TableColumn {
@@ -63,6 +81,7 @@ impl TableColumn {
             header: header.into(),
             no_truncate: false,
             nested: None,
+            align: Alignment::Left,
         }
     }
 
@@ -71,6 +90,16 @@ impl TableColumn {
     #[must_use]
     pub fn no_truncate(mut self, value: bool) -> Self {
         self.no_truncate = value;
+        self
+    }
+
+    /// Sets this column's header and cell alignment. Defaults to
+    /// `Alignment::Left`; use `Alignment::Right` for numeric or price
+    /// columns so decimal points and digits line up instead of looking
+    /// ragged on the left.
+    #[must_use]
+    pub fn align(mut self, alignment: Alignment) -> Self {
+        self.align = alignment;
         self
     }
 
@@ -834,6 +863,10 @@ fn render_array_with_columns(
             .map(|column| column.header.clone())
             .collect::<Vec<_>>(),
         &fitted,
+        &columns
+            .iter()
+            .map(|column| column.align)
+            .collect::<Vec<_>>(),
         &rows,
         pagination,
     );
@@ -932,9 +965,20 @@ fn render_array_lines(items: &[Value]) -> String {
     out
 }
 
+/// Pads `text` to `width`, on the left for `Alignment::Right` and on the
+/// right otherwise — matching how the header row is padded so a column's
+/// header and cells share the same alignment.
+fn pad_column(text: &str, width: usize, alignment: Alignment) -> String {
+    match alignment {
+        Alignment::Left => format!("{text:<width$}"),
+        Alignment::Right => format!("{text:>width$}"),
+    }
+}
+
 fn render_table(
     headers: &[String],
     widths: &[usize],
+    alignments: &[Alignment],
     rows: &[Vec<String>],
     pagination: Option<&PaginationMeta>,
 ) -> String {
@@ -943,10 +987,10 @@ fn render_table(
         if index > 0 {
             out.push_str("  ");
         }
-        out.push_str(&format!(
-            "{:<width$}",
-            header.to_uppercase(),
-            width = widths[index]
+        out.push_str(&pad_column(
+            &header.to_uppercase(),
+            widths[index],
+            alignments[index],
         ));
     }
     out.push('\n');
@@ -962,10 +1006,10 @@ fn render_table(
             if index > 0 {
                 out.push_str("  ");
             }
-            out.push_str(&format!(
-                "{:<width$}",
-                truncate(value, widths[index]),
-                width = widths[index]
+            out.push_str(&pad_column(
+                &truncate(value, widths[index]),
+                widths[index],
+                alignments[index],
             ));
         }
         out.push('\n');
@@ -1294,6 +1338,46 @@ mod tests {
         assert!(
             !out.contains(&huge_value),
             "the full pathological value should not be rendered verbatim: {out}"
+        );
+    }
+
+    #[test]
+    fn right_aligned_column_pads_header_and_cells_on_the_left() {
+        let items = vec![
+            json!({ "period": "1 year", "price": "71.99" }),
+            json!({ "period": "2 years", "price": "143.99" }),
+        ];
+        let columns = vec![
+            TableColumn::new("period", "Period"),
+            TableColumn::new("price", "Price").align(Alignment::Right),
+        ];
+
+        let (out, _notes) = render_array_with_columns(&items, &columns, 80, None);
+        let mut lines = out.lines();
+        let header_line = lines.next().expect("header line");
+        let row_lines: Vec<&str> = lines.skip(1).take(2).collect();
+
+        // "PRICE" (5 chars) right-aligned in a 6-wide column ("143.99")
+        // leaves one leading space and no trailing space.
+        assert!(header_line.ends_with(" PRICE"), "{header_line}");
+        assert!(row_lines[0].ends_with(" 71.99"), "{}", row_lines[0]);
+        assert!(row_lines[1].ends_with("143.99"), "{}", row_lines[1]);
+        // The unaligned leading column is untouched (still left-aligned).
+        assert!(header_line.starts_with("PERIOD "), "{header_line}");
+    }
+
+    #[test]
+    fn column_alignment_defaults_to_left() {
+        let items = vec![json!({ "name": "a" }), json!({ "name": "bb" })];
+        let columns = vec![TableColumn::new("name", "Name")];
+
+        let (out, _notes) = render_array_with_columns(&items, &columns, 80, None);
+        let mut lines = out.lines();
+        let header_line = lines.next().expect("header line");
+
+        assert!(
+            header_line.starts_with("NAME"),
+            "Alignment::Left is the default: {header_line}"
         );
     }
 
