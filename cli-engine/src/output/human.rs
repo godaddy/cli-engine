@@ -492,6 +492,23 @@ fn dynamic_columns(fields: &str, natural_keys: impl FnOnce() -> Vec<String>) -> 
         .collect()
 }
 
+/// True when at least one item has a JSON number at `field`, and no item
+/// with a present, non-null value at `field` holds anything else.
+fn column_is_all_numeric(items: &[Value], field: &str) -> bool {
+    let mut saw_number = false;
+    for item in items {
+        match item
+            .as_object()
+            .and_then(|map| resolve_field_path(map, field))
+        {
+            Some(Value::Number(_)) => saw_number = true,
+            Some(Value::Null) | None => {}
+            Some(_) => return false,
+        }
+    }
+    saw_number
+}
+
 /// Appends footer hints for truncated cells and/or hidden columns to `out`
 /// (a no-op when neither happened). Mirrors `append_next_actions`: writes
 /// directly into `out` rather than building a separate string.
@@ -953,7 +970,16 @@ fn render_array(
     if !items.iter().all(Value::is_object) {
         return (render_array_lines(items), RenderNotes::default());
     }
-    let columns = dynamic_columns(fields, || first_map.keys().cloned().collect());
+    let columns: Vec<TableColumn> = dynamic_columns(fields, || first_map.keys().cloned().collect())
+        .into_iter()
+        .map(|column| {
+            if column_is_all_numeric(items, &column.field) {
+                column.align(Alignment::Right)
+            } else {
+                column
+            }
+        })
+        .collect();
     render_array_with_columns(items, &columns, available_width, pagination)
 }
 
@@ -1608,6 +1634,49 @@ mod tests {
             vec!["currency", "domain"],
             "no fields signal at all: alphabetical is the only order available"
         );
+    }
+
+    #[test]
+    fn no_view_array_rendering_right_aligns_a_column_that_is_numeric_on_every_row() {
+        let items = vec![
+            json!({ "name": "small", "count": 3 }),
+            json!({ "name": "bigger", "count": 42 }),
+        ];
+
+        let (out, _notes) = render_array(&items, "name,count", 80, None);
+        let mut lines = out.lines();
+        let header_line = lines.next().expect("header line");
+        let row_lines: Vec<&str> = lines.skip(1).take(2).collect();
+
+        assert!(header_line.ends_with(" COUNT"), "{header_line}");
+        assert!(row_lines[0].ends_with("   3"), "{}", row_lines[0]);
+        assert!(row_lines[1].ends_with("  42"), "{}", row_lines[1]);
+        assert!(header_line.starts_with("NAME "), "{header_line}");
+    }
+
+    #[test]
+    fn no_view_array_rendering_keeps_a_mixed_type_column_left_aligned() {
+        // Same field is a number on one row and a string on another — a
+        // single non-number value anywhere disqualifies the whole column,
+        // matching how right-aligning it would look ragged next to text.
+        let items = vec![json!({ "code": 1 }), json!({ "code": "default" })];
+
+        let (out, _notes) = render_array(&items, "", 80, None);
+        let header_line = out.lines().next().expect("header line");
+
+        assert!(header_line.starts_with("CODE"), "{header_line}");
+    }
+
+    #[test]
+    fn no_view_array_rendering_keeps_an_all_null_column_left_aligned() {
+        // No row ever has a number at this field, so there's no positive
+        // signal to right-align on.
+        let items = vec![json!({ "note": null }), json!({ "note": null })];
+
+        let (out, _notes) = render_array(&items, "", 80, None);
+        let header_line = out.lines().next().expect("header line");
+
+        assert!(header_line.starts_with("NOTE"), "{header_line}");
     }
 
     #[test]

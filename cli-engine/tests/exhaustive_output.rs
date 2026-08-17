@@ -265,6 +265,27 @@ fn human_view_right_aligned_column_lines_up_prices_in_table_output() {
 }
 
 #[test]
+fn human_view_with_no_registered_view_auto_right_aligns_a_numeric_column() {
+    // No TableColumn list at all — this is the fallback/dynamic-column path
+    // a command falls into when it never calls `.with_view(...)`. A field
+    // that's a JSON number on every row (here, an endpoint count) should
+    // still line up on the right, matching what an explicit view would get
+    // from `.align(Alignment::Right)`.
+    let envelope = Envelope::success(
+        json!([
+            {"domain": "commerce", "endpoints": 3},
+            {"domain": "domains", "endpoints": 42}
+        ]),
+        "api:domain:list",
+    );
+
+    assert_eq!(
+        render_human_with_view(&envelope, None, "domain,endpoints"),
+        "DOMAIN    ENDPOINTS\n--------  ---------\ncommerce          3\ndomains          42\n\n(2 rows)\n"
+    );
+}
+
+#[test]
 fn global_registries_tolerate_repeated_and_concurrent_registration() {
     let prefix = format!(
         "concurrent:{}:{:?}",
