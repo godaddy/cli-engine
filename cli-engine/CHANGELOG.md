@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.4...cli-engine-v0.8.5) (2026-08-17)
+
+
+### Features
+
+* **command:** Add bare group help Json output support ([#78](https://github.com/godaddy/cli-engine/issues/78)) ([94444ab](https://github.com/godaddy/cli-engine/commit/94444ab330e16aa0ce6aaf48328edd484bf7b0b1))
+* **output:** add TableColumn::align for right-aligned table columns ([#94](https://github.com/godaddy/cli-engine/issues/94)) ([2d2bf27](https://github.com/godaddy/cli-engine/commit/2d2bf27789004fe7bb45f8b43e1ce8717aa64d66))
+
 ## [0.8.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.3...cli-engine-v0.8.4) (2026-08-10)
 
 
