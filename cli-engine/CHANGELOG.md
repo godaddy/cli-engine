@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.5...cli-engine-v0.8.6) (2026-08-18)
+
+
+### Features
+
+* **output:** auto-right-align numeric columns in the no-view fallback path ([#96](https://github.com/godaddy/cli-engine/issues/96)) ([e4106c5](https://github.com/godaddy/cli-engine/commit/e4106c5d6e829cb7cf9380b2924245e8fde37270))
+
 ## [0.8.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.4...cli-engine-v0.8.5) (2026-08-17)
 
 
