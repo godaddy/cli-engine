@@ -701,6 +701,95 @@ mod tests {
     }
 
     #[test]
+    fn build_error_envelope_surfaces_next_actions_from_a_detailed_error() {
+        use crate::error::DetailedError;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("'/businesses' matches 2 operations")]
+        struct Ambiguous;
+
+        impl DetailedError for Ambiguous {
+            fn error_code(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("AMBIGUOUS_MATCH")
+            }
+
+            fn error_system(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_request_id(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_next_actions(&self) -> Vec<NextAction> {
+                vec![
+                    NextAction::new(
+                        "api operation get /businesses --method GET",
+                        "Get all businesses",
+                    ),
+                    NextAction::new(
+                        "api operation get /businesses --method POST",
+                        "Create a new business",
+                    ),
+                ]
+            }
+        }
+
+        // Mirrors the real path: a handler converts its `DetailedError` into a
+        // `CliCoreError` (type-erasing it), then the middleware renders that
+        // through `build_error_envelope` — never `build_detailed_error_envelope`.
+        let err = crate::CliCoreError::with_detailed_error(Ambiguous);
+        let envelope = build_error_envelope(&err, "api");
+
+        assert_eq!(
+            envelope.error.as_ref().map(|e| e.code.as_str()),
+            Some("AMBIGUOUS_MATCH")
+        );
+        assert_eq!(envelope.next_actions.len(), 2);
+        assert_eq!(
+            envelope.next_actions[0].command,
+            "api operation get /businesses --method GET"
+        );
+        assert_eq!(
+            envelope.next_actions[1].command,
+            "api operation get /businesses --method POST"
+        );
+    }
+
+    #[test]
+    fn build_detailed_error_envelope_surfaces_next_actions() {
+        use crate::error::DetailedError;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("not found")]
+        struct NotFound;
+
+        impl DetailedError for NotFound {
+            fn error_code(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("NOT_FOUND")
+            }
+
+            fn error_system(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_request_id(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_next_actions(&self) -> Vec<NextAction> {
+                vec![NextAction::new("app list", "List applications")]
+            }
+        }
+
+        let err = NotFound;
+        let envelope = build_detailed_error_envelope(&err, "applications");
+
+        assert_eq!(envelope.next_actions.len(), 1);
+        assert_eq!(envelope.next_actions[0].command, "app list");
+    }
+
+    #[test]
     fn success_envelope_ignores_with_fix() {
         let envelope = Envelope::success(json!({"ok": true}), "api").with_fix("should not stick");
 

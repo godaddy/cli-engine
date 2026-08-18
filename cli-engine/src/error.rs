@@ -371,6 +371,45 @@ mod tests {
     }
 
     #[test]
+    fn with_detailed_error_captures_next_actions_before_erasure() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("'/businesses' matches 2 operations")]
+        struct Ambiguous;
+
+        impl DetailedError for Ambiguous {
+            fn error_code(&self) -> Cow<'static, str> {
+                Cow::Borrowed("AMBIGUOUS_MATCH")
+            }
+
+            fn error_system(&self) -> Option<Cow<'static, str>> {
+                None
+            }
+
+            fn error_request_id(&self) -> Option<Cow<'static, str>> {
+                None
+            }
+
+            fn error_next_actions(&self) -> Vec<NextAction> {
+                vec![NextAction::new(
+                    "api operation get /businesses --method GET",
+                    "Get all businesses",
+                )]
+            }
+        }
+
+        let err = CliCoreError::with_detailed_error(Ambiguous);
+        assert!(matches!(err, CliCoreError::Detailed { .. }));
+        let CliCoreError::Detailed { next_actions, .. } = &err else {
+            unreachable!("just asserted this is Detailed");
+        };
+        assert_eq!(next_actions.len(), 1);
+        assert_eq!(
+            next_actions[0].command,
+            "api operation get /businesses --method GET"
+        );
+    }
+
+    #[test]
     fn empty_with_fix_does_not_wrap() {
         let inner = CliCoreError::message_for_system("auth", "not logged in");
         let err = CliCoreError::with_fix("", inner);
