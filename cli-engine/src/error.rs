@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use thiserror::Error;
 
+use crate::NextAction;
+
 /// Crate-wide result type.
 pub type Result<T> = std::result::Result<T, CliCoreError>;
 
@@ -22,6 +24,10 @@ pub trait DetailedError: std::error::Error {
     /// Optional recovery hint for the envelope's top-level `fix` (defaults to [`None`]).
     fn error_fix(&self) -> Option<Cow<'static, str>> {
         None
+    }
+    /// Structured follow-up actions for the envelope's `next_actions` (defaults to empty).
+    fn error_next_actions(&self) -> Vec<NextAction> {
+        Vec::new()
     }
 }
 
@@ -76,6 +82,11 @@ pub enum CliCoreError {
         system: String,
         /// Optional request id.
         request_id: String,
+        /// Structured follow-up actions captured from the source's
+        /// [`DetailedError::error_next_actions`] at wrap time — the source is
+        /// erased to `Box<dyn Error>` immediately below, so this can't be
+        /// recovered later by downcasting.
+        next_actions: Vec<NextAction>,
         /// Source error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -188,12 +199,14 @@ impl CliCoreError {
             .error_request_id()
             .map_or_else(String::new, Cow::into_owned);
         let fix = source.error_fix().map_or_else(String::new, Cow::into_owned);
+        let next_actions = source.error_next_actions();
         Self::with_fix(
             fix,
             Self::Detailed {
                 code,
                 system,
                 request_id,
+                next_actions,
                 source: Box::new(source),
             },
         )
