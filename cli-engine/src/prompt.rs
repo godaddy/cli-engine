@@ -22,7 +22,10 @@ pub fn prompt_text(message: &str, default: Option<&str>) -> crate::Result<String
     if let Some(d) = default {
         prompt = prompt.with_default(d);
     }
-    prompt.prompt().map_err(inquire_error_to_cli)
+    prompt
+        .prompt()
+        .map(|s| s.trim().to_owned())
+        .map_err(inquire_error_to_cli)
 }
 
 /// Prompt the user for a free-text string with input validation.
@@ -48,7 +51,10 @@ pub fn prompt_text_with_validation(
             Err(msg) => inquire::validator::Validation::Invalid(msg.into()),
         })
     });
-    prompt.prompt().map_err(inquire_error_to_cli)
+    prompt
+        .prompt()
+        .map(|s| s.trim().to_owned())
+        .map_err(inquire_error_to_cli)
 }
 
 /// Prompt the user to select one option from a list.
@@ -126,8 +132,9 @@ pub fn prompt_multi_select(
 /// declaration order), appends them to the original args, and returns `Some`
 /// with the augmented arg list so the caller can re-parse.
 ///
-/// Returns `None` if recovery is not possible (non-interactive, not a missing
-/// arg error, or the user cancelled a prompt).
+/// Returns `None` if recovery is not possible (non-interactive or not a
+/// missing-arg error). Returns `Some(RecoveryResult::Cancelled { .. })` if
+/// the user cancels mid-prompt.
 ///
 /// # Arguments
 ///
@@ -190,10 +197,21 @@ pub fn try_recover_missing_args(
         };
 
         // Append the prompted value to args.
+        let start = prompted_args.len();
         if let Some(arg) = arg_def {
             if let Some(long) = arg.get_long() {
-                prompted_args.push(format!("--{long}"));
-                prompted_args.push(value.clone());
+                if matches!(
+                    arg.get_action(),
+                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+                ) {
+                    // Boolean flags: clap expects `--flag` alone, no value.
+                    if value == "true" {
+                        prompted_args.push(format!("--{long}"));
+                    }
+                } else {
+                    prompted_args.push(format!("--{long}"));
+                    prompted_args.push(value.clone());
+                }
             } else {
                 prompted_args.push(value.clone());
             }
@@ -201,7 +219,8 @@ pub fn try_recover_missing_args(
             prompted_args.push(value.clone());
         }
 
-        already_supplied.extend(prompted_args.last().cloned());
+        // Track all tokens added this iteration for the resume command.
+        already_supplied.extend_from_slice(&prompted_args[start..]);
     }
 
     let mut augmented = original_args.to_vec();
@@ -419,18 +438,28 @@ mod tests {
 
     #[test]
     fn try_recover_returns_none_when_non_interactive() {
-        let cmd =
-            clap::Command::new("test").arg(clap::Arg::new("name").long("name").required(true));
+        // Build a command that knows about --non-interactive (like the real CLI)
+        // so clap produces a MissingRequiredArgument error, not UnknownArgument.
+        let cmd = clap::Command::new("test")
+            .arg(clap::Arg::new("name").long("name").required(true))
+            .arg(
+                clap::Arg::new("non-interactive")
+                    .long("non-interactive")
+                    .action(clap::ArgAction::SetTrue),
+            );
         let err = cmd
             .try_get_matches_from(["test", "--non-interactive"])
-            .expect_err("should fail");
+            .expect_err("should fail with missing --name");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
         let args: Vec<String> = vec!["test".into(), "--non-interactive".into()];
-        let result = try_recover_missing_args(
-            &err,
-            &args,
-            &clap::Command::new("test").arg(clap::Arg::new("name").long("name").required(true)),
-            "test",
-        );
+        let lookup_cmd = clap::Command::new("test")
+            .arg(clap::Arg::new("name").long("name").required(true))
+            .arg(
+                clap::Arg::new("non-interactive")
+                    .long("non-interactive")
+                    .action(clap::ArgAction::SetTrue),
+            );
+        let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test");
         assert!(result.is_none());
     }
 }

@@ -4,13 +4,22 @@ use std::io::IsTerminal;
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
 /// Returns `true` when the process appears to be running interactively:
-/// stderr is a TTY and no well-known CI environment variable is set.
+/// stdin and stderr are both TTYs and no well-known CI environment variable
+/// is set.
+///
+/// Checking stdin ensures that piped input (`echo "" | gddy ...`) is detected
+/// as non-interactive. Checking stderr ensures prompts can be displayed (since
+/// `inquire` renders to stderr). Stdout is intentionally not checked — a user
+/// piping output (`gddy ... | jq`) still has an interactive terminal for
+/// prompts.
 ///
 /// Used as the default for `GlobalFlags::interactive` when the user does not
 /// pass `--interactive` or `--non-interactive` explicitly.
 #[must_use]
 pub fn detect_interactive() -> bool {
-    std::io::stderr().is_terminal() && std::env::var_os("CI").is_none()
+    std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal()
+        && std::env::var_os("CI").is_none()
 }
 
 /// Interactivity mode for a CLI invocation.
