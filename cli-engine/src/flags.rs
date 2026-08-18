@@ -3,6 +3,49 @@ use std::io::IsTerminal;
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
+/// Returns `true` when the process appears to be running interactively:
+/// stderr is a TTY and no well-known CI environment variable is set.
+///
+/// Used as the default for `GlobalFlags::interactive` when the user does not
+/// pass `--interactive` or `--non-interactive` explicitly.
+#[must_use]
+pub fn detect_interactive() -> bool {
+    std::io::stderr().is_terminal() && std::env::var_os("CI").is_none()
+}
+
+/// Interactivity mode for a CLI invocation.
+///
+/// Commands and middleware can inspect this to decide whether to prompt for
+/// missing inputs, display progress spinners, or fall back to error messages
+/// suitable for scripts and CI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractivityMode {
+    /// The user explicitly requested interactive prompts (`--interactive`), or
+    /// the process is running in a TTY without CI indicators.
+    Interactive,
+    /// The user explicitly disabled prompts (`--non-interactive`), or the
+    /// process is running in a non-TTY / CI context.
+    NonInteractive,
+}
+
+impl InteractivityMode {
+    /// Returns `true` when prompts and interactive flows are appropriate.
+    #[must_use]
+    pub fn is_interactive(self) -> bool {
+        self == Self::Interactive
+    }
+}
+
+impl From<bool> for InteractivityMode {
+    fn from(interactive: bool) -> Self {
+        if interactive {
+            Self::Interactive
+        } else {
+            Self::NonInteractive
+        }
+    }
+}
+
 /// Parsed framework-global flags.
 ///
 /// Applications can add their own global flags, but these are the built-in
@@ -31,6 +74,9 @@ pub struct GlobalFlags {
     pub debug: String,
     /// Credential storage override from `--credential-store`, if supplied.
     pub credential_store: Option<crate::config::CredentialStore>,
+    /// Interactivity mode: `true` enables prompts for missing inputs,
+    /// `false` disables them. Auto-detected from TTY when neither flag is given.
+    pub interactive: bool,
 }
 
 impl Default for GlobalFlags {
@@ -47,6 +93,7 @@ impl Default for GlobalFlags {
             timeout: "0s".to_owned(),
             debug: String::new(),
             credential_store: None,
+            interactive: detect_interactive(),
         }
     }
 }
@@ -103,8 +150,9 @@ pub(crate) mod global_flag_order {
     pub(crate) const JSON: usize = 1013;
     pub(crate) const TOON: usize = 1014;
     pub(crate) const HUMAN: usize = 1015;
-    pub(crate) const REASON: usize = 1016;
-    pub(crate) const ENV: usize = 1017;
+    pub(crate) const INTERACTIVE: usize = 1016;
+    pub(crate) const REASON: usize = 1017;
+    pub(crate) const ENV: usize = 1018;
 }
 
 /// Registers framework-global flags on a `clap` command.
@@ -243,6 +291,26 @@ pub fn register_global_flags(command: Command) -> Command {
                 .value_name("MODE")
                 .value_parser(|s: &str| s.parse::<crate::config::CredentialStore>())
                 .help("Credential storage: auto|keyring|file (overrides env and config)"),
+        )
+        .arg(
+            Arg::new("interactive")
+                .long("interactive")
+                .short('i')
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with("non-interactive")
+                .display_order(global_flag_order::INTERACTIVE)
+                .help("Force interactive prompts for missing inputs (default when TTY is detected)"),
+        )
+        .arg(
+            Arg::new("non-interactive")
+                .long("non-interactive")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with("interactive")
+                .hide(true)
+                .display_order(global_flag_order::INTERACTIVE)
+                .help("Disable interactive prompts; fail on missing required inputs"),
         )
         .arg(
             Arg::new("json")
@@ -511,6 +579,13 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
         credential_store: matches
             .get_one::<crate::config::CredentialStore>("credential-store")
             .copied(),
+        interactive: if matches.get_flag("non-interactive") {
+            false
+        } else if matches.get_flag("interactive") {
+            true
+        } else {
+            detect_interactive()
+        },
     }
 }
 
@@ -851,5 +926,61 @@ mod tests {
             help_text(&["testcli", "sub", "-h"]),
             help_text(&["testcli", "sub", "--help"])
         );
+    }
+
+    #[test]
+    fn interactivity_mode_from_bool() {
+        use super::InteractivityMode;
+        assert_eq!(
+            InteractivityMode::from(true),
+            InteractivityMode::Interactive
+        );
+        assert_eq!(
+            InteractivityMode::from(false),
+            InteractivityMode::NonInteractive
+        );
+        assert!(InteractivityMode::Interactive.is_interactive());
+        assert!(!InteractivityMode::NonInteractive.is_interactive());
+    }
+
+    #[test]
+    fn interactive_flag_parsing_explicit_interactive() {
+        use super::global_flags_from_matches;
+        let cmd = register_global_flags(Command::new("test"));
+        let matches = cmd
+            .try_get_matches_from(["test", "--interactive"])
+            .expect("should parse");
+        let flags = global_flags_from_matches(&matches, "json");
+        assert!(flags.interactive);
+    }
+
+    #[test]
+    fn interactive_flag_parsing_explicit_non_interactive() {
+        use super::global_flags_from_matches;
+        let cmd = register_global_flags(Command::new("test"));
+        let matches = cmd
+            .try_get_matches_from(["test", "--non-interactive"])
+            .expect("should parse");
+        let flags = global_flags_from_matches(&matches, "json");
+        assert!(!flags.interactive);
+    }
+
+    #[test]
+    fn interactive_flag_conflicts() {
+        let cmd = register_global_flags(Command::new("test"));
+        let result = cmd.try_get_matches_from(["test", "--interactive", "--non-interactive"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_interactive_returns_bool() {
+        // In CI (where these tests run), CI env var is set, so this returns
+        // false. Locally in a TTY without CI, it returns true. Either way,
+        // we verify it doesn't panic and returns a consistent result.
+        let result = super::detect_interactive();
+        // When CI env var is set, detection should return false.
+        if std::env::var_os("CI").is_some() {
+            assert!(!result);
+        }
     }
 }

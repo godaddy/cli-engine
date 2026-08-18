@@ -1696,13 +1696,41 @@ impl Cli {
             });
         }
 
-        let matches = match self.root.clone().try_get_matches_from(clap_args) {
+        let matches = match self.root.clone().try_get_matches_from(&clap_args) {
             Ok(matches) => matches,
             Err(err) => {
-                return self.finish_run(CliRunOutput {
-                    exit_code: err.exit_code(),
-                    rendered: err.to_string(),
-                });
+                // Attempt interactive recovery for missing required arguments.
+                if let Some(recovery) = crate::prompt::try_recover_missing_args(
+                    &err,
+                    &clap_args,
+                    &self.root,
+                    &self.config.name,
+                ) {
+                    match recovery {
+                        crate::prompt::RecoveryResult::Recovered { args } => {
+                            match self.root.clone().try_get_matches_from(args) {
+                                Ok(m) => m,
+                                Err(retry_err) => {
+                                    return self.finish_run(CliRunOutput {
+                                        exit_code: retry_err.exit_code(),
+                                        rendered: retry_err.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        crate::prompt::RecoveryResult::Cancelled { resume } => {
+                            return self.finish_run(CliRunOutput {
+                                exit_code: 130,
+                                rendered: format!("Cancelled. Resume with:\n  {resume}\n"),
+                            });
+                        }
+                    }
+                } else {
+                    return self.finish_run(CliRunOutput {
+                        exit_code: err.exit_code(),
+                        rendered: err.to_string(),
+                    });
+                }
             }
         };
 
@@ -2583,6 +2611,7 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
     middleware.schema = flags.schema;
     middleware.timeout = timeout;
     middleware.debug = flags.debug.clone();
+    middleware.interactive = flags.interactive;
 }
 
 /// Sets `middleware.limit`/`middleware.offset` from a paginating command's own
