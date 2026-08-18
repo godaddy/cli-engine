@@ -174,9 +174,7 @@ pub fn try_recover_missing_args(
     let mut already_supplied: Vec<String> = original_args.to_vec();
 
     for raw_name in &missing_names {
-        let clean_name = raw_name
-            .trim_start_matches('-')
-            .trim_matches(['<', '>', '[', ']']);
+        let clean_name = strip_arg_decoration(raw_name);
         let arg_def = leaf_command.get_arguments().find(|a| {
             a.get_id().as_str() == clean_name
                 || a.get_long().is_some_and(|l| l == clean_name)
@@ -306,6 +304,14 @@ fn infer_and_prompt(message: &str, arg_def: Option<&clap::Arg>) -> crate::Result
     prompt_text(message, None)
 }
 
+/// Strip clap decoration (`--`, `<>`, `[]`) from a raw arg identifier,
+/// yielding the bare name (e.g. `"--team-name"` → `"team-name"`,
+/// `"<domain>"` → `"domain"`).
+fn strip_arg_decoration(raw: &str) -> &str {
+    raw.trim_start_matches('-')
+        .trim_matches(['<', '>', '[', ']'])
+}
+
 /// Format a human-friendly prompt message from a raw clap arg identifier.
 fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String {
     if let Some(arg) = arg_def
@@ -313,10 +319,7 @@ fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String 
     {
         return help;
     }
-    let clean = raw_name
-        .trim_start_matches('-')
-        .trim_matches(['<', '>', '[', ']']);
-    clean.replace('-', " ")
+    strip_arg_decoration(raw_name).replace('-', " ")
 }
 
 /// Build a resume command string from the already-supplied args.

@@ -4,8 +4,7 @@ use std::io::IsTerminal;
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
 /// Returns `true` when the process appears to be running interactively:
-/// stdin and stderr are both TTYs and no well-known CI environment variable
-/// is set.
+/// stdin and stderr are both TTYs.
 ///
 /// Checking stdin ensures that piped input (`echo "" | gddy ...`) is detected
 /// as non-interactive. Checking stderr ensures prompts can be displayed (since
@@ -17,9 +16,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 /// pass `--interactive` or `--non-interactive` explicitly.
 #[must_use]
 pub fn detect_interactive() -> bool {
-    std::io::stdin().is_terminal()
-        && std::io::stderr().is_terminal()
-        && std::env::var_os("CI").is_none()
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
 /// Interactivity mode for a CLI invocation.
@@ -982,14 +979,14 @@ mod tests {
     }
 
     #[test]
-    fn detect_interactive_returns_bool() {
-        // In CI (where these tests run), CI env var is set, so this returns
-        // false. Locally in a TTY without CI, it returns true. Either way,
-        // we verify it doesn't panic and returns a consistent result.
+    fn detect_interactive_is_consistent_with_tty_state() {
+        // detect_interactive checks stdin + stderr TTY state.
+        // In CI (no real TTY), both are typically non-terminals → false.
+        // Locally in a real terminal, both are terminals → true.
+        // Either way, it should not panic and should be consistent.
         let result = super::detect_interactive();
-        // When CI env var is set, detection should return false.
-        if std::env::var_os("CI").is_some() {
-            assert!(!result);
-        }
+        let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        assert_eq!(result, stdin_tty && stderr_tty);
     }
 }
