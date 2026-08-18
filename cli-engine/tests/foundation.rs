@@ -9148,7 +9148,7 @@ fn human_renderer_preserves_json_number_text() {
 
     assert_eq!(
         rendered,
-        "NAME   RATIO  SCORE\n-----  -----  -----\nalpha  1.0    1.25 \n\n(1 rows)\n"
+        "NAME   RATIO  SCORE\n-----  -----  -----\nalpha    1.0   1.25\n\n(1 rows)\n"
     );
 }
 
@@ -9164,7 +9164,7 @@ fn human_renderer_formats_non_integer_json_floats_with_serde_json_text() {
 
     assert_eq!(
         render(OutputFormat::Human, &envelope).expect("floats should render"),
-        "NAME   SCORE    \n-----  ---------\nlarge  1000000.5\nsmall  1.2345e-7\n\n(2 rows)\n"
+        "NAME       SCORE\n-----  ---------\nlarge  1000000.5\nsmall  1.2345e-7\n\n(2 rows)\n"
     );
 }
 
