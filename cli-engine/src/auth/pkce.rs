@@ -14,7 +14,8 @@
 //!   keychain backend is unavailable.
 //! - `File`: never contact the keychain; store unencrypted JSON under
 //!   `<config-base>/<app>/credentials/<provider>-<env>.json`, where
-//!   `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
+//!   `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/Library/Application
+//!   Support` (macOS), `$HOME/.config` (other Unix), or `%APPDATA%` (Windows).
 //!
 //! See [`CredentialStore`](crate::config::CredentialStore). A backend can also be
 //! injected directly with

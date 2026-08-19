@@ -25,23 +25,31 @@ fn home_config_dir() -> Option<PathBuf> {
     env_path("HOME").map(|home| home.join(".config"))
 }
 
+/// macOS-idiomatic `$HOME/Library/Application Support`, if `HOME` is set.
+fn home_application_support_dir() -> Option<PathBuf> {
+    env_path("HOME").map(|home| home.join("Library").join("Application Support"))
+}
+
 /// Resolves the per-user base directory for an app's config and data files.
 ///
-/// Returns `$XDG_CONFIG_HOME` when set, else `$HOME/.config` (or `%APPDATA%` on
-/// Windows). Only absolute paths are accepted; a relative value is rejected so
-/// files never land relative to the current working directory.
+/// Returns `$XDG_CONFIG_HOME` when set, else the platform-idiomatic default:
+/// `$HOME/Library/Application Support` on macOS, `%APPDATA%` on Windows, or
+/// `$HOME/.config` elsewhere. Only absolute paths are accepted; a relative
+/// value is rejected so files never land relative to the current working
+/// directory.
 #[must_use]
 pub fn config_base_dir() -> Option<PathBuf> {
     env_path("XDG_CONFIG_HOME")
         .or_else(|| {
             // On Windows prefer APPDATA over HOME/.config: HOME is often set by
             // Git Bash/MSYS shells and would place files in a non-standard
-            // location. On all other platforms prefer XDG-conventional
-            // HOME/.config, falling back to APPDATA only as a last resort.
-            // `cfg!(windows)` keeps both branches compiled (and type-checked)
-            // on every platform.
+            // location. On macOS prefer the idiomatic Application Support
+            // directory over XDG-conventional HOME/.config. `cfg!(...)` keeps
+            // every branch compiled (and type-checked) on all platforms.
             if cfg!(windows) {
                 env_path("APPDATA").or_else(home_config_dir)
+            } else if cfg!(target_os = "macos") {
+                home_application_support_dir().or_else(home_config_dir)
             } else {
                 home_config_dir().or_else(|| env_path("APPDATA"))
             }
@@ -252,6 +260,19 @@ mod tests {
         with_xdg_config_home(&dir, || {
             assert_eq!(config_base_dir(), Some(dir.clone()));
         });
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn config_base_dir_defaults_to_application_support_on_macos() {
+        let home = std::env::temp_dir().join("cli-engine-fs-macos-test");
+        let _lock = lock();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", None);
+        let _home = EnvVarGuard::set("HOME", Some(&home));
+        assert_eq!(
+            config_base_dir(),
+            Some(home.join("Library").join("Application Support"))
+        );
     }
 
     #[test]
