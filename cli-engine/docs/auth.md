@@ -237,7 +237,7 @@ Tokens are persisted through the injectable `CredentialStorage` trait rather tha
 
 - **`keyring`** (`KeyringStorage`, default) — system keychain only (macOS Keychain, Linux Secret Service, Windows Credential Manager). A keychain failure is a hard error; no file is written.
 - **`auto`** (`AutoStorage`) — try the keychain, and transparently fall back to an unencrypted file when the keychain backend is unavailable.
-- **`file`** (`FileStorage`) — never contact the keychain. Tokens are written as **unencrypted JSON** to `<config-base>/<app_id>/credentials/<provider>-<env>.json` (`0600` on Unix), where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`.
+- **`file`** (`FileStorage`) — never contact the keychain. Tokens are written as **unencrypted JSON** to `<config-base>/<app_id>/credentials/<provider>-<env>.json` (`0600` on Unix), where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/Library/Application Support` (macOS), `$HOME/.config` (other Unix), or `%APPDATA%` (Windows).
 
 ### Selecting a mode
 

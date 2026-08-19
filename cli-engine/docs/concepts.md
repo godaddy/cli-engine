@@ -360,7 +360,7 @@ where `${PREFIX}` is the app id uppercased with non-alphanumerics replaced by `_
 
 ## Configuration File
 
-cli-engine provides a single per-application TOML config file that **consumer CLIs share with the engine**. It lives at `<config-base>/<app_id>/config.toml`, where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%`. Loading is best-effort: a missing/unreadable/malformed file yields an empty config (a warning is logged for malformed) rather than failing the
+cli-engine provides a single per-application TOML config file that **consumer CLIs share with the engine**. It lives at `<config-base>/<app_id>/config.toml`, where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/Library/Application Support` (macOS), `$HOME/.config` (other Unix), or `%APPDATA%` (Windows). Loading is best-effort: a missing/unreadable/malformed file yields an empty config (a warning is logged for malformed) rather than failing the
 command.
 
 Engine-reserved settings live in documented top-level tables (today `[credentials]` and `[output]`); the consumer CLI owns **every other top-level table**:
