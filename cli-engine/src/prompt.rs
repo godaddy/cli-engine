@@ -8,8 +8,6 @@
 //! [`CommandContext::is_interactive`](crate::command::CommandContext::is_interactive)
 //! returns `true`.
 
-use std::io::Write;
-
 use crate::error::CliCoreError;
 
 /// Prompt the user for a free-text string input.
@@ -175,22 +173,8 @@ pub fn try_recover_missing_args(
     let mut prompted_args: Vec<String> = Vec::new();
     let mut already_supplied: Vec<String> = original_args.to_vec();
 
-    // Show a clear error header so the user knows why they're being prompted.
-    let missing_list: Vec<&str> = missing_names
-        .iter()
-        .map(|n| n.split_whitespace().next().unwrap_or(n.as_str()))
-        .collect();
-    drop(writeln!(
-        std::io::stderr(),
-        "⚠ Missing required argument(s): {}\n",
-        missing_list.join(", ")
-    ));
-
     for raw_name in &missing_names {
-        // Clap reports missing args as e.g. "--quote-token <TOKEN>"; split on
-        // whitespace to isolate the flag portion from the value-name placeholder.
-        let flag_portion = raw_name.split_whitespace().next().unwrap_or(raw_name);
-        let clean_name = strip_arg_decoration(flag_portion);
+        let clean_name = strip_arg_decoration(raw_name);
         let arg_def = leaf_command.get_arguments().find(|a| {
             a.get_id().as_str() == clean_name
                 || a.get_long().is_some_and(|l| l == clean_name)
@@ -329,22 +313,13 @@ fn strip_arg_decoration(raw: &str) -> &str {
 }
 
 /// Format a human-friendly prompt message from a raw clap arg identifier.
-/// Prepends "Enter" and appends a colon for clarity.
 fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String {
-    let base = if let Some(arg) = arg_def
+    if let Some(arg) = arg_def
         && let Some(help) = arg.get_help().map(|s| s.to_string())
     {
-        help
-    } else {
-        strip_arg_decoration(raw_name).replace('-', " ")
-    };
-    // Capitalize first letter after "Enter ".
-    let mut chars = base.chars();
-    let capitalized = match chars.next() {
-        Some(c) => format!("{}{}", c.to_lowercase(), chars.as_str()),
-        None => base.clone(),
-    };
-    format!("Enter {capitalized}:")
+        return help;
+    }
+    strip_arg_decoration(raw_name).replace('-', " ")
 }
 
 /// Build a resume command string from the already-supplied args.
@@ -401,20 +376,20 @@ mod tests {
     #[test]
     fn format_prompt_message_from_flag_name() {
         let msg = format_prompt_message("--team-name", None);
-        assert_eq!(msg, "Enter team name:");
+        assert_eq!(msg, "team name");
     }
 
     #[test]
     fn format_prompt_message_from_positional() {
         let msg = format_prompt_message("<domain>", None);
-        assert_eq!(msg, "Enter domain:");
+        assert_eq!(msg, "domain");
     }
 
     #[test]
     fn format_prompt_message_uses_help_text() {
         let arg = clap::Arg::new("team").long("team").help("Team identifier");
         let msg = format_prompt_message("--team", Some(&arg));
-        assert_eq!(msg, "Enter team identifier:");
+        assert_eq!(msg, "Team identifier");
     }
 
     #[test]
@@ -489,18 +464,5 @@ mod tests {
             );
         let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test");
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn strip_arg_decoration_handles_clap_flag_with_value_name() {
-        // Clap reports missing required flags as "--flag-name <VALUE_NAME>".
-        // strip_arg_decoration must work on just the flag portion.
-        assert_eq!(strip_arg_decoration("--quote-token"), "quote-token");
-        assert_eq!(strip_arg_decoration("<DOMAIN>"), "DOMAIN");
-        assert_eq!(strip_arg_decoration("[optional]"), "optional");
-        // The split-before-strip pattern used in try_recover_missing_args:
-        let raw = "--quote-token <TOKEN>";
-        let flag_portion = raw.split_whitespace().next().unwrap_or(raw);
-        assert_eq!(strip_arg_decoration(flag_portion), "quote-token");
     }
 }
