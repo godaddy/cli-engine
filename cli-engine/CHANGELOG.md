@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.7](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.6...cli-engine-v0.8.7) (2026-08-21)
+
+
+### Features
+
+* Add interactive prompts for missing required arguments ([#97](https://github.com/godaddy/cli-engine/issues/97)) ([63853e0](https://github.com/godaddy/cli-engine/commit/63853e02c379c9d4257849f45f06f91af6c01b4c))
+
 ## [0.8.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.5...cli-engine-v0.8.6) (2026-08-18)
 
 
