@@ -164,6 +164,25 @@ impl CommandContext {
         self.middleware.dry_run
     }
 
+    /// Returns the resolved interactivity mode for this invocation.
+    ///
+    /// Use this to decide whether to prompt for missing inputs, show progress
+    /// spinners, or offer interactive choices. When `false`, the command should
+    /// fail with a descriptive error if required inputs are missing.
+    #[must_use]
+    pub fn is_interactive(&self) -> bool {
+        self.middleware.interactive
+    }
+
+    /// Returns the resolved [`InteractivityMode`](crate::InteractivityMode).
+    ///
+    /// Equivalent to [`is_interactive`](Self::is_interactive) but returns the
+    /// enum for pattern matching.
+    #[must_use]
+    pub fn interactivity_mode(&self) -> crate::InteractivityMode {
+        self.middleware.interactive.into()
+    }
+
     /// Resolves the active environment's merged TOML table for this
     /// invocation, as an [`EnvSource`](crate::env_config::EnvSource).
     ///

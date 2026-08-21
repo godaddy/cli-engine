@@ -505,6 +505,8 @@ pub struct Middleware {
     pub timeout: Option<Duration>,
     /// Debug selector, interpreted by applications.
     pub debug: String,
+    /// Whether the invocation is running in interactive mode.
+    pub interactive: bool,
     /// Output schema registry.
     pub schema_registry: SchemaRegistry,
     /// Human output view registry.

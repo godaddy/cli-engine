@@ -4492,6 +4492,7 @@ fn global_flag_defaults_and_derived_flag_classes_cover_common_clap_actions() {
             timeout: "0s".to_owned(),
             debug: String::new(),
             credential_store: None,
+            interactive: cli_engine::detect_interactive(),
         }
     );
 

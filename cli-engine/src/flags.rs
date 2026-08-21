@@ -3,6 +3,55 @@ use std::io::IsTerminal;
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
+/// Returns `true` when the process appears to be running interactively:
+/// stdin and stderr are both TTYs.
+///
+/// Checking stdin ensures that piped input (`echo "" | gddy ...`) is detected
+/// as non-interactive. Checking stderr ensures prompts can be displayed (since
+/// `inquire` renders to stderr). Stdout is intentionally not checked — a user
+/// piping output (`gddy ... | jq`) still has an interactive terminal for
+/// prompts.
+///
+/// Used as the default for `GlobalFlags::interactive` when the user does not
+/// pass `--interactive` or `--non-interactive` explicitly.
+#[must_use]
+pub fn detect_interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Interactivity mode for a CLI invocation.
+///
+/// Commands and middleware can inspect this to decide whether to prompt for
+/// missing inputs, display progress spinners, or fall back to error messages
+/// suitable for scripts and CI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractivityMode {
+    /// The user explicitly requested interactive prompts (`--interactive`), or
+    /// the process is running in a TTY without CI indicators.
+    Interactive,
+    /// The user explicitly disabled prompts (`--non-interactive`), or the
+    /// process is running in a non-TTY / CI context.
+    NonInteractive,
+}
+
+impl InteractivityMode {
+    /// Returns `true` when prompts and interactive flows are appropriate.
+    #[must_use]
+    pub fn is_interactive(self) -> bool {
+        self == Self::Interactive
+    }
+}
+
+impl From<bool> for InteractivityMode {
+    fn from(interactive: bool) -> Self {
+        if interactive {
+            Self::Interactive
+        } else {
+            Self::NonInteractive
+        }
+    }
+}
+
 /// Parsed framework-global flags.
 ///
 /// Applications can add their own global flags, but these are the built-in
@@ -31,6 +80,9 @@ pub struct GlobalFlags {
     pub debug: String,
     /// Credential storage override from `--credential-store`, if supplied.
     pub credential_store: Option<crate::config::CredentialStore>,
+    /// Interactivity mode: `true` enables prompts for missing inputs,
+    /// `false` disables them. Auto-detected from TTY when neither flag is given.
+    pub interactive: bool,
 }
 
 impl Default for GlobalFlags {
@@ -47,6 +99,7 @@ impl Default for GlobalFlags {
             timeout: "0s".to_owned(),
             debug: String::new(),
             credential_store: None,
+            interactive: detect_interactive(),
         }
     }
 }
@@ -103,8 +156,9 @@ pub(crate) mod global_flag_order {
     pub(crate) const JSON: usize = 1013;
     pub(crate) const TOON: usize = 1014;
     pub(crate) const HUMAN: usize = 1015;
-    pub(crate) const REASON: usize = 1016;
-    pub(crate) const ENV: usize = 1017;
+    pub(crate) const INTERACTIVE: usize = 1016;
+    pub(crate) const REASON: usize = 1017;
+    pub(crate) const ENV: usize = 1018;
 }
 
 /// Registers framework-global flags on a `clap` command.
@@ -243,6 +297,26 @@ pub fn register_global_flags(command: Command) -> Command {
                 .value_name("MODE")
                 .value_parser(|s: &str| s.parse::<crate::config::CredentialStore>())
                 .help("Credential storage: auto|keyring|file (overrides env and config)"),
+        )
+        .arg(
+            Arg::new("interactive")
+                .long("interactive")
+                .short('i')
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with("non-interactive")
+                .display_order(global_flag_order::INTERACTIVE)
+                .help("Force interactive prompts for missing inputs (default when TTY is detected)"),
+        )
+        .arg(
+            Arg::new("non-interactive")
+                .long("non-interactive")
+                .global(true)
+                .action(ArgAction::SetTrue)
+                .conflicts_with("interactive")
+                .hide(true)
+                .display_order(global_flag_order::INTERACTIVE)
+                .help("Disable interactive prompts; fail on missing required inputs"),
         )
         .arg(
             Arg::new("json")
@@ -456,7 +530,11 @@ pub fn default_output_format(app_id: &str) -> String {
 #[must_use]
 /// Extracts framework-global flags from parsed `clap` matches, falling back to
 /// `default_format` when the user gave no explicit output format.
-pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> GlobalFlags {
+pub fn global_flags_from_matches(
+    matches: &ArgMatches,
+    default_format: &str,
+    auto_interactive: bool,
+) -> GlobalFlags {
     let output_format = if matches.get_flag("toon") {
         "toon".to_owned()
     } else if matches.get_flag("human") {
@@ -511,6 +589,15 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
         credential_store: matches
             .get_one::<crate::config::CredentialStore>("credential-store")
             .copied(),
+        interactive: if matches.get_flag("non-interactive") {
+            false
+        } else if matches.get_flag("interactive") {
+            true
+        } else if auto_interactive {
+            detect_interactive()
+        } else {
+            false
+        },
     }
 }
 
@@ -851,5 +938,73 @@ mod tests {
             help_text(&["testcli", "sub", "-h"]),
             help_text(&["testcli", "sub", "--help"])
         );
+    }
+
+    #[test]
+    fn interactivity_mode_from_bool() {
+        use super::InteractivityMode;
+        assert_eq!(
+            InteractivityMode::from(true),
+            InteractivityMode::Interactive
+        );
+        assert_eq!(
+            InteractivityMode::from(false),
+            InteractivityMode::NonInteractive
+        );
+        assert!(InteractivityMode::Interactive.is_interactive());
+        assert!(!InteractivityMode::NonInteractive.is_interactive());
+    }
+
+    #[test]
+    fn interactive_flag_parsing_explicit_interactive() {
+        use super::global_flags_from_matches;
+        let cmd = register_global_flags(Command::new("test"));
+        let matches = cmd
+            .try_get_matches_from(["test", "--interactive"])
+            .expect("should parse");
+        // --interactive works even when auto_interactive is false
+        let flags = global_flags_from_matches(&matches, "json", false);
+        assert!(flags.interactive);
+    }
+
+    #[test]
+    fn interactive_flag_parsing_explicit_non_interactive() {
+        use super::global_flags_from_matches;
+        let cmd = register_global_flags(Command::new("test"));
+        let matches = cmd
+            .try_get_matches_from(["test", "--non-interactive"])
+            .expect("should parse");
+        // --non-interactive wins even when auto_interactive is true
+        let flags = global_flags_from_matches(&matches, "json", true);
+        assert!(!flags.interactive);
+    }
+
+    #[test]
+    fn interactive_defaults_off_without_auto_interactive() {
+        use super::global_flags_from_matches;
+        let cmd = register_global_flags(Command::new("test"));
+        let matches = cmd.try_get_matches_from(["test"]).expect("should parse");
+        // No explicit flag + auto_interactive=false → not interactive
+        let flags = global_flags_from_matches(&matches, "json", false);
+        assert!(!flags.interactive);
+    }
+
+    #[test]
+    fn interactive_flag_conflicts() {
+        let cmd = register_global_flags(Command::new("test"));
+        let result = cmd.try_get_matches_from(["test", "--interactive", "--non-interactive"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn detect_interactive_is_consistent_with_tty_state() {
+        // detect_interactive checks stdin + stderr TTY state.
+        // In CI (no real TTY), both are typically non-terminals → false.
+        // Locally in a real terminal, both are terminals → true.
+        // Either way, it should not panic and should be consistent.
+        let result = super::detect_interactive();
+        let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        let stderr_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+        assert_eq!(result, stdin_tty && stderr_tty);
     }
 }
