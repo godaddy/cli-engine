@@ -530,7 +530,11 @@ pub fn default_output_format(app_id: &str) -> String {
 #[must_use]
 /// Extracts framework-global flags from parsed `clap` matches, falling back to
 /// `default_format` when the user gave no explicit output format.
-pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> GlobalFlags {
+pub fn global_flags_from_matches(
+    matches: &ArgMatches,
+    default_format: &str,
+    auto_interactive: bool,
+) -> GlobalFlags {
     let output_format = if matches.get_flag("toon") {
         "toon".to_owned()
     } else if matches.get_flag("human") {
@@ -589,8 +593,10 @@ pub fn global_flags_from_matches(matches: &ArgMatches, default_format: &str) -> 
             false
         } else if matches.get_flag("interactive") {
             true
-        } else {
+        } else if auto_interactive {
             detect_interactive()
+        } else {
+            false
         },
     }
 }
@@ -956,7 +962,8 @@ mod tests {
         let matches = cmd
             .try_get_matches_from(["test", "--interactive"])
             .expect("should parse");
-        let flags = global_flags_from_matches(&matches, "json");
+        // --interactive works even when auto_interactive is false
+        let flags = global_flags_from_matches(&matches, "json", false);
         assert!(flags.interactive);
     }
 
@@ -967,7 +974,18 @@ mod tests {
         let matches = cmd
             .try_get_matches_from(["test", "--non-interactive"])
             .expect("should parse");
-        let flags = global_flags_from_matches(&matches, "json");
+        // --non-interactive wins even when auto_interactive is true
+        let flags = global_flags_from_matches(&matches, "json", true);
+        assert!(!flags.interactive);
+    }
+
+    #[test]
+    fn interactive_defaults_off_without_auto_interactive() {
+        use super::global_flags_from_matches;
+        let cmd = register_global_flags(Command::new("test"));
+        let matches = cmd.try_get_matches_from(["test"]).expect("should parse");
+        // No explicit flag + auto_interactive=false → not interactive
+        let flags = global_flags_from_matches(&matches, "json", false);
         assert!(!flags.interactive);
     }
 

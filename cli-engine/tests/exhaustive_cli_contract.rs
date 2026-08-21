@@ -34,7 +34,7 @@ fn global_bool_flags_accept_full_documented_bool_matrix() {
         let matches = parser().try_get_matches_from(args);
         assert!(matches.is_ok(), "true value {value:?} should parse");
         let matches = matches.expect("checked ok");
-        let flags = global_flags_from_matches(&matches, "json");
+        let flags = global_flags_from_matches(&matches, "json", false);
         assert!(flags.schema, "schema value {value:?}");
         assert!(flags.dry_run, "dry-run value {value:?}");
     }
@@ -49,7 +49,7 @@ fn global_bool_flags_accept_full_documented_bool_matrix() {
         let matches = parser().try_get_matches_from(args);
         assert!(matches.is_ok(), "false value {value:?} should parse");
         let matches = matches.expect("checked ok");
-        let flags = global_flags_from_matches(&matches, "json");
+        let flags = global_flags_from_matches(&matches, "json", false);
         assert!(!flags.schema, "schema value {value:?}");
         assert!(!flags.dry_run, "dry-run value {value:?}");
     }
@@ -61,8 +61,14 @@ fn global_optional_value_flags_have_missing_value_defaults() {
         .try_get_matches_from(["my-cli", "--verbose", "--debug"])
         .expect("optional flags should accept omitted values");
     assert_eq!(command_path_from_matches("my-cli", &matches), "");
-    assert_eq!(global_flags_from_matches(&matches, "json").verbose, "all");
-    assert_eq!(global_flags_from_matches(&matches, "json").debug, "*");
+    assert_eq!(
+        global_flags_from_matches(&matches, "json", false).verbose,
+        "all"
+    );
+    assert_eq!(
+        global_flags_from_matches(&matches, "json", false).debug,
+        "*"
+    );
 }
 
 #[test]
@@ -77,11 +83,11 @@ fn output_format_falls_back_to_default_when_not_given_explicitly() {
         .try_get_matches_from(["my-cli"])
         .expect("bare invocation parses");
     assert_eq!(
-        global_flags_from_matches(&matches, "human").output_format,
+        global_flags_from_matches(&matches, "human", false).output_format,
         "human"
     );
     assert_eq!(
-        global_flags_from_matches(&matches, "toon").output_format,
+        global_flags_from_matches(&matches, "toon", false).output_format,
         "toon"
     );
 
@@ -90,7 +96,7 @@ fn output_format_falls_back_to_default_when_not_given_explicitly() {
         .try_get_matches_from(["my-cli", "--output", "toon"])
         .expect("explicit output parses");
     assert_eq!(
-        global_flags_from_matches(&explicit, "human").output_format,
+        global_flags_from_matches(&explicit, "human", false).output_format,
         "toon"
     );
     for (flag, expected) in [("--json", "json"), ("--toon", "toon"), ("--human", "human")] {
@@ -98,7 +104,7 @@ fn output_format_falls_back_to_default_when_not_given_explicitly() {
             .try_get_matches_from(["my-cli", flag])
             .expect("shorthand flag parses");
         assert_eq!(
-            global_flags_from_matches(&matches, "human").output_format,
+            global_flags_from_matches(&matches, "human", false).output_format,
             expected,
             "{flag} shorthand should win over the default"
         );

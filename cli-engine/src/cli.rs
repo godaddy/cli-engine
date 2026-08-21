@@ -310,6 +310,17 @@ pub struct CliConfig {
     /// under a permissive `min_stage`. See [`FlagPolicy::visible`] for the
     /// exact comparison.
     pub feature_overrides: BTreeMap<String, Stage>,
+    /// Whether to auto-enable interactive mode when a TTY is detected.
+    ///
+    /// When `false` (the default), commands only run interactively if the user
+    /// passes `--interactive` explicitly. When `true`, the engine auto-detects
+    /// a TTY (stdin + stderr) and defaults to interactive mode — meaning
+    /// missing required arguments will be prompted for instead of erroring.
+    ///
+    /// Set via [`CliConfig::with_auto_interactive`]. Start with `false` for
+    /// backwards compatibility; flip to `true` once the CLI's commands have
+    /// been tested under interactive prompting.
+    pub auto_interactive: bool,
 }
 
 impl CliConfig {
@@ -427,6 +438,18 @@ impl CliConfig {
     #[must_use]
     pub fn with_min_stage(mut self, stage: Stage) -> Self {
         self.min_stage = stage;
+        self
+    }
+
+    /// Enables auto-interactive mode: when a TTY is detected, the CLI
+    /// defaults to interactive prompting for missing required arguments.
+    ///
+    /// Off by default for backwards compatibility. Enable once commands have
+    /// been tested under interactive prompting. `--interactive` still works as
+    /// an explicit override regardless of this setting.
+    #[must_use]
+    pub fn with_auto_interactive(mut self, enabled: bool) -> Self {
+        self.auto_interactive = enabled;
         self
     }
 
@@ -1705,6 +1728,7 @@ impl Cli {
                     &clap_args,
                     &self.root,
                     &self.config.name,
+                    self.config.auto_interactive,
                 ) {
                     match recovery {
                         crate::prompt::RecoveryResult::Recovered { args } => {
@@ -1735,7 +1759,8 @@ impl Cli {
         };
 
         let default_format = self.resolve_run_output_format();
-        let flags = global_flags_from_matches(&matches, &default_format);
+        let flags =
+            global_flags_from_matches(&matches, &default_format, self.config.auto_interactive);
         // Publish the --credential-store override so auth providers resolving
         // their storage backend see it at the top of the precedence chain.
         crate::config::set_credential_store_flag(flags.credential_store);

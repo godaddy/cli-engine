@@ -140,7 +140,7 @@ fn parsed_global_flags_cover_defaults_short_aliases_and_optional_values() {
         "project:list"
     );
     assert_eq!(
-        global_flags_from_matches(&matches, "json"),
+        global_flags_from_matches(&matches, "json", false),
         GlobalFlags {
             output_format: "toon".to_owned(),
             verbose: "all".to_owned(),
@@ -153,7 +153,7 @@ fn parsed_global_flags_cover_defaults_short_aliases_and_optional_values() {
             timeout: "5m".to_owned(),
             debug: "transport".to_owned(),
             credential_store: Some(cli_engine::CredentialStore::File),
-            interactive: cli_engine::detect_interactive(),
+            interactive: false,
         }
     );
 }

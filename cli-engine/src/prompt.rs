@@ -142,11 +142,13 @@ pub fn prompt_multi_select(
 /// * `original_args` — the args that were passed to clap
 /// * `command` — the root `clap::Command` (for arg introspection)
 /// * `app_name` — the CLI binary name (first arg)
+/// * `auto_interactive` — whether the CLI opted into TTY auto-detection
 pub fn try_recover_missing_args(
     err: &clap::error::Error,
     original_args: &[String],
     command: &clap::Command,
     app_name: &str,
+    auto_interactive: bool,
 ) -> Option<RecoveryResult> {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
 
@@ -155,7 +157,7 @@ pub fn try_recover_missing_args(
     }
 
     // Check interactivity from raw args (clap hasn't fully parsed yet).
-    if !is_interactive_from_raw_args(original_args) {
+    if !is_interactive_from_raw_args(original_args, auto_interactive) {
         return None;
     }
 
@@ -237,14 +239,17 @@ pub enum RecoveryResult {
 }
 
 /// Determine interactivity from raw args (before full clap parse).
-fn is_interactive_from_raw_args(args: &[String]) -> bool {
+///
+/// Explicit flags always win. When neither is present, falls back to TTY
+/// auto-detection only if the CLI opted in via `auto_interactive`.
+fn is_interactive_from_raw_args(args: &[String], auto_interactive: bool) -> bool {
     if args.iter().any(|a| a == "--non-interactive") {
         return false;
     }
-    if args.iter().any(|a| a == "--interactive" || a == "-i") {
+    if args.iter().any(|a| a == "--interactive") {
         return true;
     }
-    crate::flags::detect_interactive()
+    auto_interactive && crate::flags::detect_interactive()
 }
 
 /// Walk the command tree to find the leaf command the user was targeting.
@@ -353,7 +358,8 @@ mod tests {
             "list".into(),
             "--non-interactive".into(),
         ];
-        assert!(!is_interactive_from_raw_args(&args));
+        // --non-interactive wins even if auto_interactive is true
+        assert!(!is_interactive_from_raw_args(&args, true));
     }
 
     #[test]
@@ -364,13 +370,15 @@ mod tests {
             "list".into(),
             "--interactive".into(),
         ];
-        assert!(is_interactive_from_raw_args(&args));
+        // --interactive works even without auto_interactive
+        assert!(is_interactive_from_raw_args(&args, false));
     }
 
     #[test]
-    fn is_interactive_from_raw_args_short_flag() {
-        let args: Vec<String> = vec!["my-cli".into(), "-i".into(), "project".into()];
-        assert!(is_interactive_from_raw_args(&args));
+    fn is_interactive_no_flags_auto_disabled() {
+        let args: Vec<String> = vec!["my-cli".into(), "project".into(), "list".into()];
+        // Without auto_interactive and no explicit flag, never interactive
+        assert!(!is_interactive_from_raw_args(&args, false));
     }
 
     #[test]
@@ -435,7 +443,8 @@ mod tests {
             .try_get_matches_from(["test", "--name", "invalid"])
             .expect_err("should fail");
         let args: Vec<String> = vec!["test".into(), "--name".into(), "invalid".into()];
-        let result = try_recover_missing_args(&err, &args, &clap::Command::new("test"), "test");
+        let result =
+            try_recover_missing_args(&err, &args, &clap::Command::new("test"), "test", true);
         assert!(result.is_none());
     }
 
@@ -462,7 +471,23 @@ mod tests {
                     .long("non-interactive")
                     .action(clap::ArgAction::SetTrue),
             );
-        let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test");
+        let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test", true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn try_recover_returns_none_when_auto_interactive_disabled() {
+        let cmd =
+            clap::Command::new("test").arg(clap::Arg::new("name").long("name").required(true));
+        let err = cmd
+            .try_get_matches_from(["test"])
+            .expect_err("should fail with missing --name");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        let args: Vec<String> = vec!["test".into()];
+        let lookup_cmd =
+            clap::Command::new("test").arg(clap::Arg::new("name").long("name").required(true));
+        // auto_interactive = false, no explicit --interactive flag → no recovery
+        let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test", false);
         assert!(result.is_none());
     }
 }
