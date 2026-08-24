@@ -59,6 +59,143 @@ pub fn config_base_dir() -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
 }
 
+/// Name of the marker file that records a completed macOS config-dir
+/// migration, so [`migrate_macos_config_dir`] only ever moves files once.
+const MACOS_MIGRATION_FLAG: &str = ".cli_engine_macos_migrated";
+
+/// One-time startup migration for the `$HOME/.config` → `$HOME/Library/Application
+/// Support` default change on macOS.
+///
+/// No-op on any other platform, when `XDG_CONFIG_HOME` is set (the user
+/// already controls the location explicitly), or once the migration marker
+/// exists under the new `<app_id>` directory. Otherwise moves every entry
+/// files and subdirectories alike, whatever they're named, out of
+/// `$HOME/.config/<app_id>` and into `$HOME/Library/Application
+/// Support/<app_id>`, since callers other than this crate (credential
+/// storage, and any consumer-owned files) may have written there and this
+/// function has no way to know their names.
+pub(crate) fn migrate_macos_config_dir(app_id: &str) {
+    if !cfg!(target_os = "macos") || env_path("XDG_CONFIG_HOME").is_some() {
+        return;
+    }
+    let (Some(new_base), Some(old_base)) = (home_application_support_dir(), home_config_dir())
+    else {
+        return;
+    };
+    let new_app_dir = new_base.join(app_id);
+    let flag_path = new_app_dir.join(MACOS_MIGRATION_FLAG);
+    if flag_path.is_file() {
+        return;
+    }
+
+    let old_app_dir = old_base.join(app_id);
+    let outcome = move_directory_contents(&old_app_dir, &new_app_dir);
+    if write_string_atomic(&flag_path, "").is_err() {
+        // Couldn't record the marker (e.g. read-only filesystem), leave
+        // things as they are and just re-check on the next invocation.
+        return;
+    }
+    if outcome.moved > 0 {
+        warn_macos_config_migrated(&old_app_dir, &new_app_dir, outcome.moved);
+    }
+    if outcome.skipped > 0 {
+        warn_macos_config_migration_conflicts(&old_app_dir, &new_app_dir, outcome.skipped);
+    }
+}
+
+/// Result of [`move_directory_contents`]: counts, not names, are all callers
+/// currently need.
+struct MoveOutcome {
+    moved: usize,
+    skipped: usize,
+}
+
+/// Moves every entry from `old_dir` into `new_dir`, creating `new_dir` only
+/// if there's at least one entry to move. An entry whose name already exists
+/// under `new_dir` is left untouched in `old_dir` (never overwritten) and
+/// counted as skipped. Returns `(0, 0)` when `old_dir` doesn't exist.
+///
+/// Platform-agnostic: callers decide *when* to invoke this (e.g. only on
+/// macOS); this function only knows how to move a directory's contents.
+fn move_directory_contents(old_dir: &Path, new_dir: &Path) -> MoveOutcome {
+    let Ok(entries) = std::fs::read_dir(old_dir) else {
+        return MoveOutcome {
+            moved: 0,
+            skipped: 0,
+        };
+    };
+    if ensure_private_dir(new_dir).is_err() {
+        return MoveOutcome {
+            moved: 0,
+            skipped: 0,
+        };
+    }
+
+    let mut moved = 0;
+    let mut skipped = 0;
+    for entry in entries.flatten() {
+        let old_path = entry.path();
+        let new_path = new_dir.join(entry.file_name());
+        if new_path.exists() {
+            skipped += 1;
+            continue;
+        }
+        if std::fs::rename(&old_path, &new_path).is_ok() {
+            moved += 1;
+            continue;
+        }
+        // Cross-device fallback for regular files; a directory (in practice,
+        // only the `credentials/` subdirectory) that fails to rename across
+        // devices is left in place rather than recursively copied — same-
+        // volume rename covers every normal `$HOME`-relative setup.
+        if old_path.is_file()
+            && std::fs::copy(&old_path, &new_path).is_ok()
+            && std::fs::remove_file(&old_path).is_ok()
+        {
+            moved += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    if skipped == 0 {
+        std::fs::remove_dir(old_dir).ok();
+    }
+    MoveOutcome { moved, skipped }
+}
+
+/// Best-effort, single-line stderr notice for a completed migration.
+fn warn_macos_config_migrated(old_dir: &Path, new_dir: &Path, moved: usize) {
+    use std::io::Write as _;
+    std::io::stderr()
+        .lock()
+        .write_all(
+            format!(
+                "cli-engine: moved {moved} file(s) from {} to {} (macOS config location changed)\n",
+                old_dir.display(),
+                new_dir.display()
+            )
+            .as_bytes(),
+        )
+        .ok();
+}
+
+/// Best-effort, single-line stderr notice for entries left behind because the
+/// destination already had a same-named entry.
+fn warn_macos_config_migration_conflicts(old_dir: &Path, new_dir: &Path, skipped: usize) {
+    use std::io::Write as _;
+    std::io::stderr()
+        .lock()
+        .write_all(
+            format!(
+                "cli-engine: left {skipped} file(s) in {} because {} already has file(s) with the same name. Please reconcile manually\n",
+                old_dir.display(),
+                new_dir.display()
+            )
+            .as_bytes(),
+        )
+        .ok();
+}
+
 /// Returns the user's home directory.
 ///
 /// On non-Windows platforms this reads `$HOME`. On Windows, `%USERPROFILE%` is
@@ -140,24 +277,8 @@ pub fn is_safe_path_component(s: &str) -> bool {
 /// fails.
 pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
     if let Some(parent) = path.parent() {
-        // Record whether the parent already existed so we only restrict
-        // permissions on directories we create, not on pre-existing ones
-        // such as $HOME (which other users need to traverse).
-        let parent_existed = parent.is_dir();
-        std::fs::create_dir_all(parent)
+        ensure_private_dir(parent)
             .map_err(|e| CliCoreError::message(format!("failed to create directory: {e}")))?;
-        #[cfg(unix)]
-        if !parent_existed {
-            use std::os::unix::fs::PermissionsExt as _;
-            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            {
-                tracing::debug!(
-                    path = %parent.display(),
-                    error = %e,
-                    "could not restrict directory permissions"
-                );
-            }
-        }
     }
     // Unique temp name without pulling in `rand`: pid plus a monotonic counter is
     // unique within a process, and the pid differs across processes.
@@ -175,6 +296,27 @@ pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
             "failed to finalize {}: {e}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// Creates `dir` (and any missing ancestors) if absent. On Unix, a directory
+/// that did **not** already exist is best-effort restricted to `0700`;
+/// pre-existing directories (e.g. `$HOME`) are left unchanged so their
+/// permissions aren't altered by a caller that merely writes into them.
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    let existed = dir.is_dir();
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+            tracing::debug!(
+                path = %dir.display(),
+                error = %e,
+                "could not restrict directory permissions"
+            );
+        }
     }
     Ok(())
 }
