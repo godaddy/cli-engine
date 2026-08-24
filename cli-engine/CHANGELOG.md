@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.7...cli-engine-v0.9.0) (2026-08-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **fs:** default macOS config dir to Application Support ([#100](https://github.com/godaddy/cli-engine/issues/100))
+* upgrade reqwest to 0.13 ([#102](https://github.com/godaddy/cli-engine/issues/102))
+
+### Features
+
+* **error:** let DetailedError contribute structured next_actions to error envelopes ([#99](https://github.com/godaddy/cli-engine/issues/99)) ([9c8988a](https://github.com/godaddy/cli-engine/commit/9c8988a96a730d06c27bc9705f8ba7411dd89597))
+
+
+### Bug Fixes
+
+* **fs:** default macOS config dir to Application Support ([#100](https://github.com/godaddy/cli-engine/issues/100)) ([a8a2291](https://github.com/godaddy/cli-engine/commit/a8a22910530d1e3e98587a5e7caa8bbccaf43272))
+
+
+### Build System
+
+* upgrade reqwest to 0.13 ([#102](https://github.com/godaddy/cli-engine/issues/102)) ([3794ab7](https://github.com/godaddy/cli-engine/commit/3794ab7bce980aadfdb8f063468ccb6a3aff93c1))
+
 ## [0.8.7](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.6...cli-engine-v0.8.7) (2026-08-21)
 
 
