@@ -460,4 +460,138 @@ mod tests {
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "file should be owner read/write only");
     }
+
+    #[test]
+    fn move_directory_contents_returns_zero_when_old_dir_is_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outcome = move_directory_contents(&tmp.path().join("missing"), &tmp.path().join("new"));
+        assert_eq!((outcome.moved, outcome.skipped), (0, 0));
+        assert!(
+            !tmp.path().join("new").exists(),
+            "destination should not be created for a no-op move"
+        );
+    }
+
+    #[test]
+    fn move_directory_contents_moves_files_and_subdirectories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_dir = tmp.path().join("old");
+        let new_dir = tmp.path().join("new");
+        std::fs::create_dir_all(old_dir.join("credentials")).expect("mkdir");
+        std::fs::write(old_dir.join("config.toml"), "a = 1").expect("write");
+        std::fs::write(old_dir.join("contacts.toml"), "b = 2").expect("write");
+        std::fs::write(old_dir.join("credentials").join("token.json"), "{}").expect("write");
+
+        let outcome = move_directory_contents(&old_dir, &new_dir);
+
+        assert_eq!(outcome.moved, 3, "config.toml, contacts.toml, credentials/");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("config.toml")).expect("read"),
+            "a = 1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("contacts.toml")).expect("read"),
+            "b = 2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("credentials").join("token.json")).expect("read"),
+            "{}"
+        );
+        assert!(!old_dir.exists(), "emptied old directory should be removed");
+    }
+
+    #[test]
+    fn move_directory_contents_leaves_conflicting_entries_in_place() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_dir = tmp.path().join("old");
+        let new_dir = tmp.path().join("new");
+        std::fs::create_dir_all(&old_dir).expect("mkdir");
+        std::fs::create_dir_all(&new_dir).expect("mkdir");
+        std::fs::write(old_dir.join("config.toml"), "old").expect("write");
+        std::fs::write(new_dir.join("config.toml"), "new").expect("write");
+        std::fs::write(old_dir.join("contacts.toml"), "moves fine").expect("write");
+
+        let outcome = move_directory_contents(&old_dir, &new_dir);
+
+        assert_eq!(outcome.moved, 1, "contacts.toml has no conflict");
+        assert_eq!(
+            outcome.skipped, 1,
+            "config.toml conflicts and is left alone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("config.toml")).expect("read"),
+            "new",
+            "destination copy must never be overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old_dir.join("config.toml")).expect("read"),
+            "old",
+            "conflicting source file is left in place"
+        );
+        assert!(
+            old_dir.exists(),
+            "old directory is not removed while a conflict remains"
+        );
+        assert!(!old_dir.join("contacts.toml").exists());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn migrate_macos_config_dir_moves_files_once() {
+        let home = std::env::temp_dir().join("cli-engine-fs-migrate-test");
+        let old_app_dir = home.join(".config").join("my-app");
+        let new_app_dir = home
+            .join("Library")
+            .join("Application Support")
+            .join("my-app");
+        // Fixed temp-dir name (matching this file's other macOS test): clean
+        // up any residue from a previous run before writing real fixtures.
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&old_app_dir).expect("mkdir");
+        std::fs::write(old_app_dir.join("environments.toml"), "env = true").expect("write");
+        let _lock = lock();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", None);
+        let _home = EnvVarGuard::set("HOME", Some(&home));
+
+        migrate_macos_config_dir("my-app");
+        assert_eq!(
+            std::fs::read_to_string(new_app_dir.join("environments.toml")).expect("read"),
+            "env = true"
+        );
+        assert!(new_app_dir.join(MACOS_MIGRATION_FLAG).is_file());
+        assert!(!old_app_dir.exists());
+
+        // Second run is a no-op: dropping a new file into the old location
+        // (simulating a stray write) must not be picked up once migrated.
+        std::fs::create_dir_all(&old_app_dir).expect("mkdir");
+        std::fs::write(old_app_dir.join("late.toml"), "ignored").expect("write");
+        migrate_macos_config_dir("my-app");
+        assert!(
+            !new_app_dir.join("late.toml").exists(),
+            "migration must not repeat once the marker exists"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn migrate_macos_config_dir_is_a_noop_when_xdg_config_home_is_set() {
+        let home = std::env::temp_dir().join("cli-engine-fs-migrate-xdg-test");
+        let xdg = std::env::temp_dir().join("cli-engine-fs-migrate-xdg-override");
+        let old_app_dir = home.join(".config").join("my-app");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&old_app_dir).expect("mkdir");
+        std::fs::write(old_app_dir.join("config.toml"), "x = 1").expect("write");
+        // `with_xdg_config_home` takes the shared env-var lock itself; taking
+        // it again here would deadlock on the same thread.
+        with_xdg_config_home(&xdg, || {
+            let _home = EnvVarGuard::set("HOME", Some(&home));
+            migrate_macos_config_dir("my-app");
+        });
+
+        assert!(
+            old_app_dir.join("config.toml").is_file(),
+            "an explicit XDG_CONFIG_HOME must leave the old default location untouched"
+        );
+    }
 }
