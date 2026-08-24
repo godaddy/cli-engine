@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use thiserror::Error;
 
+use crate::NextAction;
+
 /// Crate-wide result type.
 pub type Result<T> = std::result::Result<T, CliCoreError>;
 
@@ -22,6 +24,10 @@ pub trait DetailedError: std::error::Error {
     /// Optional recovery hint for the envelope's top-level `fix` (defaults to [`None`]).
     fn error_fix(&self) -> Option<Cow<'static, str>> {
         None
+    }
+    /// Structured follow-up actions for the envelope's `next_actions` (defaults to empty).
+    fn error_next_actions(&self) -> Vec<NextAction> {
+        Vec::new()
     }
 }
 
@@ -76,6 +82,11 @@ pub enum CliCoreError {
         system: String,
         /// Optional request id.
         request_id: String,
+        /// Structured follow-up actions captured from the source's
+        /// [`DetailedError::error_next_actions`] at wrap time — the source is
+        /// erased to `Box<dyn Error>` immediately below, so this can't be
+        /// recovered later by downcasting.
+        next_actions: Vec<NextAction>,
         /// Source error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
@@ -188,12 +199,14 @@ impl CliCoreError {
             .error_request_id()
             .map_or_else(String::new, Cow::into_owned);
         let fix = source.error_fix().map_or_else(String::new, Cow::into_owned);
+        let next_actions = source.error_next_actions();
         Self::with_fix(
             fix,
             Self::Detailed {
                 code,
                 system,
                 request_id,
+                next_actions,
                 source: Box::new(source),
             },
         )
@@ -355,6 +368,45 @@ mod tests {
         let err = CliCoreError::with_detailed_error(AuthRequired);
         assert!(matches!(err, CliCoreError::Fix { .. }));
         assert_eq!(err.system(), Some("auth"));
+    }
+
+    #[test]
+    fn with_detailed_error_captures_next_actions_before_erasure() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("'/businesses' matches 2 operations")]
+        struct Ambiguous;
+
+        impl DetailedError for Ambiguous {
+            fn error_code(&self) -> Cow<'static, str> {
+                Cow::Borrowed("AMBIGUOUS_MATCH")
+            }
+
+            fn error_system(&self) -> Option<Cow<'static, str>> {
+                None
+            }
+
+            fn error_request_id(&self) -> Option<Cow<'static, str>> {
+                None
+            }
+
+            fn error_next_actions(&self) -> Vec<NextAction> {
+                vec![NextAction::new(
+                    "api operation get /businesses --method GET",
+                    "Get all businesses",
+                )]
+            }
+        }
+
+        let err = CliCoreError::with_detailed_error(Ambiguous);
+        assert!(matches!(err, CliCoreError::Detailed { .. }));
+        let CliCoreError::Detailed { next_actions, .. } = &err else {
+            unreachable!("just asserted this is Detailed");
+        };
+        assert_eq!(next_actions.len(), 1);
+        assert_eq!(
+            next_actions[0].command,
+            "api operation get /businesses --method GET"
+        );
     }
 
     #[test]

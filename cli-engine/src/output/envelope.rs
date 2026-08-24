@@ -383,7 +383,7 @@ impl Metadata {
 #[must_use]
 pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &str) -> Envelope {
     let fix = find_error_fix(err);
-    if let Some((code, mut sys, request_id)) = find_detailed_error(err) {
+    if let Some((code, mut sys, request_id, next_actions)) = find_detailed_error(err) {
         if sys.is_empty() {
             sys = system.to_owned();
         }
@@ -405,7 +405,7 @@ pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &st
                 request_id,
             }),
             warnings: Vec::new(),
-            next_actions: Vec::new(),
+            next_actions,
             fix,
             serialization_error: None,
         };
@@ -429,7 +429,7 @@ fn find_error_fix(err: &(dyn std::error::Error + 'static)) -> Option<String> {
 
 fn find_detailed_error(
     err: &(dyn std::error::Error + 'static),
-) -> Option<(String, String, String)> {
+) -> Option<(String, String, String, Vec<NextAction>)> {
     let mut current = Some(err);
     let mut fallback_system = None::<String>;
     while let Some(error) = current {
@@ -440,7 +440,7 @@ fn find_detailed_error(
             ..
         }) = error.downcast_ref::<crate::CliCoreError>()
         {
-            return Some((code.clone(), system.clone(), request_id.clone()));
+            return Some((code.clone(), system.clone(), request_id.clone(), Vec::new()));
         }
         if let Some(crate::CliCoreError::System { system, .. }) =
             error.downcast_ref::<crate::CliCoreError>()
@@ -453,6 +453,7 @@ fn find_detailed_error(
             code,
             system,
             request_id,
+            next_actions,
             ..
         }) = error.downcast_ref::<crate::CliCoreError>()
         {
@@ -463,6 +464,7 @@ fn find_detailed_error(
                     .filter(|_| system.is_empty())
                     .unwrap_or_else(|| system.clone()),
                 request_id.clone(),
+                next_actions.clone(),
             ));
         }
         let detailed_transport = error.downcast_ref::<crate::transport::Error>().or_else(|| {
@@ -498,11 +500,12 @@ fn find_detailed_error(
                 detailed
                     .error_request_id()
                     .map_or_else(String::new, std::borrow::Cow::into_owned),
+                detailed.error_next_actions(),
             ));
         }
         current = error.source();
     }
-    fallback_system.map(|system| ("ERROR".to_owned(), system, String::new()))
+    fallback_system.map(|system| ("ERROR".to_owned(), system, String::new(), Vec::new()))
 }
 
 /// Builds an error envelope from a [`DetailedError`].
@@ -533,7 +536,7 @@ pub fn build_detailed_error_envelope(err: &dyn DetailedError, system: &str) -> E
             request_id,
         }),
         warnings: Vec::new(),
-        next_actions: Vec::new(),
+        next_actions: err.error_next_actions(),
         fix: err
             .error_fix()
             .map(std::borrow::Cow::into_owned)
@@ -695,6 +698,95 @@ mod tests {
             envelope.error.as_ref().map(|e| e.message.as_str()),
             Some("not logged in")
         );
+    }
+
+    #[test]
+    fn build_error_envelope_surfaces_next_actions_from_a_detailed_error() {
+        use crate::error::DetailedError;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("'/businesses' matches 2 operations")]
+        struct Ambiguous;
+
+        impl DetailedError for Ambiguous {
+            fn error_code(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("AMBIGUOUS_MATCH")
+            }
+
+            fn error_system(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_request_id(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_next_actions(&self) -> Vec<NextAction> {
+                vec![
+                    NextAction::new(
+                        "api operation get /businesses --method GET",
+                        "Get all businesses",
+                    ),
+                    NextAction::new(
+                        "api operation get /businesses --method POST",
+                        "Create a new business",
+                    ),
+                ]
+            }
+        }
+
+        // Mirrors the real path: a handler converts its `DetailedError` into a
+        // `CliCoreError` (type-erasing it), then the middleware renders that
+        // through `build_error_envelope` — never `build_detailed_error_envelope`.
+        let err = crate::CliCoreError::with_detailed_error(Ambiguous);
+        let envelope = build_error_envelope(&err, "api");
+
+        assert_eq!(
+            envelope.error.as_ref().map(|e| e.code.as_str()),
+            Some("AMBIGUOUS_MATCH")
+        );
+        assert_eq!(envelope.next_actions.len(), 2);
+        assert_eq!(
+            envelope.next_actions[0].command,
+            "api operation get /businesses --method GET"
+        );
+        assert_eq!(
+            envelope.next_actions[1].command,
+            "api operation get /businesses --method POST"
+        );
+    }
+
+    #[test]
+    fn build_detailed_error_envelope_surfaces_next_actions() {
+        use crate::error::DetailedError;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("not found")]
+        struct NotFound;
+
+        impl DetailedError for NotFound {
+            fn error_code(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("NOT_FOUND")
+            }
+
+            fn error_system(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_request_id(&self) -> Option<std::borrow::Cow<'static, str>> {
+                None
+            }
+
+            fn error_next_actions(&self) -> Vec<NextAction> {
+                vec![NextAction::new("app list", "List applications")]
+            }
+        }
+
+        let err = NotFound;
+        let envelope = build_detailed_error_envelope(&err, "applications");
+
+        assert_eq!(envelope.next_actions.len(), 1);
+        assert_eq!(envelope.next_actions[0].command, "app list");
     }
 
     #[test]
