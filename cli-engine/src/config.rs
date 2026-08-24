@@ -2,7 +2,8 @@
 //!
 //! cli-engine reads an optional per-application TOML config file at
 //! `<config-base>/<app_id>/config.toml`, where `<config-base>` is
-//! `$XDG_CONFIG_HOME`, `$HOME/.config`, or `%APPDATA%` (see
+//! `$XDG_CONFIG_HOME`, `$HOME/Library/Application Support` (macOS),
+//! `$HOME/.config` (other Unix), or `%APPDATA%` (Windows) (see
 //! [`config_base_dir`](crate::fs::config_base_dir)).
 //! Loading is best-effort: a missing file yields defaults, and a malformed file
 //! logs a warning and falls back to defaults rather than failing the command.

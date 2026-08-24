@@ -990,6 +990,10 @@ impl Cli {
 
         let mut middleware = Middleware::new();
         middleware.app_id = config.app_id.clone();
+        // One-time, macOS-only: move any pre-existing $HOME/.config/<app_id>
+        // contents to $HOME/Library/Application Support/<app_id> before the
+        // config file below is loaded from its (possibly new) location.
+        crate::fs::migrate_macos_config_dir(&config.app_id);
         // Load the per-application config file once at startup; cloned into each
         // per-run middleware so handlers and module registration share it.
         middleware.config = Arc::new(crate::config::ConfigFile::load(&config.app_id));

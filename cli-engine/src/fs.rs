@@ -25,23 +25,31 @@ fn home_config_dir() -> Option<PathBuf> {
     env_path("HOME").map(|home| home.join(".config"))
 }
 
+/// macOS-idiomatic `$HOME/Library/Application Support`, if `HOME` is set.
+fn home_application_support_dir() -> Option<PathBuf> {
+    env_path("HOME").map(|home| home.join("Library").join("Application Support"))
+}
+
 /// Resolves the per-user base directory for an app's config and data files.
 ///
-/// Returns `$XDG_CONFIG_HOME` when set, else `$HOME/.config` (or `%APPDATA%` on
-/// Windows). Only absolute paths are accepted; a relative value is rejected so
-/// files never land relative to the current working directory.
+/// Returns `$XDG_CONFIG_HOME` when set, else the platform-idiomatic default:
+/// `$HOME/Library/Application Support` on macOS, `%APPDATA%` on Windows, or
+/// `$HOME/.config` elsewhere. Only absolute paths are accepted; a relative
+/// value is rejected so files never land relative to the current working
+/// directory.
 #[must_use]
 pub fn config_base_dir() -> Option<PathBuf> {
     env_path("XDG_CONFIG_HOME")
         .or_else(|| {
             // On Windows prefer APPDATA over HOME/.config: HOME is often set by
             // Git Bash/MSYS shells and would place files in a non-standard
-            // location. On all other platforms prefer XDG-conventional
-            // HOME/.config, falling back to APPDATA only as a last resort.
-            // `cfg!(windows)` keeps both branches compiled (and type-checked)
-            // on every platform.
+            // location. On macOS prefer the idiomatic Application Support
+            // directory over XDG-conventional HOME/.config. `cfg!(...)` keeps
+            // every branch compiled (and type-checked) on all platforms.
             if cfg!(windows) {
                 env_path("APPDATA").or_else(home_config_dir)
+            } else if cfg!(target_os = "macos") {
+                home_application_support_dir().or_else(home_config_dir)
             } else {
                 home_config_dir().or_else(|| env_path("APPDATA"))
             }
@@ -49,6 +57,143 @@ pub fn config_base_dir() -> Option<PathBuf> {
         // Reject relative paths: a relative XDG_CONFIG_HOME/APPDATA/HOME would
         // silently place files relative to the current working directory.
         .filter(|p| p.is_absolute())
+}
+
+/// Name of the marker file that records a completed macOS config-dir
+/// migration, so [`migrate_macos_config_dir`] only ever moves files once.
+const MACOS_MIGRATION_FLAG: &str = ".cli_engine_macos_migrated";
+
+/// One-time startup migration for the `$HOME/.config` → `$HOME/Library/Application
+/// Support` default change on macOS.
+///
+/// No-op on any other platform, when `XDG_CONFIG_HOME` is set (the user
+/// already controls the location explicitly), or once the migration marker
+/// exists under the new `<app_id>` directory. Otherwise moves every entry
+/// files and subdirectories alike, whatever they're named, out of
+/// `$HOME/.config/<app_id>` and into `$HOME/Library/Application
+/// Support/<app_id>`, since callers other than this crate (credential
+/// storage, and any consumer-owned files) may have written there and this
+/// function has no way to know their names.
+pub(crate) fn migrate_macos_config_dir(app_id: &str) {
+    if !cfg!(target_os = "macos") || env_path("XDG_CONFIG_HOME").is_some() {
+        return;
+    }
+    let (Some(new_base), Some(old_base)) = (home_application_support_dir(), home_config_dir())
+    else {
+        return;
+    };
+    let new_app_dir = new_base.join(app_id);
+    let flag_path = new_app_dir.join(MACOS_MIGRATION_FLAG);
+    if flag_path.is_file() {
+        return;
+    }
+
+    let old_app_dir = old_base.join(app_id);
+    let outcome = move_directory_contents(&old_app_dir, &new_app_dir);
+    if write_string_atomic(&flag_path, "").is_err() {
+        // Couldn't record the marker (e.g. read-only filesystem), leave
+        // things as they are and just re-check on the next invocation.
+        return;
+    }
+    if outcome.moved > 0 {
+        warn_macos_config_migrated(&old_app_dir, &new_app_dir, outcome.moved);
+    }
+    if outcome.skipped > 0 {
+        warn_macos_config_migration_conflicts(&old_app_dir, &new_app_dir, outcome.skipped);
+    }
+}
+
+/// Result of [`move_directory_contents`]: counts, not names, are all callers
+/// currently need.
+struct MoveOutcome {
+    moved: usize,
+    skipped: usize,
+}
+
+/// Moves every entry from `old_dir` into `new_dir`, creating `new_dir` only
+/// if there's at least one entry to move. An entry whose name already exists
+/// under `new_dir` is left untouched in `old_dir` (never overwritten) and
+/// counted as skipped. Returns `(0, 0)` when `old_dir` doesn't exist.
+///
+/// Platform-agnostic: callers decide *when* to invoke this (e.g. only on
+/// macOS); this function only knows how to move a directory's contents.
+fn move_directory_contents(old_dir: &Path, new_dir: &Path) -> MoveOutcome {
+    let Ok(entries) = std::fs::read_dir(old_dir) else {
+        return MoveOutcome {
+            moved: 0,
+            skipped: 0,
+        };
+    };
+    if ensure_private_dir(new_dir).is_err() {
+        return MoveOutcome {
+            moved: 0,
+            skipped: 0,
+        };
+    }
+
+    let mut moved = 0;
+    let mut skipped = 0;
+    for entry in entries.flatten() {
+        let old_path = entry.path();
+        let new_path = new_dir.join(entry.file_name());
+        if new_path.exists() {
+            skipped += 1;
+            continue;
+        }
+        if std::fs::rename(&old_path, &new_path).is_ok() {
+            moved += 1;
+            continue;
+        }
+        // Cross-device fallback for regular files; a directory (in practice,
+        // only the `credentials/` subdirectory) that fails to rename across
+        // devices is left in place rather than recursively copied — same-
+        // volume rename covers every normal `$HOME`-relative setup.
+        if old_path.is_file()
+            && std::fs::copy(&old_path, &new_path).is_ok()
+            && std::fs::remove_file(&old_path).is_ok()
+        {
+            moved += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    if skipped == 0 {
+        std::fs::remove_dir(old_dir).ok();
+    }
+    MoveOutcome { moved, skipped }
+}
+
+/// Best-effort, single-line stderr notice for a completed migration.
+fn warn_macos_config_migrated(old_dir: &Path, new_dir: &Path, moved: usize) {
+    use std::io::Write as _;
+    std::io::stderr()
+        .lock()
+        .write_all(
+            format!(
+                "cli-engine: moved {moved} file(s) from {} to {} (macOS config location changed)\n",
+                old_dir.display(),
+                new_dir.display()
+            )
+            .as_bytes(),
+        )
+        .ok();
+}
+
+/// Best-effort, single-line stderr notice for entries left behind because the
+/// destination already had a same-named entry.
+fn warn_macos_config_migration_conflicts(old_dir: &Path, new_dir: &Path, skipped: usize) {
+    use std::io::Write as _;
+    std::io::stderr()
+        .lock()
+        .write_all(
+            format!(
+                "cli-engine: left {skipped} file(s) in {} because {} already has file(s) with the same name. Please reconcile manually\n",
+                old_dir.display(),
+                new_dir.display()
+            )
+            .as_bytes(),
+        )
+        .ok();
 }
 
 /// Returns the user's home directory.
@@ -132,24 +277,8 @@ pub fn is_safe_path_component(s: &str) -> bool {
 /// fails.
 pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
     if let Some(parent) = path.parent() {
-        // Record whether the parent already existed so we only restrict
-        // permissions on directories we create, not on pre-existing ones
-        // such as $HOME (which other users need to traverse).
-        let parent_existed = parent.is_dir();
-        std::fs::create_dir_all(parent)
+        ensure_private_dir(parent)
             .map_err(|e| CliCoreError::message(format!("failed to create directory: {e}")))?;
-        #[cfg(unix)]
-        if !parent_existed {
-            use std::os::unix::fs::PermissionsExt as _;
-            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            {
-                tracing::debug!(
-                    path = %parent.display(),
-                    error = %e,
-                    "could not restrict directory permissions"
-                );
-            }
-        }
     }
     // Unique temp name without pulling in `rand`: pid plus a monotonic counter is
     // unique within a process, and the pid differs across processes.
@@ -167,6 +296,27 @@ pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
             "failed to finalize {}: {e}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// Creates `dir` (and any missing ancestors) if absent. On Unix, a directory
+/// that did **not** already exist is best-effort restricted to `0700`;
+/// pre-existing directories (e.g. `$HOME`) are left unchanged so their
+/// permissions aren't altered by a caller that merely writes into them.
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    let existed = dir.is_dir();
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    if !existed {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+            tracing::debug!(
+                path = %dir.display(),
+                error = %e,
+                "could not restrict directory permissions"
+            );
+        }
     }
     Ok(())
 }
@@ -255,6 +405,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn config_base_dir_defaults_to_application_support_on_macos() {
+        let home = std::env::temp_dir().join("cli-engine-fs-macos-test");
+        let _lock = lock();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", None);
+        let _home = EnvVarGuard::set("HOME", Some(&home));
+        assert_eq!(
+            config_base_dir(),
+            Some(home.join("Library").join("Application Support"))
+        );
+    }
+
+    #[test]
     fn home_dir_honors_home_env() {
         let dir = std::env::temp_dir().join("cli-engine-fs-home-test");
         with_home(&dir, || {
@@ -296,5 +459,139 @@ mod tests {
         write_string_atomic(&path, "s3cr3t").expect("write");
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "file should be owner read/write only");
+    }
+
+    #[test]
+    fn move_directory_contents_returns_zero_when_old_dir_is_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outcome = move_directory_contents(&tmp.path().join("missing"), &tmp.path().join("new"));
+        assert_eq!((outcome.moved, outcome.skipped), (0, 0));
+        assert!(
+            !tmp.path().join("new").exists(),
+            "destination should not be created for a no-op move"
+        );
+    }
+
+    #[test]
+    fn move_directory_contents_moves_files_and_subdirectories() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_dir = tmp.path().join("old");
+        let new_dir = tmp.path().join("new");
+        std::fs::create_dir_all(old_dir.join("credentials")).expect("mkdir");
+        std::fs::write(old_dir.join("config.toml"), "a = 1").expect("write");
+        std::fs::write(old_dir.join("contacts.toml"), "b = 2").expect("write");
+        std::fs::write(old_dir.join("credentials").join("token.json"), "{}").expect("write");
+
+        let outcome = move_directory_contents(&old_dir, &new_dir);
+
+        assert_eq!(outcome.moved, 3, "config.toml, contacts.toml, credentials/");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("config.toml")).expect("read"),
+            "a = 1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("contacts.toml")).expect("read"),
+            "b = 2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("credentials").join("token.json")).expect("read"),
+            "{}"
+        );
+        assert!(!old_dir.exists(), "emptied old directory should be removed");
+    }
+
+    #[test]
+    fn move_directory_contents_leaves_conflicting_entries_in_place() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_dir = tmp.path().join("old");
+        let new_dir = tmp.path().join("new");
+        std::fs::create_dir_all(&old_dir).expect("mkdir");
+        std::fs::create_dir_all(&new_dir).expect("mkdir");
+        std::fs::write(old_dir.join("config.toml"), "old").expect("write");
+        std::fs::write(new_dir.join("config.toml"), "new").expect("write");
+        std::fs::write(old_dir.join("contacts.toml"), "moves fine").expect("write");
+
+        let outcome = move_directory_contents(&old_dir, &new_dir);
+
+        assert_eq!(outcome.moved, 1, "contacts.toml has no conflict");
+        assert_eq!(
+            outcome.skipped, 1,
+            "config.toml conflicts and is left alone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("config.toml")).expect("read"),
+            "new",
+            "destination copy must never be overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(old_dir.join("config.toml")).expect("read"),
+            "old",
+            "conflicting source file is left in place"
+        );
+        assert!(
+            old_dir.exists(),
+            "old directory is not removed while a conflict remains"
+        );
+        assert!(!old_dir.join("contacts.toml").exists());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn migrate_macos_config_dir_moves_files_once() {
+        let home = std::env::temp_dir().join("cli-engine-fs-migrate-test");
+        let old_app_dir = home.join(".config").join("my-app");
+        let new_app_dir = home
+            .join("Library")
+            .join("Application Support")
+            .join("my-app");
+        // Fixed temp-dir name (matching this file's other macOS test): clean
+        // up any residue from a previous run before writing real fixtures.
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&old_app_dir).expect("mkdir");
+        std::fs::write(old_app_dir.join("environments.toml"), "env = true").expect("write");
+        let _lock = lock();
+        let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", None);
+        let _home = EnvVarGuard::set("HOME", Some(&home));
+
+        migrate_macos_config_dir("my-app");
+        assert_eq!(
+            std::fs::read_to_string(new_app_dir.join("environments.toml")).expect("read"),
+            "env = true"
+        );
+        assert!(new_app_dir.join(MACOS_MIGRATION_FLAG).is_file());
+        assert!(!old_app_dir.exists());
+
+        // Second run is a no-op: dropping a new file into the old location
+        // (simulating a stray write) must not be picked up once migrated.
+        std::fs::create_dir_all(&old_app_dir).expect("mkdir");
+        std::fs::write(old_app_dir.join("late.toml"), "ignored").expect("write");
+        migrate_macos_config_dir("my-app");
+        assert!(
+            !new_app_dir.join("late.toml").exists(),
+            "migration must not repeat once the marker exists"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn migrate_macos_config_dir_is_a_noop_when_xdg_config_home_is_set() {
+        let home = std::env::temp_dir().join("cli-engine-fs-migrate-xdg-test");
+        let xdg = std::env::temp_dir().join("cli-engine-fs-migrate-xdg-override");
+        let old_app_dir = home.join(".config").join("my-app");
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&old_app_dir).expect("mkdir");
+        std::fs::write(old_app_dir.join("config.toml"), "x = 1").expect("write");
+        // `with_xdg_config_home` takes the shared env-var lock itself; taking
+        // it again here would deadlock on the same thread.
+        with_xdg_config_home(&xdg, || {
+            let _home = EnvVarGuard::set("HOME", Some(&home));
+            migrate_macos_config_dir("my-app");
+        });
+
+        assert!(
+            old_app_dir.join("config.toml").is_file(),
+            "an explicit XDG_CONFIG_HOME must leave the old default location untouched"
+        );
     }
 }
