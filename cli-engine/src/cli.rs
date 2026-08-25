@@ -3619,7 +3619,7 @@ mod unknown_command_suggestion_tests {
     }
 
     #[test]
-    fn detect_unknown_group_command_annotates_with_suggestion() {
+    fn unknown_group_command_formats_did_you_mean_suffix() {
         let root = sample_group();
         let unknown = detect_unknown_group_command(&root, &["domian".to_owned()])
             .expect("domian is an unknown top-level command");
