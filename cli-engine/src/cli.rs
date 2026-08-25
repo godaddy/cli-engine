@@ -1716,11 +1716,45 @@ impl Cli {
                 &value_flags,
                 &parts,
             );
-        } else if let Some(message) = unknown_group_command_message(&self.root, &positionals) {
-            return self.finish_run(CliRunOutput {
-                exit_code: 1,
-                rendered: message,
-            });
+        } else if let Some(unknown) =
+            detect_unknown_group_command(&self.root, &positionals[..command_keyword_count])
+        {
+            // Interactive sessions may accept a near-match and re-dispatch.
+            if let Some(suggestion) = unknown.suggestion.as_deref() {
+                match crate::prompt::confirm_command_correction(
+                    &clap_args,
+                    suggestion,
+                    self.config.auto_interactive,
+                ) {
+                    crate::prompt::CommandCorrection::Accepted => {
+                        clap_args = replace_positional_command_token(
+                            &clap_args,
+                            &self.config.name,
+                            &bool_flags,
+                            &value_flags,
+                            unknown.positional_index,
+                            suggestion,
+                        );
+                    }
+                    crate::prompt::CommandCorrection::Declined => {
+                        return self.finish_run(CliRunOutput {
+                            exit_code: 1,
+                            rendered: unknown.message,
+                        });
+                    }
+                    crate::prompt::CommandCorrection::Cancelled => {
+                        return self.finish_run(CliRunOutput {
+                            exit_code: 130,
+                            rendered: "Cancelled.".to_owned(),
+                        });
+                    }
+                }
+            } else {
+                return self.finish_run(CliRunOutput {
+                    exit_code: 1,
+                    rendered: unknown.message,
+                });
+            }
         }
 
         let matches = match self.root.clone().try_get_matches_from(&clap_args) {
@@ -2052,7 +2086,7 @@ impl Cli {
         // `--schema` is an inspection flag and must not require the command's own
         // arguments, so it short-circuits before clap validates them. Only fire
         // for a real leaf command, though: unknown paths and groups fall through
-        // so clap and `unknown_group_command_message` can report them as usual.
+        // so clap and `detect_unknown_group_command` can report them as usual.
         let command = find_command_by_colon_path(&self.root, &command_path)?;
         if command.get_subcommands().next().is_some() {
             return None;
@@ -3314,28 +3348,285 @@ fn direct_subcommand<'command>(
     })
 }
 
-fn unknown_group_command_message(root: &Command, positionals: &[String]) -> Option<String> {
+/// An unrecognized command token from the group router, with an optional correction.
+struct UnknownGroupCommand {
+    /// Error text, including a `— did you mean "X"?` suffix when applicable.
+    message: String,
+    suggestion: Option<String>,
+    /// Index within positional command tokens (for arg rewrite on accept).
+    positional_index: usize,
+}
+
+/// Walks positional command tokens through the group tree and reports the first
+/// unknown token under a group.
+///
+/// Returns `None` when every token resolves, or when the failure is at a leaf
+/// (clap reports those). `positionals` must be pre-`--` command keywords only —
+/// the caller slices to `command_keyword_count` like the group-help path.
+fn detect_unknown_group_command(
+    root: &Command,
+    positionals: &[String],
+) -> Option<UnknownGroupCommand> {
     if positionals.is_empty() {
         return None;
     }
 
     let mut current = root;
     let mut path = vec![root.get_name().to_owned()];
-    for token in positionals {
+    for (positional_index, token) in positionals.iter().enumerate() {
         if let Some(next) = current.find_subcommand(token) {
             current = next;
             path.push(next.get_name().to_owned());
             continue;
         }
         if current.get_subcommands().next().is_some() {
-            return Some(format!(
-                "unknown command {token:?} for {:?}",
-                path.join(" ")
-            ));
+            let base = format!("unknown command {token:?} for {:?}", path.join(" "));
+            let suggestion = nearest_subcommand(current, token);
+            let message = match &suggestion {
+                Some(suggestion) => format!("{base} — did you mean {suggestion:?}?"),
+                None => base,
+            };
+            return Some(UnknownGroupCommand {
+                message,
+                suggestion,
+                positional_index,
+            });
         }
         return None;
     }
     None
+}
+
+/// Rewrites the `target`-th positional command token to `replacement`, preserving
+/// flags. Token classification mirrors [`positional_command_tokens`].
+fn replace_positional_command_token(
+    args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+    target: usize,
+    replacement: &str,
+) -> Vec<String> {
+    let mut out = args.to_vec();
+    let mut index = 0;
+    if out
+        .first()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+    {
+        index = 1;
+    }
+
+    let mut positional = 0;
+    while index < out.len() {
+        let arg = &out[index];
+        if arg == "--" {
+            break;
+        }
+        if arg.contains('=') {
+            index += 1;
+            continue;
+        }
+        if bool_flags.contains(arg) {
+            index += 1;
+            continue;
+        }
+        if value_flags.contains(arg)
+            || unknown_flag_consumes_value(arg, out.get(index + 1).as_ref())
+        {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if positional == target {
+            out[index] = replacement.to_owned();
+            break;
+        }
+        positional += 1;
+        index += 1;
+    }
+    out
+}
+
+/// Finds the closest visible subcommand name or alias within edit-distance
+/// `max(1, token_len / 3)`. Returns the canonical name; ties break alphabetically.
+fn nearest_subcommand(command: &Command, token: &str) -> Option<String> {
+    let token = token.to_ascii_lowercase();
+    let max_distance = 1.max(token.chars().count() / 3);
+
+    command
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+        .filter_map(|child| {
+            let best = std::iter::once(child.get_name())
+                .chain(child.get_all_aliases())
+                .map(|candidate| edit_distance(&token, &candidate.to_ascii_lowercase()))
+                .min()?;
+            (best <= max_distance).then(|| (best, child.get_name().to_owned()))
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, name)| name)
+}
+
+/// Restricted Damerau–Levenshtein distance (insert, delete, substitute, adjacent swap).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+
+    // Full matrix: transposition needs row i-2; names are short so O(n·m) is fine.
+    let mut d = vec![vec![0_usize; m + 1]; n + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = best;
+        }
+    }
+    d[n][m]
+}
+
+#[cfg(test)]
+mod unknown_command_suggestion_tests {
+    use super::*;
+
+    fn sample_group() -> Command {
+        Command::new("gddy").subcommand(
+            Command::new("domain")
+                .alias("dns-domain")
+                .subcommand(Command::new("list"))
+                .subcommand(Command::new("available")),
+        )
+    }
+
+    #[test]
+    fn edit_distance_counts_single_edits_and_transpositions() {
+        assert_eq!(edit_distance("domain", "domain"), 0);
+        assert_eq!(edit_distance("domian", "domain"), 1);
+        assert_eq!(edit_distance("lst", "list"), 1);
+        assert_eq!(edit_distance("lsit", "list"), 1);
+        assert_eq!(edit_distance("avaliable", "available"), 1);
+        assert_eq!(edit_distance("cat", "set"), 2);
+        assert_eq!(edit_distance("", "list"), 4);
+    }
+
+    #[test]
+    fn nearest_subcommand_matches_close_typos() {
+        let root = sample_group();
+        let domain = root.find_subcommand("domain").expect("domain registered");
+        assert_eq!(nearest_subcommand(domain, "lst").as_deref(), Some("list"));
+        assert_eq!(nearest_subcommand(domain, "ilst").as_deref(), Some("list"));
+        assert_eq!(
+            nearest_subcommand(domain, "avaliable").as_deref(),
+            Some("available")
+        );
+    }
+
+    #[test]
+    fn nearest_subcommand_rejects_unrelated_tokens() {
+        let root = sample_group();
+        let domain = root.find_subcommand("domain").expect("domain registered");
+        assert_eq!(nearest_subcommand(domain, "missing"), None);
+    }
+
+    #[test]
+    fn nearest_subcommand_returns_canonical_name_for_alias_typos() {
+        let root = sample_group();
+        assert_eq!(
+            nearest_subcommand(&root, "dns-domian").as_deref(),
+            Some("domain")
+        );
+    }
+
+    #[test]
+    fn nearest_subcommand_skips_hidden_commands() {
+        let root = Command::new("gddy")
+            .subcommand(Command::new("visible"))
+            .subcommand(Command::new("hiddeen").hide(true));
+        assert_eq!(nearest_subcommand(&root, "hidden"), None);
+    }
+
+    #[test]
+    fn nearest_subcommand_rejects_short_unrelated_tokens() {
+        let root = Command::new("gddy").subcommand(
+            Command::new("config")
+                .subcommand(Command::new("get"))
+                .subcommand(Command::new("set"))
+                .subcommand(Command::new("add")),
+        );
+        let config = root.find_subcommand("config").expect("config registered");
+        assert_eq!(nearest_subcommand(config, "cat"), None);
+        assert_eq!(nearest_subcommand(config, "x"), None);
+        assert_eq!(nearest_subcommand(config, "st").as_deref(), Some("set"));
+    }
+
+    #[test]
+    fn detect_unknown_group_command_annotates_with_suggestion() {
+        let root = sample_group();
+        let unknown = detect_unknown_group_command(&root, &["domian".to_owned()])
+            .expect("domian is an unknown top-level command");
+        assert_eq!(unknown.suggestion.as_deref(), Some("domain"));
+        assert_eq!(unknown.positional_index, 0);
+        assert_eq!(
+            unknown.message,
+            "unknown command \"domian\" for \"gddy\" — did you mean \"domain\"?"
+        );
+    }
+
+    #[test]
+    fn detect_unknown_group_command_reports_nested_typos() {
+        let root = sample_group();
+        let unknown = detect_unknown_group_command(&root, &["domain".to_owned(), "lst".to_owned()])
+            .expect("lst is an unknown subcommand of domain");
+        assert_eq!(unknown.suggestion.as_deref(), Some("list"));
+        assert_eq!(unknown.positional_index, 1);
+        assert_eq!(
+            unknown.message,
+            "unknown command \"lst\" for \"gddy domain\" — did you mean \"list\"?"
+        );
+    }
+
+    #[test]
+    fn detect_unknown_group_command_omits_hint_for_unrelated_tokens() {
+        let root = sample_group();
+        let unknown = detect_unknown_group_command(&root, &["missing".to_owned()])
+            .expect("missing is an unknown top-level command");
+        assert_eq!(unknown.suggestion, None);
+        assert_eq!(unknown.message, "unknown command \"missing\" for \"gddy\"");
+    }
+
+    #[test]
+    fn replace_positional_command_token_rewrites_only_the_target() {
+        let bool_flags: BTreeSet<String> = ["--verbose".to_owned()].into_iter().collect();
+        let value_flags: BTreeSet<String> = ["--output".to_owned()].into_iter().collect();
+        let args = vec![
+            "gddy".to_owned(),
+            "--output".to_owned(),
+            "json".to_owned(),
+            "domain".to_owned(),
+            "lst".to_owned(),
+        ];
+        let corrected =
+            replace_positional_command_token(&args, "gddy", &bool_flags, &value_flags, 1, "list");
+        assert_eq!(
+            corrected,
+            vec!["gddy", "--output", "json", "domain", "list"]
+        );
+    }
 }
 
 /// Detects the `<group> help [sub...]` form and returns the command path whose

@@ -228,6 +228,35 @@ pub fn try_recover_missing_args(
     Some(RecoveryResult::Recovered { args: augmented })
 }
 
+/// Outcome of a "did you mean X?" correction prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandCorrection {
+    /// User accepted; re-dispatch with the corrected token.
+    Accepted,
+    /// Non-interactive session or user declined; report the original error.
+    Declined,
+    /// User aborted (Escape or Ctrl+C).
+    Cancelled,
+}
+
+/// Offer to correct an unknown command spelling. Never prompts when the session
+/// is non-interactive (agents and piped invocations see the original error).
+/// Interactivity follows the same raw-args rules as [`try_recover_missing_args`].
+pub fn confirm_command_correction(
+    args: &[String],
+    suggestion: &str,
+    auto_interactive: bool,
+) -> CommandCorrection {
+    if !is_interactive_from_raw_args(args, auto_interactive) {
+        return CommandCorrection::Declined;
+    }
+    match prompt_confirm(&format!("Did you mean `{suggestion}`?"), true) {
+        Ok(true) => CommandCorrection::Accepted,
+        Ok(false) => CommandCorrection::Declined,
+        Err(_) => CommandCorrection::Cancelled,
+    }
+}
+
 /// Result of attempting interactive recovery for missing args.
 #[derive(Debug)]
 pub enum RecoveryResult {
@@ -430,6 +459,21 @@ mod tests {
         let leaf = resolve_leaf_command(&root, &args, "my-cli");
         assert!(leaf.is_some());
         assert_eq!(leaf.expect("tested").get_name(), "list");
+    }
+
+    #[test]
+    fn confirm_command_correction_declines_when_non_interactive() {
+        let args: Vec<String> = vec!["my-cli".into(), "projet".into()];
+        assert_eq!(
+            confirm_command_correction(&args, "project", false),
+            CommandCorrection::Declined
+        );
+
+        let args: Vec<String> = vec!["my-cli".into(), "projet".into(), "--non-interactive".into()];
+        assert_eq!(
+            confirm_command_correction(&args, "project", true),
+            CommandCorrection::Declined
+        );
     }
 
     #[test]
