@@ -233,16 +233,14 @@ pub fn try_recover_missing_args(
 pub enum CommandCorrection {
     /// User accepted; re-dispatch with the corrected token.
     Accepted,
-    /// Don't rewrite args; caller reports `unknown.message` (may include a hint).
+    /// Don't rewrite args; caller renders the error (with hint when applicable).
     Declined,
     /// User aborted (Escape or Ctrl+C).
     Cancelled,
 }
 
-/// Offer to correct an unknown command spelling. Never prompts when the session
-/// is non-interactive; the nearest-match hint is still included in the error
-/// the caller renders on [`CommandCorrection::Declined`]. Interactivity follows
-/// the same raw-args rules as [`try_recover_missing_args`].
+/// Offer to correct an unknown command spelling. Never prompts when non-interactive;
+/// interactivity follows the same raw-args rules as [`try_recover_missing_args`].
 pub fn confirm_command_correction(
     args: &[String],
     suggestion: &str,

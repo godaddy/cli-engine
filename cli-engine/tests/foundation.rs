@@ -995,6 +995,81 @@ async fn cli_runtime_unknown_nested_command_suggests_nearest_match() {
 }
 
 #[tokio::test]
+async fn cli_runtime_unknown_command_suggests_the_full_corrected_command_for_multiple_typos() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    let output = cli.run(["my-cli", "projet", "lst"]).await;
+
+    assert_eq!(output.exit_code, 1);
+    assert_eq!(
+        output.rendered,
+        "unknown command \"projet\" for \"my-cli\" — did you mean \"my-cli project list\"?"
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_unknown_command_suggests_the_full_command_when_only_the_group_is_mistyped() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    let output = cli.run(["my-cli", "projet", "list"]).await;
+
+    assert_eq!(output.exit_code, 1);
+    assert_eq!(
+        output.rendered,
+        "unknown command \"projet\" for \"my-cli\" — did you mean \"my-cli project list\"?"
+    );
+}
+
+#[tokio::test]
+async fn cli_runtime_unknown_command_omits_hint_when_a_later_token_is_unfixable() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({}))),
+            ),
+        ),
+    );
+
+    let output = cli.run(["my-cli", "projet", "xyzzy"]).await;
+
+    assert_eq!(output.exit_code, 1);
+    assert_eq!(output.rendered, "unknown command \"projet\" for \"my-cli\"");
+}
+
+#[tokio::test]
 async fn cli_runtime_unknown_command_omits_hint_when_no_close_match() {
     let mut cli = Cli::new(CliConfig {
         name: "my-cli".to_owned(),
