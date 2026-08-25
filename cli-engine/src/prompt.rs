@@ -8,6 +8,8 @@
 //! [`CommandContext::is_interactive`](crate::command::CommandContext::is_interactive)
 //! returns `true`.
 
+use std::io::Write as _;
+
 use crate::error::CliCoreError;
 
 /// Prompt the user for a free-text string input.
@@ -171,6 +173,17 @@ pub fn try_recover_missing_args(
     // Resolve the leaf command from the args to get arg metadata.
     let leaf_command = resolve_leaf_command(command, original_args, app_name)?;
 
+    // Print a header so the user knows why they're being prompted.
+    let missing_list: Vec<&str> = missing_names
+        .iter()
+        .map(|n| strip_arg_decoration(n))
+        .collect();
+    drop(writeln!(
+        std::io::stderr(),
+        "\n  \u{26a0} missing required argument(s): {}",
+        missing_list.join(", ")
+    ));
+
     // Collect prompted values, respecting arg declaration order.
     let mut prompted_args: Vec<String> = Vec::new();
     let mut already_supplied: Vec<String> = original_args.to_vec();
@@ -319,12 +332,14 @@ fn strip_arg_decoration(raw: &str) -> &str {
 
 /// Format a human-friendly prompt message from a raw clap arg identifier.
 fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String {
-    if let Some(arg) = arg_def
+    let base = if let Some(arg) = arg_def
         && let Some(help) = arg.get_help().map(|s| s.to_string())
     {
-        return help;
-    }
-    strip_arg_decoration(raw_name).replace('-', " ")
+        help
+    } else {
+        strip_arg_decoration(raw_name).replace('-', " ")
+    };
+    format!("Enter {base}")
 }
 
 /// Build a resume command string from the already-supplied args.
@@ -384,20 +399,20 @@ mod tests {
     #[test]
     fn format_prompt_message_from_flag_name() {
         let msg = format_prompt_message("--team-name", None);
-        assert_eq!(msg, "team name");
+        assert_eq!(msg, "Enter team name");
     }
 
     #[test]
     fn format_prompt_message_from_positional() {
         let msg = format_prompt_message("<domain>", None);
-        assert_eq!(msg, "domain");
+        assert_eq!(msg, "Enter domain");
     }
 
     #[test]
     fn format_prompt_message_uses_help_text() {
         let arg = clap::Arg::new("team").long("team").help("Team identifier");
         let msg = format_prompt_message("--team", Some(&arg));
-        assert_eq!(msg, "Team identifier");
+        assert_eq!(msg, "Enter Team identifier");
     }
 
     #[test]
