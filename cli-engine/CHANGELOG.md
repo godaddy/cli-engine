@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.0...cli-engine-v0.9.1) (2026-08-25)
+
+
+### Features
+
+* **cli:** suggest the nearest command on engine-intercepted unknowns ([#104](https://github.com/godaddy/cli-engine/issues/104)) ([0bfe701](https://github.com/godaddy/cli-engine/commit/0bfe701526722dc3b70eded90c3a7308cfd1f00b))
+
 ## [0.9.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.8.7...cli-engine-v0.9.0) (2026-08-24)
 
 
