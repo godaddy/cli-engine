@@ -1686,20 +1686,8 @@ impl Cli {
         let value_flags = derive_value_flags(&self.root);
         let positionals =
             positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags);
-        // Positional tokens after a `--` separator are literal operands, not
-        // command keywords, so the group-help shim must not treat a `help`
-        // among them as a help request. Count the positionals that precede any
-        // `--` to mark where genuine command keywords end.
-        let command_keyword_count = match text_args.iter().position(|arg| arg == "--") {
-            Some(end) => positional_command_tokens(
-                &text_args[..end],
-                &self.config.name,
-                &bool_flags,
-                &value_flags,
-            )
-            .len(),
-            None => positionals.len(),
-        };
+        let command_keyword_count =
+            command_keyword_count(&text_args, &self.config.name, &bool_flags, &value_flags);
         if let Some(parts) =
             group_help_target_parts(&self.root, &positionals, command_keyword_count)
         {
@@ -1716,11 +1704,62 @@ impl Cli {
                 &value_flags,
                 &parts,
             );
-        } else if let Some(message) = unknown_group_command_message(&self.root, &positionals) {
-            return self.finish_run(CliRunOutput {
-                exit_code: 1,
-                rendered: message,
-            });
+        } else if let Some(unknown) =
+            detect_unknown_group_command(&self.root, &positionals[..command_keyword_count])
+        {
+            // Hint/re-dispatch only when the whole path resolves to one command.
+            if let Some(corrections) =
+                full_command_correction(&self.root, &positionals[..command_keyword_count])
+            {
+                let display = correction_display(
+                    &self.config.name,
+                    &positionals[..command_keyword_count],
+                    &corrections,
+                );
+                let full_fix_message = format_did_you_mean(&unknown.base, &display);
+                match crate::prompt::confirm_command_correction(
+                    &clap_args,
+                    &display,
+                    self.config.auto_interactive,
+                ) {
+                    crate::prompt::CommandCorrection::Accepted => {
+                        for (index, replacement) in &corrections {
+                            clap_args = replace_positional_command_token(
+                                &clap_args,
+                                &self.config.name,
+                                &bool_flags,
+                                &value_flags,
+                                *index,
+                                replacement,
+                            );
+                        }
+                        clap_args = rewrite_group_help_if_needed(
+                            &self.root,
+                            &clap_args,
+                            &self.config.name,
+                            &bool_flags,
+                            &value_flags,
+                        );
+                    }
+                    crate::prompt::CommandCorrection::Declined => {
+                        return self.finish_run(CliRunOutput {
+                            exit_code: 1,
+                            rendered: full_fix_message,
+                        });
+                    }
+                    crate::prompt::CommandCorrection::Cancelled => {
+                        return self.finish_run(CliRunOutput {
+                            exit_code: 130,
+                            rendered: "Cancelled.".to_owned(),
+                        });
+                    }
+                }
+            } else {
+                return self.finish_run(CliRunOutput {
+                    exit_code: 1,
+                    rendered: unknown.base,
+                });
+            }
         }
 
         let matches = match self.root.clone().try_get_matches_from(&clap_args) {
@@ -2052,7 +2091,7 @@ impl Cli {
         // `--schema` is an inspection flag and must not require the command's own
         // arguments, so it short-circuits before clap validates them. Only fire
         // for a real leaf command, though: unknown paths and groups fall through
-        // so clap and `unknown_group_command_message` can report them as usual.
+        // so clap and `detect_unknown_group_command` can report them as usual.
         let command = find_command_by_colon_path(&self.root, &command_path)?;
         if command.get_subcommands().next().is_some() {
             return None;
@@ -3314,7 +3353,22 @@ fn direct_subcommand<'command>(
     })
 }
 
-fn unknown_group_command_message(root: &Command, positionals: &[String]) -> Option<String> {
+/// Appends a `— did you mean "…"?` suffix to an unknown-command error clause.
+fn format_did_you_mean(base: &str, suggestion: &str) -> String {
+    format!("{base} — did you mean {suggestion:?}?")
+}
+
+/// First unknown group token (`unknown command "X" for "Y"`, no hint suffix).
+struct UnknownGroupCommand {
+    base: String,
+}
+
+/// Reports the first unknown token under a group. `positionals` must be pre-`--`
+/// command keywords (slice to `command_keyword_count` like the group-help path).
+fn detect_unknown_group_command(
+    root: &Command,
+    positionals: &[String],
+) -> Option<UnknownGroupCommand> {
     if positionals.is_empty() {
         return None;
     }
@@ -3328,14 +3382,403 @@ fn unknown_group_command_message(root: &Command, positionals: &[String]) -> Opti
             continue;
         }
         if current.get_subcommands().next().is_some() {
-            return Some(format!(
-                "unknown command {token:?} for {:?}",
-                path.join(" ")
-            ));
+            let base = format!("unknown command {token:?} for {:?}", path.join(" "));
+            return Some(UnknownGroupCommand { base });
         }
         return None;
     }
     None
+}
+
+/// Counts positional command tokens that precede any `--` separator.
+fn command_keyword_count(
+    args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+) -> usize {
+    let positionals = positional_command_tokens(args, root_name, bool_flags, value_flags);
+    match args.iter().position(|arg| arg == "--") {
+        Some(end) => {
+            positional_command_tokens(&args[..end], root_name, bool_flags, value_flags).len()
+        }
+        None => positionals.len(),
+    }
+}
+
+/// Rewrites `<group> help [sub...]` into `help <group> [sub...]` when the form
+/// is present; otherwise returns `clap_args` unchanged.
+fn rewrite_group_help_if_needed(
+    root: &Command,
+    clap_args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+) -> Vec<String> {
+    let positionals = positional_command_tokens(clap_args, root_name, bool_flags, value_flags);
+    let keyword_count = command_keyword_count(clap_args, root_name, bool_flags, value_flags);
+    let Some(parts) = group_help_target_parts(root, &positionals, keyword_count) else {
+        return clap_args.to_vec();
+    };
+    rewrite_group_help_args(clap_args, root_name, bool_flags, value_flags, &parts)
+}
+
+/// Rewrites the `target`-th positional command token to `replacement`, preserving
+/// flags. Token classification mirrors [`positional_command_tokens`].
+fn replace_positional_command_token(
+    args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+    target: usize,
+    replacement: &str,
+) -> Vec<String> {
+    let mut out = args.to_vec();
+    let mut index = 0;
+    if out
+        .first()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+    {
+        index = 1;
+    }
+
+    let mut positional = 0;
+    while index < out.len() {
+        let arg = &out[index];
+        if arg == "--" {
+            break;
+        }
+        if arg.contains('=') {
+            index += 1;
+            continue;
+        }
+        if bool_flags.contains(arg) {
+            index += 1;
+            continue;
+        }
+        if value_flags.contains(arg)
+            || unknown_flag_consumes_value(arg, out.get(index + 1).as_ref())
+        {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if positional == target {
+            out[index] = replacement.to_owned();
+            break;
+        }
+        positional += 1;
+        index += 1;
+    }
+    out
+}
+
+/// Finds the closest visible subcommand name or alias within edit-distance
+/// `max(1, token_len / 3)`. Returns the canonical name; ties break alphabetically.
+fn nearest_subcommand(command: &Command, token: &str) -> Option<String> {
+    let token = token.to_ascii_lowercase();
+    let max_distance = 1.max(token.chars().count() / 3);
+
+    command
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+        .filter_map(|child| {
+            let best = std::iter::once(child.get_name())
+                .chain(child.get_all_aliases())
+                .map(|candidate| strsim::osa_distance(&token, &candidate.to_ascii_lowercase()))
+                .min()?;
+            (best <= max_distance).then(|| (best, child.get_name().to_owned()))
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, name)| name)
+}
+
+/// Corrects every unknown group token to its nearest subcommand. Returns `None`
+/// when any token has no near match, or when there is nothing to correct.
+/// Stops at a leaf operand, curated `<group> help`, or an unfixable token.
+fn full_command_correction(root: &Command, positionals: &[String]) -> Option<Vec<(usize, String)>> {
+    let mut current = root;
+    let mut corrections = Vec::new();
+    for (index, token) in positionals.iter().enumerate() {
+        if let Some(next) = current.find_subcommand(token) {
+            current = next;
+            continue;
+        }
+        if current.get_subcommands().next().is_none() {
+            break;
+        }
+        if token == "help" && current.find_subcommand("help").is_none() {
+            break;
+        }
+        let suggestion = nearest_subcommand(current, token)?;
+        let next = current.find_subcommand(&suggestion)?;
+        corrections.push((index, suggestion));
+        current = next;
+    }
+    (!corrections.is_empty()).then_some(corrections)
+}
+
+/// Prompt/display text for a correction. Last-token-only fixes show the bare
+/// token; anything else shows the full corrected command path.
+fn correction_display(
+    root_name: &str,
+    positionals: &[String],
+    corrections: &[(usize, String)],
+) -> String {
+    if let [(index, only)] = corrections
+        && *index + 1 == positionals.len()
+    {
+        return only.clone();
+    }
+    let mut tokens = vec![root_name.to_owned()];
+    for (index, token) in positionals.iter().enumerate() {
+        let corrected = corrections
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, replacement)| replacement.clone())
+            .unwrap_or_else(|| token.clone());
+        tokens.push(corrected);
+    }
+    tokens.join(" ")
+}
+
+#[cfg(test)]
+mod unknown_command_suggestion_tests {
+    use super::*;
+
+    fn sample_group() -> Command {
+        Command::new("gddy").subcommand(
+            Command::new("domain")
+                .alias("dns-domain")
+                .subcommand(Command::new("list"))
+                .subcommand(Command::new("available")),
+        )
+    }
+
+    #[test]
+    fn osa_distance_treats_adjacent_transposition_as_one_edit() {
+        // Guard against swapping to `strsim::levenshtein`, which counts swaps as two edits.
+        assert_eq!(strsim::osa_distance("domain", "domain"), 0);
+        assert_eq!(strsim::osa_distance("domian", "domain"), 1);
+        assert_eq!(strsim::osa_distance("lst", "list"), 1);
+        assert_eq!(strsim::osa_distance("lsit", "list"), 1);
+        assert_eq!(strsim::osa_distance("cat", "set"), 2);
+    }
+
+    #[test]
+    fn nearest_subcommand_matches_close_typos() {
+        let root = sample_group();
+        let domain = root.find_subcommand("domain").expect("domain registered");
+        assert_eq!(nearest_subcommand(domain, "lst").as_deref(), Some("list"));
+        assert_eq!(nearest_subcommand(domain, "ilst").as_deref(), Some("list"));
+        assert_eq!(
+            nearest_subcommand(domain, "avaliable").as_deref(),
+            Some("available")
+        );
+    }
+
+    #[test]
+    fn nearest_subcommand_rejects_unrelated_tokens() {
+        let root = sample_group();
+        let domain = root.find_subcommand("domain").expect("domain registered");
+        assert_eq!(nearest_subcommand(domain, "missing"), None);
+    }
+
+    #[test]
+    fn nearest_subcommand_returns_canonical_name_for_alias_typos() {
+        let root = sample_group();
+        assert_eq!(
+            nearest_subcommand(&root, "dns-domian").as_deref(),
+            Some("domain")
+        );
+    }
+
+    #[test]
+    fn nearest_subcommand_skips_hidden_commands() {
+        let root = Command::new("gddy")
+            .subcommand(Command::new("visible"))
+            .subcommand(Command::new("hiddeen").hide(true));
+        assert_eq!(nearest_subcommand(&root, "hidden"), None);
+    }
+
+    #[test]
+    fn nearest_subcommand_rejects_short_unrelated_tokens() {
+        let root = Command::new("gddy").subcommand(
+            Command::new("config")
+                .subcommand(Command::new("get"))
+                .subcommand(Command::new("set"))
+                .subcommand(Command::new("add")),
+        );
+        let config = root.find_subcommand("config").expect("config registered");
+        assert_eq!(nearest_subcommand(config, "cat"), None);
+        assert_eq!(nearest_subcommand(config, "x"), None);
+        assert_eq!(nearest_subcommand(config, "st").as_deref(), Some("set"));
+    }
+
+    #[test]
+    fn unknown_group_command_formats_did_you_mean_suffix() {
+        let root = sample_group();
+        let unknown = detect_unknown_group_command(&root, &["domian".to_owned()])
+            .expect("domian is an unknown top-level command");
+        assert_eq!(unknown.base, "unknown command \"domian\" for \"gddy\"");
+        assert_eq!(
+            format_did_you_mean(&unknown.base, "domain"),
+            "unknown command \"domian\" for \"gddy\" — did you mean \"domain\"?"
+        );
+    }
+
+    #[test]
+    fn detect_unknown_group_command_reports_nested_typos() {
+        let root = sample_group();
+        let unknown = detect_unknown_group_command(&root, &["domain".to_owned(), "lst".to_owned()])
+            .expect("lst is an unknown subcommand of domain");
+        assert_eq!(unknown.base, "unknown command \"lst\" for \"gddy domain\"");
+        assert_eq!(
+            format_did_you_mean(&unknown.base, "list"),
+            "unknown command \"lst\" for \"gddy domain\" — did you mean \"list\"?"
+        );
+    }
+
+    #[test]
+    fn detect_unknown_group_command_omits_hint_for_unrelated_tokens() {
+        let root = sample_group();
+        let unknown = detect_unknown_group_command(&root, &["missing".to_owned()])
+            .expect("missing is an unknown top-level command");
+        assert_eq!(unknown.base, "unknown command \"missing\" for \"gddy\"");
+    }
+
+    #[test]
+    fn full_command_correction_fixes_a_single_group_typo() {
+        let root = sample_group();
+        let corrections = full_command_correction(&root, &["domian".to_owned()])
+            .expect("domian is correctable to domain");
+        assert_eq!(corrections, vec![(0, "domain".to_owned())]);
+    }
+
+    #[test]
+    fn full_command_correction_fixes_every_typo_in_a_nested_path() {
+        let root = sample_group();
+        let corrections = full_command_correction(&root, &["domian".to_owned(), "lst".to_owned()])
+            .expect("both tokens are correctable");
+        assert_eq!(
+            corrections,
+            vec![(0, "domain".to_owned()), (1, "list".to_owned())]
+        );
+    }
+
+    #[test]
+    fn full_command_correction_bails_when_a_token_has_no_near_match() {
+        let root = sample_group();
+        assert_eq!(
+            full_command_correction(&root, &["domain".to_owned(), "missing".to_owned()]),
+            None
+        );
+    }
+
+    #[test]
+    fn full_command_correction_is_none_when_there_is_nothing_to_correct() {
+        let root = sample_group();
+        assert_eq!(full_command_correction(&root, &["domain".to_owned()]), None);
+        assert_eq!(full_command_correction(&root, &[]), None);
+    }
+
+    #[test]
+    fn full_command_correction_corrects_the_group_before_curated_help() {
+        let root = sample_group();
+        let corrections = full_command_correction(&root, &["domian".to_owned(), "help".to_owned()])
+            .expect("domian is correctable even ahead of a help token");
+        assert_eq!(corrections, vec![(0, "domain".to_owned())]);
+    }
+
+    #[test]
+    fn full_command_correction_keeps_corrections_when_a_leaf_is_followed_by_an_operand() {
+        let root = sample_group();
+        let corrections = full_command_correction(
+            &root,
+            &[
+                "domain".to_owned(),
+                "avaliable".to_owned(),
+                "example.com".to_owned(),
+            ],
+        )
+        .expect("avaliable is correctable to available");
+        assert_eq!(corrections, vec![(1, "available".to_owned())]);
+    }
+
+    #[test]
+    fn correction_display_shows_the_bare_token_for_a_single_fix() {
+        let corrections = vec![(1, "list".to_owned())];
+        assert_eq!(
+            correction_display(
+                "gddy",
+                &["domain".to_owned(), "lst".to_owned()],
+                &corrections
+            ),
+            "list"
+        );
+    }
+
+    #[test]
+    fn correction_display_shows_the_full_command_when_a_single_fix_is_not_the_last_token() {
+        let corrections = vec![(0, "domain".to_owned())];
+        assert_eq!(
+            correction_display(
+                "gddy",
+                &["domian".to_owned(), "list".to_owned()],
+                &corrections
+            ),
+            "gddy domain list"
+        );
+    }
+
+    #[test]
+    fn correction_display_shows_the_full_command_for_multiple_fixes() {
+        let corrections = vec![(0, "domain".to_owned()), (1, "list".to_owned())];
+        assert_eq!(
+            correction_display(
+                "gddy",
+                &["domian".to_owned(), "lst".to_owned()],
+                &corrections
+            ),
+            "gddy domain list"
+        );
+    }
+
+    #[test]
+    fn replace_positional_command_token_rewrites_only_the_target() {
+        let bool_flags: BTreeSet<String> = ["--verbose".to_owned()].into_iter().collect();
+        let value_flags: BTreeSet<String> = ["--output".to_owned()].into_iter().collect();
+        let args = vec![
+            "gddy".to_owned(),
+            "--output".to_owned(),
+            "json".to_owned(),
+            "domain".to_owned(),
+            "lst".to_owned(),
+        ];
+        let corrected =
+            replace_positional_command_token(&args, "gddy", &bool_flags, &value_flags, 1, "list");
+        assert_eq!(
+            corrected,
+            vec!["gddy", "--output", "json", "domain", "list"]
+        );
+    }
+
+    #[test]
+    fn rewrite_group_help_if_needed_runs_after_typo_correction() {
+        let root = sample_group();
+        let bool_flags = derive_bool_flags(&root);
+        let value_flags = derive_value_flags(&root);
+        let args = vec!["gddy".to_owned(), "domian".to_owned(), "help".to_owned()];
+        let corrected =
+            replace_positional_command_token(&args, "gddy", &bool_flags, &value_flags, 0, "domain");
+        assert_eq!(corrected, vec!["gddy", "domain", "help"]);
+        let rewritten =
+            rewrite_group_help_if_needed(&root, &corrected, "gddy", &bool_flags, &value_flags);
+        assert_eq!(rewritten, vec!["gddy", "help", "domain"]);
+    }
 }
 
 /// Detects the `<group> help [sub...]` form and returns the command path whose
