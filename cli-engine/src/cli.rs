@@ -1686,20 +1686,8 @@ impl Cli {
         let value_flags = derive_value_flags(&self.root);
         let positionals =
             positional_command_tokens(&text_args, &self.config.name, &bool_flags, &value_flags);
-        // Positional tokens after a `--` separator are literal operands, not
-        // command keywords, so the group-help shim must not treat a `help`
-        // among them as a help request. Count the positionals that precede any
-        // `--` to mark where genuine command keywords end.
-        let command_keyword_count = match text_args.iter().position(|arg| arg == "--") {
-            Some(end) => positional_command_tokens(
-                &text_args[..end],
-                &self.config.name,
-                &bool_flags,
-                &value_flags,
-            )
-            .len(),
-            None => positionals.len(),
-        };
+        let command_keyword_count =
+            command_keyword_count(&text_args, &self.config.name, &bool_flags, &value_flags);
         if let Some(parts) =
             group_help_target_parts(&self.root, &positionals, command_keyword_count)
         {
@@ -1734,6 +1722,13 @@ impl Cli {
                             &value_flags,
                             unknown.positional_index,
                             suggestion,
+                        );
+                        clap_args = rewrite_group_help_if_needed(
+                            &self.root,
+                            &clap_args,
+                            &self.config.name,
+                            &bool_flags,
+                            &value_flags,
                         );
                     }
                     crate::prompt::CommandCorrection::Declined => {
@@ -3397,6 +3392,39 @@ fn detect_unknown_group_command(
     None
 }
 
+/// Counts positional command tokens that precede any `--` separator.
+fn command_keyword_count(
+    args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+) -> usize {
+    let positionals = positional_command_tokens(args, root_name, bool_flags, value_flags);
+    match args.iter().position(|arg| arg == "--") {
+        Some(end) => {
+            positional_command_tokens(&args[..end], root_name, bool_flags, value_flags).len()
+        }
+        None => positionals.len(),
+    }
+}
+
+/// Rewrites `<group> help [sub...]` into `help <group> [sub...]` when the form
+/// is present; otherwise returns `clap_args` unchanged.
+fn rewrite_group_help_if_needed(
+    root: &Command,
+    clap_args: &[String],
+    root_name: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+) -> Vec<String> {
+    let positionals = positional_command_tokens(clap_args, root_name, bool_flags, value_flags);
+    let keyword_count = command_keyword_count(clap_args, root_name, bool_flags, value_flags);
+    let Some(parts) = group_help_target_parts(root, &positionals, keyword_count) else {
+        return clap_args.to_vec();
+    };
+    rewrite_group_help_args(clap_args, root_name, bool_flags, value_flags, &parts)
+}
+
 /// Rewrites the `target`-th positional command token to `replacement`, preserving
 /// flags. Token classification mirrors [`positional_command_tokens`].
 fn replace_positional_command_token(
@@ -3626,6 +3654,20 @@ mod unknown_command_suggestion_tests {
             corrected,
             vec!["gddy", "--output", "json", "domain", "list"]
         );
+    }
+
+    #[test]
+    fn rewrite_group_help_if_needed_runs_after_typo_correction() {
+        let root = sample_group();
+        let bool_flags = derive_bool_flags(&root);
+        let value_flags = derive_value_flags(&root);
+        let args = vec!["gddy".to_owned(), "domian".to_owned(), "help".to_owned()];
+        let corrected =
+            replace_positional_command_token(&args, "gddy", &bool_flags, &value_flags, 0, "domain");
+        assert_eq!(corrected, vec!["gddy", "domain", "help"]);
+        let rewritten =
+            rewrite_group_help_if_needed(&root, &corrected, "gddy", &bool_flags, &value_flags);
+        assert_eq!(rewritten, vec!["gddy", "help", "domain"]);
     }
 }
 
