@@ -335,11 +335,11 @@ fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String 
     let base = if let Some(arg) = arg_def
         && let Some(help) = arg.get_help().map(|s| s.to_string())
     {
-        help
+        help.trim_end_matches('.').to_owned()
     } else {
         strip_arg_decoration(raw_name).replace('-', " ")
     };
-    format!("Enter {base}")
+    format!("{base}:")
 }
 
 /// Build a resume command string from the already-supplied args.
