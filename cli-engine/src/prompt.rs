@@ -399,20 +399,20 @@ mod tests {
     #[test]
     fn format_prompt_message_from_flag_name() {
         let msg = format_prompt_message("--team-name", None);
-        assert_eq!(msg, "Enter team name");
+        assert_eq!(msg, "team name:");
     }
 
     #[test]
     fn format_prompt_message_from_positional() {
         let msg = format_prompt_message("<domain>", None);
-        assert_eq!(msg, "Enter domain");
+        assert_eq!(msg, "domain:");
     }
 
     #[test]
     fn format_prompt_message_uses_help_text() {
         let arg = clap::Arg::new("team").long("team").help("Team identifier");
         let msg = format_prompt_message("--team", Some(&arg));
-        assert_eq!(msg, "Enter Team identifier");
+        assert_eq!(msg, "Team identifier:");
     }
 
     #[test]
