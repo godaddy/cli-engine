@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.1...cli-engine-v0.9.2) (2026-08-27)
+
+
+### Bug Fixes
+
+* **interactivity:** Prompt formatting ([#106](https://github.com/godaddy/cli-engine/issues/106)) ([1f1ea20](https://github.com/godaddy/cli-engine/commit/1f1ea206e9e56d29564db440b93b4bc225ec41be))
+
 ## [0.9.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.0...cli-engine-v0.9.1) (2026-08-25)
 
 
