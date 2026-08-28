@@ -103,7 +103,12 @@ fn known_top_level_keys(data: &Value) -> Option<BTreeSet<String>> {
     }
 }
 
-fn unknown_fields_message(unknown: &[&str], known: &BTreeSet<String>) -> String {
+/// Formats an "unknown field" error: a quoted list of the bad names, a
+/// nearest-match suggestion for the first one, and the valid names — shared
+/// by response-data field validation ([`validate_fields`]) and human-view
+/// column validation (`middleware`'s explicit-`--fields`-against-a-view-
+/// registered-columns check), so both surfaces produce the same message shape.
+pub(crate) fn unknown_fields_message(unknown: &[&str], known: &BTreeSet<String>) -> String {
     let plural = if unknown.len() > 1 { "s" } else { "" };
     let quoted = unknown
         .iter()

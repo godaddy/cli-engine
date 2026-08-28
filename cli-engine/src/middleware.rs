@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
@@ -17,6 +17,7 @@ use crate::{
     output::{
         Envelope, HumanViewRegistry, NextAction, OutputFormat, PipelineOpts, apply_pipeline,
         build_error_envelope, is_valid_output_format, render_human_with_registry_selected,
+        unknown_fields_message,
     },
 };
 
@@ -1061,6 +1062,43 @@ impl Middleware {
             self.fields.as_str()
         };
         let human_view = output_format == OutputFormat::Human && self.human_views.has_view(view_id);
+        // `apply_pipeline` never sees `effective_fields` for a registered
+        // view (`projection_fields` below is forced to `""` so the view reads
+        // the full payload), and the view's own column narrowing
+        // (`select_columns` in `human.rs`) silently skips a name with no
+        // matching column — the same "typo produces an empty/partial table
+        // instead of an error" gap `apply_pipeline`'s field validation
+        // closes elsewhere. So an explicit `--fields` (never a
+        // `default_fields` fallback — same reasoning as
+        // `PipelineOpts::fields_are_default`) is checked against the view's
+        // column catalog here instead.
+        if human_view
+            && self.fields_explicit
+            && let Some(columns) = self.human_views.columns(view_id)
+        {
+            let fields = effective_fields.trim();
+            if !fields.is_empty() && fields != "all" && fields != "*" {
+                let known: BTreeSet<String> =
+                    columns.iter().map(|column| column.field.clone()).collect();
+                let unknown: BTreeSet<&str> = fields
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty() && !known.contains(*part))
+                    .collect();
+                if !unknown.is_empty() {
+                    let unknown: Vec<&str> = unknown.into_iter().collect();
+                    let err = CliCoreError::message(unknown_fields_message(&unknown, &known));
+                    return self.render_error(
+                        &err,
+                        &self.app_id,
+                        start,
+                        user_args,
+                        effective_args,
+                        identity,
+                    );
+                }
+            }
+        }
         let projection_fields = if human_view { "" } else { effective_fields };
         if let Some(data) = &mut envelope.data {
             let pagination = apply_pipeline(

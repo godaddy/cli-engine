@@ -240,6 +240,50 @@ async fn default_fields_are_projected_without_validation_against_the_response() 
     );
 }
 
+#[tokio::test]
+async fn human_view_rejects_an_unknown_explicit_field_instead_of_narrowing_to_nothing() {
+    // With a registered human view, `apply_pipeline`'s field validation never
+    // runs — the view narrows its own columns instead of projecting the data
+    // (see the comment in `middleware.rs` above `human_view`'s validation
+    // check). Column narrowing (`select_columns` in `human.rs`) silently
+    // skips a name with no matching column, so an explicit `--fields` typo
+    // here needs its own check against the view's column catalog.
+    let cli = consumer_cli();
+
+    let unknown = cli
+        .run([
+            "my-cli", "project", "list", "--team", "platform", "--output", "human", "--fields",
+            "ID",
+        ])
+        .await;
+    assert_ne!(unknown.exit_code, 0, "{}", unknown.rendered);
+    assert!(
+        unknown.rendered.contains("unknown field \"ID\""),
+        "{}",
+        unknown.rendered
+    );
+    assert!(
+        unknown.rendered.contains("did you mean \"id\"?"),
+        "{}",
+        unknown.rendered
+    );
+    assert!(
+        unknown.rendered.contains("valid fields: id, name, status"),
+        "{}",
+        unknown.rendered
+    );
+
+    let known = cli
+        .run([
+            "my-cli", "project", "list", "--team", "platform", "--output", "human", "--fields",
+            "id",
+        ])
+        .await;
+    assert_eq!(known.exit_code, 0, "{}", known.rendered);
+    assert!(known.rendered.contains("ID"), "{}", known.rendered);
+    assert!(!known.rendered.contains("STATUS"), "{}", known.rendered);
+}
+
 fn consumer_cli_with_root_actions() -> Cli {
     Cli::new(
         CliConfig::new("my-cli", "Team CLI", "my-cli")
