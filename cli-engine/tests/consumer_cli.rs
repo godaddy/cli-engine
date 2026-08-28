@@ -241,6 +241,44 @@ async fn default_fields_are_projected_without_validation_against_the_response() 
 }
 
 #[tokio::test]
+async fn explicit_empty_fields_keeps_everything_instead_of_falling_back_to_default_fields() {
+    // Once a command has `default_fields` set, clap fills `--fields` with
+    // that same non-empty string whether or not the user typed the flag —
+    // so `self.fields.is_empty()` can't tell "user explicitly cleared
+    // --fields" apart from "user never touched it" (`fields_explicit` can).
+    // An explicit `--fields ""` means "keep everything," same as `all`/`*`,
+    // and must not silently narrow to the command's own default instead.
+    let cli = Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli").with_module(Module::new(
+            "Platform Systems",
+            |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("widget", "Manage widgets")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List widgets")
+                            .with_default_fields("id")
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!([{"id": "w1", "extra": true}])))
+                        },
+                    ),
+                )
+            },
+        )),
+    );
+
+    let output = cli
+        .run([
+            "my-cli", "widget", "list", "--output", "json", "--fields", "",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.rendered).expect("json"),
+        json!({"data": [{"id": "w1", "extra": true}]})
+    );
+}
+
+#[tokio::test]
 async fn human_view_rejects_an_unknown_explicit_field_instead_of_narrowing_to_nothing() {
     // With a registered human view, `apply_pipeline`'s field validation never
     // runs — the view narrows its own columns instead of projecting the data

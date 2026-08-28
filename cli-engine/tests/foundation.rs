@@ -7316,6 +7316,7 @@ async fn middleware_success_authz_audit_activity_and_fields() {
     middleware.env = "prod".to_owned();
     middleware.verbose = "all".to_owned();
     middleware.fields = "name".to_owned();
+    middleware.fields_explicit = true;
     middleware.auditor = Some(audit.clone());
     middleware.activity = Some(activity.clone());
     middleware.authz = Some(Arc::new(AllowAuthorizer));

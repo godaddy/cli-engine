@@ -1049,17 +1049,24 @@ impl Middleware {
             }
         }
         let output_format = self.output_format.parse::<OutputFormat>()?;
-        // The effective field selection: an explicit `--fields` wins, otherwise
-        // the command's `default_fields` is the default. The same selection is
-        // applied two ways. With a registered human view, it narrows which of the
-        // view's columns show, so the view reads the full payload — the data is
-        // not projected, which would otherwise blank out the kept columns.
-        // Everywhere else (JSON/TOON, or generic human output) it projects the
-        // output data. Empty / `all` / `*` keeps everything.
-        let effective_fields = if self.fields.is_empty() {
-            default_fields
-        } else {
+        // The effective field selection: an explicit `--fields` wins —
+        // including an explicit empty string, which keeps everything, same
+        // as `all`/`*` — otherwise the command's `default_fields` is the
+        // default. Gated on `fields_explicit` rather than
+        // `self.fields.is_empty()`: once a command has `default_fields` set,
+        // clap fills `self.fields` with that same non-empty string whether
+        // or not the user typed `--fields`, so emptiness can't tell "user
+        // explicitly cleared it" apart from "user never touched it" — only
+        // `value_source` (what `fields_explicit` is built from) can. The
+        // same selection is applied two ways: with a registered human view,
+        // it narrows which of the view's columns show, so the view reads
+        // the full payload — the data is not projected, which would
+        // otherwise blank out the kept columns. Everywhere else (JSON/TOON,
+        // or generic human output) it projects the output data.
+        let effective_fields = if self.fields_explicit {
             self.fields.as_str()
+        } else {
+            default_fields
         };
         let human_view = output_format == OutputFormat::Human && self.human_views.has_view(view_id);
         // `apply_pipeline` never sees `effective_fields` for a registered
