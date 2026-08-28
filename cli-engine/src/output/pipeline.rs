@@ -19,9 +19,22 @@ pub struct PipelineOpts {
     pub expr: String,
     /// Comma-separated field projection.
     pub fields: String,
+    /// Whether `fields` came from a command's `default_fields` fallback
+    /// rather than an explicit `--fields` flag. Default-field selections are
+    /// author-controlled, not user input, so they're projected but not
+    /// validated — see [`apply_pipeline`]'s note on why.
+    pub fields_are_default: bool,
 }
 
 /// Applies filter, pagination, expression, and field projection in framework order.
+///
+/// Field validation (rejecting names absent from the response data) only
+/// runs for an explicit `--fields` flag, not for a command's
+/// `default_fields` fallback (`opts.fields_are_default`): default fields are
+/// author-controlled and applied to every invocation of a command, so a
+/// legitimate optional field that happens to be absent from every row of one
+/// particular response (rather than genuinely misspelled) would otherwise
+/// hard-error that command for everyone until the author noticed.
 pub fn apply_pipeline(data: &mut Value, opts: &PipelineOpts) -> Result<Option<PaginationMeta>> {
     if !opts.filter.is_empty() {
         apply_filter(data, &opts.filter)?;
@@ -39,7 +52,9 @@ pub fn apply_pipeline(data: &mut Value, opts: &PipelineOpts) -> Result<Option<Pa
         // Parsed once and reused for both validation and projection, instead
         // of paying for `parse_fields` (and a data traversal) twice.
         let tree = parse_fields(fields);
-        validate_fields(data, &tree)?;
+        if !opts.fields_are_default {
+            validate_fields(data, &tree)?;
+        }
         *data = project_fields(data, &tree);
     }
     Ok(pagination)
@@ -337,5 +352,25 @@ mod tests {
             err.to_string().contains("did you mean \"status\"?"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn apply_pipeline_does_not_validate_a_default_fields_projection() {
+        // default_fields is author-controlled, not user input, and applies to
+        // every invocation of a command — see the doc comment on
+        // `PipelineOpts::fields_are_default`. A field the author listed that
+        // happens to be absent from every row of this particular response
+        // (e.g. a legitimately optional field, not a typo) must not
+        // hard-error the command; it should still project away as before
+        // this change.
+        let mut data = json!([{"id": "p1"}]);
+        let opts = PipelineOpts {
+            fields: "id,description".to_owned(),
+            fields_are_default: true,
+            ..PipelineOpts::default()
+        };
+        apply_pipeline(&mut data, &opts)
+            .expect("default_fields projection must not validate against the response");
+        assert_eq!(data, json!([{"id": "p1"}]));
     }
 }

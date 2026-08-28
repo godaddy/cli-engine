@@ -207,6 +207,39 @@ async fn consumer_style_cli_rejects_unknown_fields_instead_of_rendering_empty_ro
     );
 }
 
+#[tokio::test]
+async fn default_fields_are_projected_without_validation_against_the_response() {
+    // A command's `default_fields` can list a field the backend simply
+    // didn't populate for a given response (e.g. an optional column with no
+    // value in this particular result set) — unlike a user-typed `--fields`
+    // typo, that must still succeed rather than hard-error every caller of
+    // this command until the author notices.
+    let cli = Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli").with_module(Module::new(
+            "Platform Systems",
+            |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("widget", "Manage widgets")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List widgets")
+                            .with_default_fields("id,description")
+                            .no_auth(true),
+                        async |_credential, _args| Ok(CommandResult::new(json!([{"id": "w1"}]))),
+                    ),
+                )
+            },
+        )),
+    );
+
+    let output = cli
+        .run(["my-cli", "widget", "list", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.rendered).expect("json"),
+        json!({"data": [{"id": "w1"}]})
+    );
+}
+
 fn consumer_cli_with_root_actions() -> Cli {
     Cli::new(
         CliConfig::new("my-cli", "Team CLI", "my-cli")

@@ -489,6 +489,10 @@ pub struct Middleware {
     pub dry_run: bool,
     /// User field projection.
     pub fields: String,
+    /// Whether `fields` came from an explicit `--fields` flag rather than a
+    /// command's `default_fields` fallback. See
+    /// [`GlobalFlags::fields_explicit`](crate::GlobalFlags::fields_explicit).
+    pub fields_explicit: bool,
     /// JMESPath per-item list predicate.
     pub filter: String,
     /// JMESPath whole-result expression.
@@ -1067,6 +1071,7 @@ impl Middleware {
                     offset: self.offset,
                     expr: self.expr.clone(),
                     fields: projection_fields.to_owned(),
+                    fields_are_default: !self.fields_explicit,
                 },
             )?;
             if let Some(pagination) = pagination {
