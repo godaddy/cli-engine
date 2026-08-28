@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::{CliCoreError, Result};
 
-use super::{PaginationMeta, filter_fields};
+use super::{PaginationMeta, filter_fields, parse_fields};
 
 /// Options for the output pipeline.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -33,9 +35,97 @@ pub fn apply_pipeline(data: &mut Value, opts: &PipelineOpts) -> Result<Option<Pa
         apply_expr(data, &opts.expr)?;
     }
     if !opts.fields.is_empty() {
+        validate_fields(data, &opts.fields)?;
         *data = filter_fields(data, &opts.fields);
     }
     Ok(pagination)
+}
+
+/// Rejects `--fields` names absent from the response data, instead of
+/// silently projecting them into empty rows. Skipped when the data's shape
+/// gives no signal about which fields exist — an empty list, a list of
+/// non-object items, or a scalar — since [`filter_fields`] passes those
+/// through untouched too.
+fn validate_fields(data: &Value, fields: &str) -> Result<()> {
+    let fields = fields.trim();
+    if fields.is_empty() || fields == "all" || fields == "*" {
+        return Ok(());
+    }
+    let Some(known) = known_top_level_keys(data) else {
+        return Ok(());
+    };
+    let requested = parse_fields(fields);
+    let unknown: Vec<&str> = requested
+        .top_level_names()
+        .filter(|name| !known.contains(*name))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(CliCoreError::message(unknown_fields_message(
+        &unknown, &known,
+    )))
+}
+
+fn known_top_level_keys(data: &Value) -> Option<BTreeSet<String>> {
+    match data {
+        Value::Object(map) => Some(map.keys().cloned().collect()),
+        Value::Array(items) => {
+            let mut keys = BTreeSet::new();
+            let mut saw_object = false;
+            for item in items {
+                match item {
+                    Value::Object(map) => {
+                        saw_object = true;
+                        keys.extend(map.keys().cloned());
+                    }
+                    Value::Null => {}
+                    _ => return None,
+                }
+            }
+            saw_object.then_some(keys)
+        }
+        _ => None,
+    }
+}
+
+fn unknown_fields_message(unknown: &[&str], known: &BTreeSet<String>) -> String {
+    let plural = if unknown.len() > 1 { "s" } else { "" };
+    let quoted = unknown
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut message = format!("fields: unknown field{plural} {quoted}");
+    if let Some(first) = unknown.first()
+        && let Some(suggestion) = nearest_field(first, known)
+    {
+        message.push_str(&format!(" (did you mean \"{suggestion}\"?)"));
+    }
+    if !known.is_empty() {
+        let valid = known.iter().cloned().collect::<Vec<_>>().join(", ");
+        message.push_str(&format!("; valid fields: {valid}"));
+    }
+    message
+}
+
+/// Finds the closest known field name within edit-distance `max(1, name_len /
+/// 3)`, mirroring `nearest_subcommand`'s tolerance in `cli.rs`. Ties break
+/// alphabetically.
+fn nearest_field(name: &str, known: &BTreeSet<String>) -> Option<String> {
+    let name = name.to_ascii_lowercase();
+    let max_distance = 1.max(name.chars().count() / 3);
+    known
+        .iter()
+        .map(|candidate| {
+            (
+                strsim::osa_distance(&name, &candidate.to_ascii_lowercase()),
+                candidate,
+            )
+        })
+        .filter(|(distance, _)| *distance <= max_distance)
+        .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)))
+        .map(|(_, candidate)| candidate.clone())
 }
 
 fn apply_pagination(data: &mut Value, offset: i64, limit: i64) -> Result<Option<PaginationMeta>> {
@@ -133,7 +223,7 @@ fn search_query(expression: &jmespath::Expression<'_>, data: &Value) -> Result<j
 mod tests {
     use serde_json::json;
 
-    use super::{apply_expr, apply_pagination, compile_query, search_query};
+    use super::{apply_expr, apply_pagination, compile_query, search_query, validate_fields};
 
     #[test]
     fn private_pipeline_helpers_cover_boundary_paths_directly() {
@@ -163,5 +253,61 @@ mod tests {
         let mut data = json!({"items": [{"id": "p1"}]});
         apply_expr(&mut data, "items[0].id").expect("expr should replace data");
         assert_eq!(data, json!("p1"));
+    }
+
+    #[test]
+    fn validate_fields_rejects_a_name_absent_from_every_row_with_a_helpful_message() {
+        let data = json!([
+            {"operationId": "search", "description": "Search the catalog"},
+            {"operationId": "get", "description": "Get an item"},
+        ]);
+
+        let err = validate_fields(&data, "OPERATIONID,description")
+            .expect_err("uppercase name is not a real key");
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown field \"OPERATIONID\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("did you mean \"operationId\"?"),
+            "{message}"
+        );
+        assert!(
+            message.contains("valid fields: description, operationId"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn validate_fields_accepts_names_present_on_at_least_one_row() {
+        let data = json!([{"id": "p1", "extra": true}, {"id": "p2"}]);
+        validate_fields(&data, "id,extra").expect("both names appear on some row");
+    }
+
+    #[test]
+    fn validate_fields_only_checks_the_top_level_segment_of_nested_paths() {
+        let data = json!({"content": {"text": "hi"}});
+        validate_fields(&data, "content.text").expect("nested path's top segment is known");
+    }
+
+    #[test]
+    fn validate_fields_skips_shapes_that_give_no_signal() {
+        let empty_list = json!([]);
+        validate_fields(&empty_list, "anything").expect("empty list can't validate");
+
+        let scalar_list = json!(["a", "b"]);
+        validate_fields(&scalar_list, "anything").expect("non-object items can't validate");
+
+        let scalar = json!("just a string");
+        validate_fields(&scalar, "anything").expect("scalar data can't validate");
+    }
+
+    #[test]
+    fn validate_fields_passes_through_all_and_star_and_empty() {
+        let data = json!({"id": "p1"});
+        validate_fields(&data, "all").expect("all bypasses validation");
+        validate_fields(&data, "*").expect("star bypasses validation");
+        validate_fields(&data, "").expect("empty bypasses validation");
     }
 }

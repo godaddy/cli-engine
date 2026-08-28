@@ -160,6 +160,53 @@ async fn consumer_style_cli_reports_invalid_args_and_output_separately() {
     assert!(invalid_output.rendered.contains("invalid output format"));
 }
 
+#[tokio::test]
+async fn consumer_style_cli_rejects_unknown_fields_instead_of_rendering_empty_rows() {
+    let cli = consumer_cli();
+
+    let unknown = cli
+        .run([
+            "my-cli",
+            "project",
+            "list",
+            "--team",
+            "platform",
+            "--fields",
+            "ID,status",
+        ])
+        .await;
+    assert_ne!(unknown.exit_code, 0);
+    let message = serde_json::from_str::<Value>(&unknown.rendered)
+        .expect("error envelope should be json")["error"]["message"]
+        .as_str()
+        .expect("message should be a string")
+        .to_owned();
+    assert_eq!(
+        message,
+        "fields: unknown field \"ID\" (did you mean \"id\"?); valid fields: id, name, status"
+    );
+
+    let known = cli
+        .run([
+            "my-cli",
+            "project",
+            "list",
+            "--team",
+            "platform",
+            "--fields",
+            "id,status",
+        ])
+        .await;
+    assert_eq!(known.exit_code, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&known.rendered).expect("json"),
+        json!({"data": [
+            {"id": "p1", "status": "active"},
+            {"id": "p2", "status": "disabled"}
+        ]})
+    );
+}
+
 fn consumer_cli_with_root_actions() -> Cli {
     Cli::new(
         CliConfig::new("my-cli", "Team CLI", "my-cli")

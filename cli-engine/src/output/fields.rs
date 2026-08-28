@@ -8,6 +8,13 @@ pub struct FieldTree {
     children: BTreeMap<String, Option<Box<FieldTree>>>,
 }
 
+impl FieldTree {
+    /// Iterates the top-level field names requested at this level of the tree.
+    pub(crate) fn top_level_names(&self) -> impl Iterator<Item = &str> {
+        self.children.keys().map(String::as_str)
+    }
+}
+
 /// Parses comma-separated field paths.
 #[must_use]
 pub fn parse_fields(fields: &str) -> FieldTree {
