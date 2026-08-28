@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{CliCoreError, Result};
 
-use super::{PaginationMeta, filter_fields, parse_fields};
+use super::{FieldTree, PaginationMeta, parse_fields, project_fields};
 
 /// Options for the output pipeline.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -34,9 +34,13 @@ pub fn apply_pipeline(data: &mut Value, opts: &PipelineOpts) -> Result<Option<Pa
     if !opts.expr.is_empty() {
         apply_expr(data, &opts.expr)?;
     }
-    if !opts.fields.is_empty() {
-        validate_fields(data, &opts.fields)?;
-        *data = filter_fields(data, &opts.fields);
+    let fields = opts.fields.trim();
+    if !fields.is_empty() && fields != "all" && fields != "*" {
+        // Parsed once and reused for both validation and projection, instead
+        // of paying for `parse_fields` (and a data traversal) twice.
+        let tree = parse_fields(fields);
+        validate_fields(data, &tree)?;
+        *data = project_fields(data, &tree);
     }
     Ok(pagination)
 }
@@ -44,17 +48,12 @@ pub fn apply_pipeline(data: &mut Value, opts: &PipelineOpts) -> Result<Option<Pa
 /// Rejects `--fields` names absent from the response data, instead of
 /// silently projecting them into empty rows. Skipped when the data's shape
 /// gives no signal about which fields exist — an empty list, a list of
-/// non-object items, or a scalar — since [`filter_fields`] passes those
+/// non-object items, or a scalar — since [`project_fields`] passes those
 /// through untouched too.
-fn validate_fields(data: &Value, fields: &str) -> Result<()> {
-    let fields = fields.trim();
-    if fields.is_empty() || fields == "all" || fields == "*" {
-        return Ok(());
-    }
+fn validate_fields(data: &Value, requested: &FieldTree) -> Result<()> {
     let Some(known) = known_top_level_keys(data) else {
         return Ok(());
     };
-    let requested = parse_fields(fields);
     let unknown: Vec<&str> = requested
         .top_level_names()
         .filter(|name| !known.contains(*name))
@@ -223,7 +222,10 @@ fn search_query(expression: &jmespath::Expression<'_>, data: &Value) -> Result<j
 mod tests {
     use serde_json::json;
 
-    use super::{apply_expr, apply_pagination, compile_query, search_query, validate_fields};
+    use super::{
+        PipelineOpts, apply_expr, apply_pagination, apply_pipeline, compile_query, parse_fields,
+        search_query, validate_fields,
+    };
 
     #[test]
     fn private_pipeline_helpers_cover_boundary_paths_directly() {
@@ -262,8 +264,8 @@ mod tests {
             {"operationId": "get", "description": "Get an item"},
         ]);
 
-        let err = validate_fields(&data, "OPERATIONID,description")
-            .expect_err("uppercase name is not a real key");
+        let tree = parse_fields("OPERATIONID,description");
+        let err = validate_fields(&data, &tree).expect_err("uppercase name is not a real key");
         let message = err.to_string();
         assert!(
             message.contains("unknown field \"OPERATIONID\""),
@@ -282,32 +284,58 @@ mod tests {
     #[test]
     fn validate_fields_accepts_names_present_on_at_least_one_row() {
         let data = json!([{"id": "p1", "extra": true}, {"id": "p2"}]);
-        validate_fields(&data, "id,extra").expect("both names appear on some row");
+        validate_fields(&data, &parse_fields("id,extra")).expect("both names appear on some row");
     }
 
     #[test]
     fn validate_fields_only_checks_the_top_level_segment_of_nested_paths() {
         let data = json!({"content": {"text": "hi"}});
-        validate_fields(&data, "content.text").expect("nested path's top segment is known");
+        validate_fields(&data, &parse_fields("content.text"))
+            .expect("nested path's top segment is known");
     }
 
     #[test]
     fn validate_fields_skips_shapes_that_give_no_signal() {
+        let requested = parse_fields("anything");
+
         let empty_list = json!([]);
-        validate_fields(&empty_list, "anything").expect("empty list can't validate");
+        validate_fields(&empty_list, &requested).expect("empty list can't validate");
 
         let scalar_list = json!(["a", "b"]);
-        validate_fields(&scalar_list, "anything").expect("non-object items can't validate");
+        validate_fields(&scalar_list, &requested).expect("non-object items can't validate");
 
         let scalar = json!("just a string");
-        validate_fields(&scalar, "anything").expect("scalar data can't validate");
+        validate_fields(&scalar, &requested).expect("scalar data can't validate");
     }
 
     #[test]
-    fn validate_fields_passes_through_all_and_star_and_empty() {
-        let data = json!({"id": "p1"});
-        validate_fields(&data, "all").expect("all bypasses validation");
-        validate_fields(&data, "*").expect("star bypasses validation");
-        validate_fields(&data, "").expect("empty bypasses validation");
+    fn apply_pipeline_passes_all_and_star_and_empty_through_without_validating() {
+        // "all"/"*"/empty bypass validate_fields entirely in apply_pipeline,
+        // before a `FieldTree` is even built, so a name that couldn't
+        // possibly be a real field (like the literal string "all") must not
+        // be mistaken for a requested field name here.
+        for fields in ["all", "*", ""] {
+            let mut data = json!({"id": "p1"});
+            let opts = PipelineOpts {
+                fields: fields.to_owned(),
+                ..PipelineOpts::default()
+            };
+            apply_pipeline(&mut data, &opts).expect("bypassed fields value should not error");
+            assert_eq!(data, json!({"id": "p1"}), "fields={fields:?}");
+        }
+    }
+
+    #[test]
+    fn apply_pipeline_rejects_an_unknown_field_end_to_end() {
+        let mut data = json!([{"id": "p1", "status": "active"}]);
+        let opts = PipelineOpts {
+            fields: "id,STATUS".to_owned(),
+            ..PipelineOpts::default()
+        };
+        let err = apply_pipeline(&mut data, &opts).expect_err("STATUS is not a real key");
+        assert!(
+            err.to_string().contains("did you mean \"status\"?"),
+            "{err}"
+        );
     }
 }

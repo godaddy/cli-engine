@@ -22,6 +22,7 @@ pub use envelope::{
     Envelope, ErrorEnvelope, Metadata, NextAction, NextActionParam, PaginationMeta,
     build_detailed_error_envelope, build_error_envelope,
 };
+pub(crate) use fields::project_fields;
 pub use fields::{FieldTree, filter_fields, parse_fields};
 pub(crate) use human::terminal_width;
 pub use human::{

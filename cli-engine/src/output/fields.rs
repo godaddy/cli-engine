@@ -36,7 +36,14 @@ pub fn filter_fields(data: &Value, fields: &str) -> Value {
     if fields.is_empty() || fields == "all" || fields == "*" {
         return data.clone();
     }
-    let allowed = parse_fields(fields);
+    project_fields(data, &parse_fields(fields))
+}
+
+/// Applies an already-parsed field-selection tree, so a caller that also
+/// needs the tree (e.g. to validate requested names) can parse the
+/// `--fields` string once and reuse it here instead of paying for
+/// [`parse_fields`] a second time.
+pub(crate) fn project_fields(data: &Value, allowed: &FieldTree) -> Value {
     match data {
         Value::Array(items) => {
             if items
@@ -49,13 +56,13 @@ pub fn filter_fields(data: &Value, fields: &str) -> Value {
                 items
                     .iter()
                     .map(|item| match item {
-                        Value::Object(map) => Value::Object(filter_map(map, &allowed)),
+                        Value::Object(map) => Value::Object(filter_map(map, allowed)),
                         other => other.clone(),
                     })
                     .collect(),
             )
         }
-        Value::Object(map) => Value::Object(filter_map(map, &allowed)),
+        Value::Object(map) => Value::Object(filter_map(map, allowed)),
         other => other.clone(),
     }
 }
