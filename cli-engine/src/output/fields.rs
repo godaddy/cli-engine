@@ -8,6 +8,13 @@ pub struct FieldTree {
     children: BTreeMap<String, Option<Box<FieldTree>>>,
 }
 
+impl FieldTree {
+    /// Iterates the top-level field names requested at this level of the tree.
+    pub(crate) fn top_level_names(&self) -> impl Iterator<Item = &str> {
+        self.children.keys().map(String::as_str)
+    }
+}
+
 /// Parses comma-separated field paths.
 #[must_use]
 pub fn parse_fields(fields: &str) -> FieldTree {
@@ -29,7 +36,14 @@ pub fn filter_fields(data: &Value, fields: &str) -> Value {
     if fields.is_empty() || fields == "all" || fields == "*" {
         return data.clone();
     }
-    let allowed = parse_fields(fields);
+    project_fields(data, &parse_fields(fields))
+}
+
+/// Applies an already-parsed field-selection tree, so a caller that also
+/// needs the tree (e.g. to validate requested names) can parse the
+/// `--fields` string once and reuse it here instead of paying for
+/// [`parse_fields`] a second time.
+pub(crate) fn project_fields(data: &Value, allowed: &FieldTree) -> Value {
     match data {
         Value::Array(items) => {
             if items
@@ -42,13 +56,13 @@ pub fn filter_fields(data: &Value, fields: &str) -> Value {
                 items
                     .iter()
                     .map(|item| match item {
-                        Value::Object(map) => Value::Object(filter_map(map, &allowed)),
+                        Value::Object(map) => Value::Object(filter_map(map, allowed)),
                         other => other.clone(),
                     })
                     .collect(),
             )
         }
-        Value::Object(map) => Value::Object(filter_map(map, &allowed)),
+        Value::Object(map) => Value::Object(filter_map(map, allowed)),
         other => other.clone(),
     }
 }

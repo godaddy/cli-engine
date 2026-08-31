@@ -22,6 +22,7 @@ pub use envelope::{
     Envelope, ErrorEnvelope, Metadata, NextAction, NextActionParam, PaginationMeta,
     build_detailed_error_envelope, build_error_envelope,
 };
+pub(crate) use fields::project_fields;
 pub use fields::{FieldTree, filter_fields, parse_fields};
 pub(crate) use human::terminal_width;
 pub use human::{
@@ -32,6 +33,7 @@ pub use human::{
     render_human_with_registry_selected, render_human_with_view,
 };
 pub use json::render_json;
+pub(crate) use pipeline::unknown_fields_message;
 pub use pipeline::{PipelineOpts, apply_pipeline};
 pub use renderer::{
     OutputFormat, RendererFactory, is_valid_output_format, render, render_data, render_data_format,

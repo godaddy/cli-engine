@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::Arc,
     time::{Duration, Instant},
@@ -17,6 +17,7 @@ use crate::{
     output::{
         Envelope, HumanViewRegistry, NextAction, OutputFormat, PipelineOpts, apply_pipeline,
         build_error_envelope, is_valid_output_format, render_human_with_registry_selected,
+        unknown_fields_message,
     },
 };
 
@@ -489,6 +490,10 @@ pub struct Middleware {
     pub dry_run: bool,
     /// User field projection.
     pub fields: String,
+    /// Whether `fields` came from an explicit `--fields` flag rather than a
+    /// command's `default_fields` fallback. See
+    /// [`GlobalFlags::fields_explicit`](crate::GlobalFlags::fields_explicit).
+    pub fields_explicit: bool,
     /// JMESPath per-item list predicate.
     pub filter: String,
     /// JMESPath whole-result expression.
@@ -1044,19 +1049,63 @@ impl Middleware {
             }
         }
         let output_format = self.output_format.parse::<OutputFormat>()?;
-        // The effective field selection: an explicit `--fields` wins, otherwise
-        // the command's `default_fields` is the default. The same selection is
-        // applied two ways. With a registered human view, it narrows which of the
-        // view's columns show, so the view reads the full payload — the data is
-        // not projected, which would otherwise blank out the kept columns.
-        // Everywhere else (JSON/TOON, or generic human output) it projects the
-        // output data. Empty / `all` / `*` keeps everything.
-        let effective_fields = if self.fields.is_empty() {
-            default_fields
-        } else {
+        // The effective field selection: an explicit `--fields` wins —
+        // including an explicit empty string, which keeps everything, same
+        // as `all`/`*` — otherwise the command's `default_fields` is the
+        // default. Gated on `fields_explicit` rather than
+        // `self.fields.is_empty()`: once a command has `default_fields` set,
+        // clap fills `self.fields` with that same non-empty string whether
+        // or not the user typed `--fields`, so emptiness can't tell "user
+        // explicitly cleared it" apart from "user never touched it" — only
+        // `value_source` (what `fields_explicit` is built from) can. The
+        // same selection is applied two ways: with a registered human view,
+        // it narrows which of the view's columns show, so the view reads
+        // the full payload — the data is not projected, which would
+        // otherwise blank out the kept columns. Everywhere else (JSON/TOON,
+        // or generic human output) it projects the output data.
+        let effective_fields = if self.fields_explicit {
             self.fields.as_str()
+        } else {
+            default_fields
         };
         let human_view = output_format == OutputFormat::Human && self.human_views.has_view(view_id);
+        // `apply_pipeline` never sees `effective_fields` for a registered
+        // view (`projection_fields` below is forced to `""` so the view reads
+        // the full payload), and the view's own column narrowing
+        // (`select_columns` in `human.rs`) silently skips a name with no
+        // matching column — the same "typo produces an empty/partial table
+        // instead of an error" gap `apply_pipeline`'s field validation
+        // closes elsewhere. So an explicit `--fields` (never a
+        // `default_fields` fallback — same reasoning as
+        // `PipelineOpts::fields_are_default`) is checked against the view's
+        // column catalog here instead.
+        if human_view
+            && self.fields_explicit
+            && let Some(columns) = self.human_views.columns(view_id)
+        {
+            let fields = effective_fields.trim();
+            if !fields.is_empty() && fields != "all" && fields != "*" {
+                let known: BTreeSet<String> =
+                    columns.iter().map(|column| column.field.clone()).collect();
+                let unknown: BTreeSet<&str> = fields
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty() && !known.contains(*part))
+                    .collect();
+                if !unknown.is_empty() {
+                    let unknown: Vec<&str> = unknown.into_iter().collect();
+                    let err = CliCoreError::message(unknown_fields_message(&unknown, &known));
+                    return self.render_error(
+                        &err,
+                        &self.app_id,
+                        start,
+                        user_args,
+                        effective_args,
+                        identity,
+                    );
+                }
+            }
+        }
         let projection_fields = if human_view { "" } else { effective_fields };
         if let Some(data) = &mut envelope.data {
             let pagination = apply_pipeline(
@@ -1067,6 +1116,7 @@ impl Middleware {
                     offset: self.offset,
                     expr: self.expr.clone(),
                     fields: projection_fields.to_owned(),
+                    fields_are_default: !self.fields_explicit,
                 },
             )?;
             if let Some(pagination) = pagination {

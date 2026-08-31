@@ -146,6 +146,7 @@ fn parsed_global_flags_cover_defaults_short_aliases_and_optional_values() {
             verbose: "all".to_owned(),
             dry_run: true,
             fields: "id,name".to_owned(),
+            fields_explicit: true,
             filter: "active == `true`".to_owned(),
             expr: "[].id".to_owned(),
             schema: false,

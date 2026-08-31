@@ -66,6 +66,12 @@ pub struct GlobalFlags {
     pub dry_run: bool,
     /// Field projection.
     pub fields: String,
+    /// Whether `fields` came from an explicit `--fields` flag on the command
+    /// line, rather than clap filling in a command's `default_fields` (a
+    /// command with `default_fields` set registers it as that flag's native
+    /// default, so `fields` is non-empty even when the user never typed
+    /// `--fields` — this is the only reliable way to tell the two apart).
+    pub fields_explicit: bool,
     /// JMESPath per-item filter.
     pub filter: String,
     /// JMESPath whole-result expression.
@@ -92,6 +98,7 @@ impl Default for GlobalFlags {
             verbose: String::new(),
             dry_run: false,
             fields: String::new(),
+            fields_explicit: false,
             filter: String::new(),
             expr: String::new(),
             schema: false,
@@ -561,6 +568,8 @@ pub fn global_flags_from_matches(
             .get_one::<String>("fields")
             .cloned()
             .unwrap_or_default(),
+        fields_explicit: matches.value_source("fields")
+            == Some(clap::parser::ValueSource::CommandLine),
         filter: matches
             .get_one::<String>("filter")
             .cloned()

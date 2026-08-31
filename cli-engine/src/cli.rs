@@ -2707,6 +2707,7 @@ fn apply_global_flags(middleware: &mut Middleware, flags: &GlobalFlags, timeout:
     middleware.verbose = flags.verbose.clone();
     middleware.dry_run = flags.dry_run;
     middleware.fields = flags.fields.clone();
+    middleware.fields_explicit = flags.fields_explicit;
     middleware.filter = flags.filter.clone();
     middleware.expr = flags.expr.clone();
     middleware.reason = flags.reason.clone();

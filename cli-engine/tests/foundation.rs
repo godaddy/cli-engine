@@ -4666,6 +4666,7 @@ fn global_flag_defaults_and_derived_flag_classes_cover_common_clap_actions() {
             verbose: String::new(),
             dry_run: false,
             fields: String::new(),
+            fields_explicit: false,
             filter: String::new(),
             expr: String::new(),
             schema: false,
@@ -7315,6 +7316,7 @@ async fn middleware_success_authz_audit_activity_and_fields() {
     middleware.env = "prod".to_owned();
     middleware.verbose = "all".to_owned();
     middleware.fields = "name".to_owned();
+    middleware.fields_explicit = true;
     middleware.auditor = Some(audit.clone());
     middleware.activity = Some(activity.clone());
     middleware.authz = Some(Arc::new(AllowAuthorizer));
@@ -9561,6 +9563,7 @@ fn output_pipeline_applies_filter_pagination_expr_and_fields_in_order() {
             offset: 1,
             expr: String::new(),
             fields: "name,status".to_owned(),
+            fields_are_default: false,
         },
     )
     .expect("pipeline should apply");
@@ -9652,6 +9655,7 @@ fn output_pipeline_defaults_and_non_list_pagination_are_noops() {
             offset: 0,
             expr: String::new(),
             fields: String::new(),
+            fields_are_default: false,
         }
     );
 

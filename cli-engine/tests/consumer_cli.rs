@@ -160,6 +160,168 @@ async fn consumer_style_cli_reports_invalid_args_and_output_separately() {
     assert!(invalid_output.rendered.contains("invalid output format"));
 }
 
+#[tokio::test]
+async fn consumer_style_cli_rejects_unknown_fields_instead_of_rendering_empty_rows() {
+    let cli = consumer_cli();
+
+    let unknown = cli
+        .run([
+            "my-cli",
+            "project",
+            "list",
+            "--team",
+            "platform",
+            "--fields",
+            "ID,status",
+        ])
+        .await;
+    assert_ne!(unknown.exit_code, 0);
+    let message = serde_json::from_str::<Value>(&unknown.rendered)
+        .expect("error envelope should be json")["error"]["message"]
+        .as_str()
+        .expect("message should be a string")
+        .to_owned();
+    assert_eq!(
+        message,
+        "fields: unknown field \"ID\" (did you mean \"id\"?); valid fields: id, name, status"
+    );
+
+    let known = cli
+        .run([
+            "my-cli",
+            "project",
+            "list",
+            "--team",
+            "platform",
+            "--fields",
+            "id,status",
+        ])
+        .await;
+    assert_eq!(known.exit_code, 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&known.rendered).expect("json"),
+        json!({"data": [
+            {"id": "p1", "status": "active"},
+            {"id": "p2", "status": "disabled"}
+        ]})
+    );
+}
+
+#[tokio::test]
+async fn default_fields_are_projected_without_validation_against_the_response() {
+    // A command's `default_fields` can list a field the backend simply
+    // didn't populate for a given response (e.g. an optional column with no
+    // value in this particular result set) — unlike a user-typed `--fields`
+    // typo, that must still succeed rather than hard-error every caller of
+    // this command until the author notices.
+    let cli = Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli").with_module(Module::new(
+            "Platform Systems",
+            |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("widget", "Manage widgets")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List widgets")
+                            .with_default_fields("id,description")
+                            .no_auth(true),
+                        async |_credential, _args| Ok(CommandResult::new(json!([{"id": "w1"}]))),
+                    ),
+                )
+            },
+        )),
+    );
+
+    let output = cli
+        .run(["my-cli", "widget", "list", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.rendered).expect("json"),
+        json!({"data": [{"id": "w1"}]})
+    );
+}
+
+#[tokio::test]
+async fn explicit_empty_fields_keeps_everything_instead_of_falling_back_to_default_fields() {
+    // Once a command has `default_fields` set, clap fills `--fields` with
+    // that same non-empty string whether or not the user typed the flag —
+    // so `self.fields.is_empty()` can't tell "user explicitly cleared
+    // --fields" apart from "user never touched it" (`fields_explicit` can).
+    // An explicit `--fields ""` means "keep everything," same as `all`/`*`,
+    // and must not silently narrow to the command's own default instead.
+    let cli = Cli::new(
+        CliConfig::new("my-cli", "Team CLI", "my-cli").with_module(Module::new(
+            "Platform Systems",
+            |_context| {
+                RuntimeGroupSpec::new(GroupSpec::new("widget", "Manage widgets")).with_command(
+                    RuntimeCommandSpec::new(
+                        CommandSpec::new("list", "List widgets")
+                            .with_default_fields("id")
+                            .no_auth(true),
+                        async |_credential, _args| {
+                            Ok(CommandResult::new(json!([{"id": "w1", "extra": true}])))
+                        },
+                    ),
+                )
+            },
+        )),
+    );
+
+    let output = cli
+        .run([
+            "my-cli", "widget", "list", "--output", "json", "--fields", "",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert_eq!(
+        serde_json::from_str::<Value>(&output.rendered).expect("json"),
+        json!({"data": [{"id": "w1", "extra": true}]})
+    );
+}
+
+#[tokio::test]
+async fn human_view_rejects_an_unknown_explicit_field_instead_of_narrowing_to_nothing() {
+    // With a registered human view, `apply_pipeline`'s field validation never
+    // runs — the view narrows its own columns instead of projecting the data
+    // (see the comment in `middleware.rs` above `human_view`'s validation
+    // check). Column narrowing (`select_columns` in `human.rs`) silently
+    // skips a name with no matching column, so an explicit `--fields` typo
+    // here needs its own check against the view's column catalog.
+    let cli = consumer_cli();
+
+    let unknown = cli
+        .run([
+            "my-cli", "project", "list", "--team", "platform", "--output", "human", "--fields",
+            "ID",
+        ])
+        .await;
+    assert_ne!(unknown.exit_code, 0, "{}", unknown.rendered);
+    assert!(
+        unknown.rendered.contains("unknown field \"ID\""),
+        "{}",
+        unknown.rendered
+    );
+    assert!(
+        unknown.rendered.contains("did you mean \"id\"?"),
+        "{}",
+        unknown.rendered
+    );
+    assert!(
+        unknown.rendered.contains("valid fields: id, name, status"),
+        "{}",
+        unknown.rendered
+    );
+
+    let known = cli
+        .run([
+            "my-cli", "project", "list", "--team", "platform", "--output", "human", "--fields",
+            "id",
+        ])
+        .await;
+    assert_eq!(known.exit_code, 0, "{}", known.rendered);
+    assert!(known.rendered.contains("ID"), "{}", known.rendered);
+    assert!(!known.rendered.contains("STATUS"), "{}", known.rendered);
+}
+
 fn consumer_cli_with_root_actions() -> Cli {
     Cli::new(
         CliConfig::new("my-cli", "Team CLI", "my-cli")
