@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.2...cli-engine-v0.9.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **output:** reject unknown --fields names instead of rendering empty rows ([#108](https://github.com/godaddy/cli-engine/issues/108)) ([a26bd4e](https://github.com/godaddy/cli-engine/commit/a26bd4e4eb9416f17cb32e961324d895900ceb97))
+
 ## [0.9.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.1...cli-engine-v0.9.2) (2026-08-27)
 
 
