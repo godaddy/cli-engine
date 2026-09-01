@@ -174,9 +174,9 @@ pub fn try_recover_missing_args(
     let leaf_command = resolve_leaf_command(command, original_args, app_name)?;
 
     // Print a header so the user knows why they're being prompted.
-    let missing_list: Vec<&str> = missing_names
+    let missing_list: Vec<String> = missing_names
         .iter()
-        .map(|n| strip_arg_decoration(n))
+        .map(|n| format_missing_arg_label(n, find_arg_def(leaf_command, n)))
         .collect();
     drop(writeln!(
         std::io::stderr(),
@@ -189,15 +189,7 @@ pub fn try_recover_missing_args(
     let mut already_supplied: Vec<String> = original_args.to_vec();
 
     for raw_name in &missing_names {
-        let clean_name = strip_arg_decoration(raw_name);
-        let arg_def = leaf_command.get_arguments().find(|a| {
-            a.get_id().as_str() == clean_name
-                || a.get_long().is_some_and(|l| l == clean_name)
-                || a.get_value_names().is_some_and(|vn| {
-                    vn.iter()
-                        .any(|v| v.to_ascii_uppercase() == raw_name.trim_matches(['<', '>']))
-                })
-        });
+        let arg_def = find_arg_def(leaf_command, raw_name);
 
         let prompt_message = format_prompt_message(raw_name, arg_def);
         let value = match infer_and_prompt(&prompt_message, arg_def) {
@@ -350,12 +342,67 @@ fn infer_and_prompt(message: &str, arg_def: Option<&clap::Arg>) -> crate::Result
     prompt_text(message, None)
 }
 
-/// Strip clap decoration (`--`, `<>`, `[]`) from a raw arg identifier,
-/// yielding the bare name (e.g. `"--team-name"` → `"team-name"`,
-/// `"<domain>"` → `"domain"`).
+/// Strip clap decoration from a single token (`--team-name` → `team-name`,
+/// `<domain>` → `domain`). Does not mangle clap's `flag <VALUE>` form.
 fn strip_arg_decoration(raw: &str) -> &str {
-    raw.trim_start_matches('-')
-        .trim_matches(['<', '>', '[', ']'])
+    let stripped = raw.trim_start_matches('-');
+    if stripped.starts_with('<') && stripped.ends_with('>') && stripped.len() > 2 {
+        return &stripped[1..stripped.len() - 1];
+    }
+    if stripped.starts_with('[') && stripped.ends_with(']') && stripped.len() > 2 {
+        return &stripped[1..stripped.len() - 1];
+    }
+    stripped
+}
+
+/// Lookup key for a clap missing-arg identifier (`tld <TLD>` → `tld`).
+fn missing_arg_lookup_key(raw: &str) -> &str {
+    let stripped = raw.trim_start_matches('-');
+    strip_arg_decoration(
+        stripped
+            .split_whitespace()
+            .next()
+            .unwrap_or(stripped),
+    )
+}
+
+fn find_arg_def<'cmd>(command: &'cmd clap::Command, raw_name: &str) -> Option<&'cmd clap::Arg> {
+    let clean_name = missing_arg_lookup_key(raw_name);
+    command.get_arguments().find(|a| {
+        a.get_id().as_str() == clean_name
+            || a.get_long().is_some_and(|l| l == clean_name)
+            || a.get_value_names().is_some_and(|vn| {
+                vn.iter().any(|v| {
+                    v.eq_ignore_ascii_case(strip_arg_decoration(
+                        raw_name
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or(raw_name),
+                    ))
+                })
+            })
+    })
+}
+
+fn format_missing_arg_label(raw_name: &str, arg_def: Option<&clap::Arg>) -> String {
+    if let Some(arg) = arg_def {
+        if let Some(long) = arg.get_long() {
+            return format!("--{long}");
+        }
+        if let Some(help) = arg.get_help() {
+            return help.to_string().trim_end_matches('.').to_owned();
+        }
+    }
+    if let Some(value_name) = extract_value_name_suffix(raw_name) {
+        return value_name;
+    }
+    missing_arg_lookup_key(raw_name).replace('-', " ")
+}
+
+fn extract_value_name_suffix(raw_name: &str) -> Option<String> {
+    let stripped = raw_name.trim_start_matches('-');
+    let (_, value) = stripped.split_once(' ')?;
+    Some(strip_arg_decoration(value).to_owned())
 }
 
 /// Format a human-friendly prompt message from a raw clap arg identifier.
@@ -364,8 +411,10 @@ fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String 
         && let Some(help) = arg.get_help().map(|s| s.to_string())
     {
         help.trim_end_matches('.').to_owned()
+    } else if let Some(value_name) = extract_value_name_suffix(raw_name) {
+        value_name
     } else {
-        strip_arg_decoration(raw_name).replace('-', " ")
+        missing_arg_lookup_key(raw_name).replace('-', " ")
     };
     format!("{base}:")
 }
@@ -434,6 +483,24 @@ mod tests {
     fn format_prompt_message_from_positional() {
         let msg = format_prompt_message("<domain>", None);
         assert_eq!(msg, "domain:");
+    }
+
+    #[test]
+    fn strip_arg_decoration_preserves_flag_value_name_pairs() {
+        assert_eq!(strip_arg_decoration("tld <TLD>"), "tld <TLD>");
+    }
+
+    #[test]
+    fn missing_arg_lookup_key_extracts_flag_id() {
+        assert_eq!(missing_arg_lookup_key("tld <TLD>"), "tld");
+        assert_eq!(missing_arg_lookup_key("--team-name"), "team-name");
+        assert_eq!(missing_arg_lookup_key("<domain>"), "domain");
+    }
+
+    #[test]
+    fn format_prompt_message_from_flag_value_name_pair() {
+        let msg = format_prompt_message("tld <TLD>", None);
+        assert_eq!(msg, "TLD:");
     }
 
     #[test]

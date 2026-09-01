@@ -1936,6 +1936,19 @@ impl Cli {
                         &self.config.app_id,
                     ));
                 }
+                if middleware.interactive
+                    && let Some(subcommand) = single_leaf_subcommand(group)
+                {
+                    let augmented = inject_subcommand_after_command_path(
+                        &text_args,
+                        &self.config.name,
+                        &command_path,
+                        &subcommand,
+                        &bool_flags,
+                        &value_flags,
+                    );
+                    return Box::pin(self.run_with_depth(augmented, depth + 1)).await;
+                }
                 return self.finish_run(self.render_bare_group_discovery(
                     group,
                     &command_path,
@@ -3934,6 +3947,83 @@ fn positional_command_tokens(
         tokens.push(arg.clone());
     }
     tokens
+}
+
+/// Returns the sole visible leaf subcommand of a bare group, if unambiguous.
+///
+/// Clap may still attach a `help` subcommand on nested groups even when the
+/// root disables the auto help subcommand, so that name is excluded.
+fn single_leaf_subcommand(group: &Command) -> Option<String> {
+    let candidates: Vec<_> = group
+        .get_subcommands()
+        .filter(|child| !child.is_hide_set())
+        .filter(|child| child.get_name() != "help")
+        .filter(|child| child.get_subcommands().next().is_none())
+        .collect();
+    if candidates.len() == 1 {
+        Some(candidates[0].get_name().to_string())
+    } else {
+        None
+    }
+}
+
+/// Inserts `subcommand` immediately after the colon-separated `command_path`
+/// tokens in `args`, before any trailing flags or positional values.
+fn inject_subcommand_after_command_path(
+    args: &[String],
+    root_name: &str,
+    command_path: &str,
+    subcommand: &str,
+    bool_flags: &BTreeSet<String>,
+    value_flags: &BTreeSet<String>,
+) -> Vec<String> {
+    let path_parts: Vec<&str> = command_path.split(':').collect();
+    let mut result = Vec::with_capacity(args.len() + 1);
+    let mut iter = args.iter().peekable();
+
+    if iter
+        .peek()
+        .is_some_and(|arg| arg_matches_root_name(arg, root_name))
+    {
+        result.push(iter.next().expect("peeked").clone());
+    }
+
+    let mut matched = 0usize;
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            result.push(arg.clone());
+            result.extend(iter.cloned());
+            break;
+        }
+        if arg.contains('=') {
+            result.push(arg.clone());
+            continue;
+        }
+        if bool_flags.contains(arg) {
+            result.push(arg.clone());
+            continue;
+        }
+        if value_flags.contains(arg) || unknown_flag_consumes_value(arg, iter.peek()) {
+            result.push(arg.clone());
+            if let Some(value) = iter.next() {
+                result.push(value.clone());
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            result.push(arg.clone());
+            continue;
+        }
+
+        result.push(arg.clone());
+        if matched < path_parts.len() && arg == path_parts[matched] {
+            matched += 1;
+            if matched == path_parts.len() {
+                result.push(subcommand.to_string());
+            }
+        }
+    }
+    result
 }
 
 fn unknown_flag_consumes_value(arg: &str, next: Option<&&String>) -> bool {

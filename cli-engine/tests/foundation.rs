@@ -841,6 +841,30 @@ async fn cli_runtime_bare_group_renders_group_help() {
 }
 
 #[tokio::test]
+async fn cli_runtime_bare_group_interactive_auto_dispatches_single_subcommand() {
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_module_group(
+        "Platform Systems",
+        RuntimeGroupSpec::new(GroupSpec::new("project", "Manage projects")).with_command(
+            RuntimeCommandSpec::new(
+                CommandSpec::new("list", "List projects").no_auth(true),
+                async |_credential, _args| Ok(CommandResult::new(json!({ "ok": true }))),
+            ),
+        ),
+    );
+
+    let output = cli.run(["my-cli", "project", "--interactive", "--json"]).await;
+
+    assert_eq!(output.exit_code, 0);
+    assert!(output.rendered.contains("ok"), "{}", output.rendered);
+    assert!(!output.rendered.contains("Manage projects"));
+}
+
+#[tokio::test]
 async fn cli_runtime_bare_group_runs_pre_run_before_help_preserves_legacy_group_run_e() {
     let calls = Arc::new(StdMutex::new(Vec::<String>::new()));
     let calls_for_closure = Arc::clone(&calls);
