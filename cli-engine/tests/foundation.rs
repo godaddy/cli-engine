@@ -857,7 +857,9 @@ async fn cli_runtime_bare_group_interactive_auto_dispatches_single_subcommand() 
         ),
     );
 
-    let output = cli.run(["my-cli", "project", "--interactive", "--json"]).await;
+    let output = cli
+        .run(["my-cli", "project", "--interactive", "--json"])
+        .await;
 
     assert_eq!(output.exit_code, 0);
     assert!(output.rendered.contains("ok"), "{}", output.rendered);
