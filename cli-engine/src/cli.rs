@@ -3988,7 +3988,7 @@ fn inject_subcommand_after_command_path(
         result.push(iter.next().expect("peeked").clone());
     }
 
-    let mut matched = 0usize;
+    let mut matched = 0_usize;
     while let Some(arg) = iter.next() {
         if arg == "--" {
             result.push(arg.clone());
