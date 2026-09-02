@@ -53,7 +53,7 @@
 //! is no environment-variable override for OAuth fields.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     net::{SocketAddr, TcpListener},
     sync::Arc,
@@ -189,6 +189,9 @@ pub struct PkceAuthProvider {
     identity_claims: Vec<String>,
     /// In-process token cache keyed by env.
     cache: Arc<RwLock<HashMap<String, StoredToken>>>,
+    /// Scope implication relationships from [`PkceAuthProvider::with_scope_hierarchy`].
+    /// Empty by default, which preserves exact-string scope matching.
+    scope_hierarchy: ScopeHierarchy,
 }
 
 /// Default prioritized claim names for deriving a human-readable identity.
@@ -231,6 +234,7 @@ impl PkceAuthProvider {
                 .map(|claim| (*claim).to_owned())
                 .collect(),
             cache: Arc::new(RwLock::new(HashMap::new())),
+            scope_hierarchy: ScopeHierarchy::new(),
         }
     }
 
@@ -390,6 +394,18 @@ impl PkceAuthProvider {
     #[must_use]
     pub fn with_identity_claims(mut self, claims: &[impl AsRef<str>]) -> Self {
         self.identity_claims = claims.iter().map(|c| c.as_ref().to_owned()).collect();
+        self
+    }
+
+    /// Declares scope implication relationships (for example, a granted
+    /// `admin` scope covering a required `read` scope) so step-up only
+    /// re-authenticates when the current token genuinely lacks a required
+    /// scope.
+    ///
+    /// Unset by default, which preserves exact-string scope matching.
+    #[must_use]
+    pub fn with_scope_hierarchy(mut self, hierarchy: ScopeHierarchy) -> Self {
+        self.scope_hierarchy = hierarchy;
         self
     }
 
@@ -769,7 +785,7 @@ impl AuthProvider for PkceAuthProvider {
             // Decide based on what the token grants (JWT claim plus the scopes it
             // was obtained with).
             let granted = granted_scopes(&token);
-            match plan_step_up(&granted, required) {
+            match plan_step_up(&granted, required, &self.scope_hierarchy) {
                 StepUp::Covered => return Ok(self.build_credential(env, &token)),
                 // Step-up is re-consent: the authorization server has no silent
                 // scope-expansion grant, so acquire the missing scopes with a
@@ -781,7 +797,7 @@ impl AuthProvider for PkceAuthProvider {
                 StepUp::Reauthenticate => {
                     let union = union_scopes(&self.effective_scopes(env)?, &granted, required);
                     let token = self.reauthenticate(env, &union).await?;
-                    ensure_granted(env, &token, required)?;
+                    ensure_granted(env, &token, required, &self.scope_hierarchy)?;
                     return Ok(self.build_credential(env, &token));
                 }
             }
@@ -790,7 +806,7 @@ impl AuthProvider for PkceAuthProvider {
         // No usable token: authenticate once, requesting defaults ∪ required.
         let union = union_scopes(&self.effective_scopes(env)?, &[], required);
         let token = self.reauthenticate(env, &union).await?;
-        ensure_granted(env, &token, required)?;
+        ensure_granted(env, &token, required, &self.scope_hierarchy)?;
         Ok(self.build_credential(env, &token))
     }
 
@@ -1027,6 +1043,64 @@ fn scopes_from_claim(value: &Value) -> Vec<String> {
     }
 }
 
+/// Scope implication relationships for an identity provider whose scopes
+/// nest (for example, a granted `write` scope also covering `read`).
+///
+/// Attach one to a [`PkceAuthProvider`] with
+/// [`with_scope_hierarchy`](PkceAuthProvider::with_scope_hierarchy) so scope
+/// coverage checks stop treating scopes as opaque, unrelated strings. Left
+/// unset (the default), coverage falls back to exact-string matching, which
+/// is today's behavior.
+#[derive(Debug, Default, Clone)]
+pub struct ScopeHierarchy {
+    implies: HashMap<String, Vec<String>>,
+}
+
+impl ScopeHierarchy {
+    /// Creates an empty hierarchy, equivalent to exact-string scope matching.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Declares that holding `scope` also satisfies every scope in `implied`.
+    ///
+    /// Implications compose transitively: if `admin` implies `write` and
+    /// `write` implies `read`, a granted `admin` scope covers a required
+    /// `read` scope.
+    #[must_use]
+    pub fn with_implication(
+        mut self,
+        scope: impl Into<String>,
+        implied: &[impl AsRef<str>],
+    ) -> Self {
+        self.implies
+            .entry(scope.into())
+            .or_default()
+            .extend(implied.iter().map(|s| s.as_ref().to_owned()));
+        self
+    }
+
+    /// True if `required` is present in `granted` verbatim, or transitively
+    /// implied by something in `granted`.
+    fn covers(&self, granted: &[String], required: &str) -> bool {
+        let mut queue: Vec<&str> = granted.iter().map(String::as_str).collect();
+        let mut visited: HashSet<&str> = HashSet::new();
+        while let Some(scope) = queue.pop() {
+            if scope == required {
+                return true;
+            }
+            if !visited.insert(scope) {
+                continue;
+            }
+            if let Some(implied) = self.implies.get(scope) {
+                queue.extend(implied.iter().map(String::as_str));
+            }
+        }
+        false
+    }
+}
+
 /// All scopes an access token is known to carry: the JWT `scope`/`scp` claim
 /// plus the scopes recorded when the token was obtained. The recorded scopes
 /// make coverage work for opaque tokens and IdPs that omit scopes from the
@@ -1059,10 +1133,10 @@ enum StepUp {
 /// decision needs only `granted`/`required`, so the caller can avoid resolving
 /// defaults (potential `environments.toml` I/O) when a cached token already
 /// covers the requirement.
-fn plan_step_up(granted: &[String], required: &[String]) -> StepUp {
+fn plan_step_up(granted: &[String], required: &[String], hierarchy: &ScopeHierarchy) -> StepUp {
     let covered = required
         .iter()
-        .all(|scope| granted.iter().any(|have| have == scope));
+        .all(|scope| hierarchy.covers(granted, scope.as_str()));
     if covered {
         StepUp::Covered
     } else {
@@ -1080,11 +1154,16 @@ fn plan_step_up(granted: &[String], required: &[String]) -> StepUp {
 /// loop the server will keep refusing. (For opaque tokens whose grant the server
 /// does not echo, the recorded scopes equal what was requested, so an undetected
 /// decline still surfaces downstream as a 403.)
-fn ensure_granted(env: &str, token: &StoredToken, required: &[String]) -> Result<()> {
+fn ensure_granted(
+    env: &str,
+    token: &StoredToken,
+    required: &[String],
+    hierarchy: &ScopeHierarchy,
+) -> Result<()> {
     let granted = granted_scopes(token);
     let missing: Vec<String> = required
         .iter()
-        .filter(|scope| !granted.iter().any(|have| have == *scope))
+        .filter(|scope| !hierarchy.covers(&granted, scope.as_str()))
         .cloned()
         .collect();
     if missing.is_empty() {
@@ -1379,9 +1458,10 @@ mod tests {
     #[test]
     fn ensure_granted_rejects_a_token_missing_required_scopes() {
         let required = vec!["a".to_owned(), "b".to_owned()];
+        let hierarchy = ScopeHierarchy::new();
         // JWT that exposes only `a` → `b` is detectably not granted.
         let jwt = valid_token(&make_jwt(&json!({ "scope": "a" })));
-        let err = ensure_granted("dev", &jwt, &required).expect_err("b is not granted");
+        let err = ensure_granted("dev", &jwt, &required, &hierarchy).expect_err("b is not granted");
         assert!(
             err.to_string().contains("did not grant required scope(s)"),
             "{err}"
@@ -1390,10 +1470,20 @@ mod tests {
 
         // A token granting both passes.
         let ok = valid_token(&make_jwt(&json!({ "scope": "a b" })));
-        ensure_granted("dev", &ok, &required).expect("both granted");
+        ensure_granted("dev", &ok, &required, &hierarchy).expect("both granted");
         // Recorded scopes (opaque token) also satisfy the check.
         let opaque = token_with_scopes("opaque", &["a", "b"]);
-        ensure_granted("dev", &opaque, &required).expect("recorded scopes granted");
+        ensure_granted("dev", &opaque, &required, &hierarchy).expect("recorded scopes granted");
+    }
+
+    #[test]
+    fn ensure_granted_accepts_hierarchy_covered_grant() {
+        // The IdP literally grants only `admin`; the hierarchy says that
+        // covers `read`, so the exact-string-missing scope should not error.
+        let required = vec!["read".to_owned()];
+        let hierarchy = ScopeHierarchy::new().with_implication("admin", &["read"]);
+        let jwt = valid_token(&make_jwt(&json!({ "scope": "admin" })));
+        ensure_granted("dev", &jwt, &required, &hierarchy).expect("admin implies read");
     }
 
     #[test]
@@ -1401,16 +1491,57 @@ mod tests {
         let granted = vec!["base".to_owned(), "read".to_owned()];
         let read = vec!["read".to_owned()];
         let write = vec!["write".to_owned()];
+        let hierarchy = ScopeHierarchy::new();
 
         // Already covered (decision needs only granted vs required).
-        assert_eq!(plan_step_up(&granted, &read), StepUp::Covered);
+        assert_eq!(plan_step_up(&granted, &read, &hierarchy), StepUp::Covered);
         // Missing → reauthenticate, with no interactivity gate: step-up now
         // mirrors the no-token path and acquires the scope via a fresh login
         // rather than failing when stdio is not a TTY. The caller builds the
         // union (defaults ∪ granted ∪ required) only on this path.
-        assert_eq!(plan_step_up(&granted, &write), StepUp::Reauthenticate);
+        assert_eq!(
+            plan_step_up(&granted, &write, &hierarchy),
+            StepUp::Reauthenticate
+        );
         // The union itself (defaults ∪ granted ∪ required) is covered by
         // union_scopes' own test.
+    }
+
+    #[test]
+    fn plan_step_up_covers_via_hierarchy() {
+        let granted = vec!["admin".to_owned()];
+        let read = vec!["read".to_owned()];
+        let hierarchy = ScopeHierarchy::new().with_implication("admin", &["read"]);
+
+        assert_eq!(plan_step_up(&granted, &read, &hierarchy), StepUp::Covered);
+    }
+
+    #[test]
+    fn scope_hierarchy_covers_transitively() {
+        let hierarchy = ScopeHierarchy::new()
+            .with_implication("a", &["b"])
+            .with_implication("b", &["c"]);
+
+        assert!(hierarchy.covers(&["a".to_owned()], "c"));
+    }
+
+    #[test]
+    fn scope_hierarchy_ignores_cycles() {
+        let hierarchy = ScopeHierarchy::new()
+            .with_implication("a", &["b"])
+            .with_implication("b", &["a"]);
+
+        // Terminates instead of looping, and still resolves correctly.
+        assert!(hierarchy.covers(&["a".to_owned()], "b"));
+        assert!(!hierarchy.covers(&["a".to_owned()], "z"));
+    }
+
+    #[test]
+    fn scope_hierarchy_defaults_to_exact_match() {
+        let hierarchy = ScopeHierarchy::new();
+
+        assert!(hierarchy.covers(&["read".to_owned()], "read"));
+        assert!(!hierarchy.covers(&["admin".to_owned()], "read"));
     }
 
     /// An opaque cached token whose recorded scopes cover the requirement is

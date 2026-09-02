@@ -215,6 +215,8 @@ Precedence, highest first:
 
 `client_id`/`auth_url`/`token_url` have no default: if neither tier supplies one, resolving OAuth config for that environment fails outright rather than proceeding with a blank value. `scopes` does have a default (an empty list) — an OAuth provider with no default scopes configured is normal, not an error.
 
+By default, scope coverage checks (deciding whether a step-up/re-auth is needed) treat scopes as opaque strings. If the identity provider's scopes nest — a granted `write` scope also covering `read`, for example — declare that with `PkceAuthProvider::with_scope_hierarchy(ScopeHierarchy::new().with_implication("write", &["read"]))` so a broader existing grant satisfies a narrower requirement without an unnecessary browser step-up.
+
 ## Example
 
 ```rust,no_run
