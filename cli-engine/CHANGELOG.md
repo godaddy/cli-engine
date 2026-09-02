@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.3...cli-engine-v0.9.4) (2026-09-02)
+
+
+### Features
+
+* **auth:** support scope hierarchies for OAuth step-up decisions ([#111](https://github.com/godaddy/cli-engine/issues/111)) ([d33956b](https://github.com/godaddy/cli-engine/commit/d33956b214b18af69e7a947255e21a1f0c5f0bb2))
+
+
+### Bug Fixes
+
+* **interactivity:** harden missing-arg prompt formatting ([#110](https://github.com/godaddy/cli-engine/issues/110)) ([ac1c011](https://github.com/godaddy/cli-engine/commit/ac1c01117a06c1ee7261307a9261ada3f8bdd344))
+
 ## [0.9.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.2...cli-engine-v0.9.3) (2026-08-31)
 
 
