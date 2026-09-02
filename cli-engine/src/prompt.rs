@@ -174,9 +174,15 @@ pub fn try_recover_missing_args(
     let leaf_command = resolve_leaf_command(command, original_args, app_name)?;
 
     // Print a header so the user knows why they're being prompted.
-    let missing_list: Vec<&str> = missing_names
+    let missing_list: Vec<String> = missing_names
         .iter()
-        .map(|n| strip_arg_decoration(n))
+        .map(|n| {
+            if n.contains('|') {
+                format_missing_group_label(n, leaf_command)
+            } else {
+                format_missing_arg_label(n, find_arg_def(leaf_command, n))
+            }
+        })
         .collect();
     drop(writeln!(
         std::io::stderr(),
@@ -189,17 +195,41 @@ pub fn try_recover_missing_args(
     let mut already_supplied: Vec<String> = original_args.to_vec();
 
     for raw_name in &missing_names {
-        let clean_name = strip_arg_decoration(raw_name);
-        let arg_def = leaf_command.get_arguments().find(|a| {
-            a.get_id().as_str() == clean_name
-                || a.get_long().is_some_and(|l| l == clean_name)
-                || a.get_value_names().is_some_and(|vn| {
-                    vn.iter()
-                        .any(|v| v.to_ascii_uppercase() == raw_name.trim_matches(['<', '>']))
-                })
-        });
+        let selected_raw = if raw_name.contains('|') {
+            let alternatives = split_missing_group_alternatives(raw_name);
+            let labels: Vec<String> = alternatives
+                .iter()
+                .map(|alt| format_missing_arg_label(alt, find_arg_def(leaf_command, alt)))
+                .collect();
+            match prompt_select("Choose one of the required options:", &labels) {
+                Ok(idx) => alternatives[idx].clone(),
+                Err(_) => {
+                    let resume = build_resume_command(app_name, &already_supplied[1..]);
+                    return Some(RecoveryResult::Cancelled { resume });
+                }
+            }
+        } else {
+            raw_name.clone()
+        };
 
-        let prompt_message = format_prompt_message(raw_name, arg_def);
+        let arg_def = find_arg_def(leaf_command, &selected_raw);
+
+        if let Some(arg) = arg_def
+            && matches!(
+                arg.get_action(),
+                clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+            )
+        {
+            // Boolean flag chosen from a required group — no value prompt needed.
+            let start = prompted_args.len();
+            if let Some(long) = arg.get_long() {
+                prompted_args.push(format!("--{long}"));
+            }
+            already_supplied.extend_from_slice(&prompted_args[start..]);
+            continue;
+        }
+
+        let prompt_message = format_prompt_message(&selected_raw, arg_def);
         let value = match infer_and_prompt(&prompt_message, arg_def) {
             Ok(v) => v,
             Err(_) => {
@@ -212,22 +242,7 @@ pub fn try_recover_missing_args(
         // Append the prompted value to args.
         let start = prompted_args.len();
         if let Some(arg) = arg_def {
-            if let Some(long) = arg.get_long() {
-                if matches!(
-                    arg.get_action(),
-                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
-                ) {
-                    // Boolean flags: clap expects `--flag` alone, no value.
-                    if value == "true" {
-                        prompted_args.push(format!("--{long}"));
-                    }
-                } else {
-                    prompted_args.push(format!("--{long}"));
-                    prompted_args.push(value.clone());
-                }
-            } else {
-                prompted_args.push(value.clone());
-            }
+            append_prompted_arg(&mut prompted_args, arg, &value);
         } else {
             prompted_args.push(value.clone());
         }
@@ -350,12 +365,117 @@ fn infer_and_prompt(message: &str, arg_def: Option<&clap::Arg>) -> crate::Result
     prompt_text(message, None)
 }
 
-/// Strip clap decoration (`--`, `<>`, `[]`) from a raw arg identifier,
-/// yielding the bare name (e.g. `"--team-name"` → `"team-name"`,
-/// `"<domain>"` → `"domain"`).
+/// Strip clap decoration from a single token (`--team-name` → `team-name`,
+/// `<domain>` → `domain`). Does not mangle clap's `flag <VALUE>` form.
 fn strip_arg_decoration(raw: &str) -> &str {
-    raw.trim_start_matches('-')
-        .trim_matches(['<', '>', '[', ']'])
+    let stripped = raw.trim_start_matches('-');
+    if stripped.starts_with('<') && stripped.ends_with('>') && stripped.len() > 2 {
+        return &stripped[1..stripped.len() - 1];
+    }
+    if stripped.starts_with('[') && stripped.ends_with(']') && stripped.len() > 2 {
+        return &stripped[1..stripped.len() - 1];
+    }
+    stripped
+}
+
+/// Lookup key for a clap missing-arg identifier (`tld <TLD>` → `tld`).
+fn missing_arg_lookup_key(raw: &str) -> &str {
+    let stripped = raw.trim_start_matches('-');
+    strip_arg_decoration(stripped.split_whitespace().next().unwrap_or(stripped))
+}
+
+fn find_arg_def<'cmd>(command: &'cmd clap::Command, raw_name: &str) -> Option<&'cmd clap::Arg> {
+    let clean_name = missing_arg_lookup_key(raw_name);
+    command.get_arguments().find(|a| {
+        a.get_id().as_str() == clean_name
+            || a.get_long().is_some_and(|l| l == clean_name)
+            || a.get_value_names().is_some_and(|vn| {
+                vn.iter().any(|v| {
+                    v.eq_ignore_ascii_case(strip_arg_decoration(
+                        raw_name.split_whitespace().nth(1).unwrap_or(raw_name),
+                    ))
+                })
+            })
+    })
+}
+
+fn format_missing_arg_label(raw_name: &str, arg_def: Option<&clap::Arg>) -> String {
+    if let Some(arg) = arg_def {
+        if let Some(long) = arg.get_long() {
+            return format!("--{long}");
+        }
+        if let Some(help) = arg.get_help() {
+            return help.to_string().trim_end_matches('.').to_owned();
+        }
+    }
+    if let Some(value_name) = extract_value_name_suffix(raw_name) {
+        return value_name;
+    }
+    missing_arg_lookup_key(raw_name).replace('-', " ")
+}
+
+fn extract_value_name_suffix(raw_name: &str) -> Option<String> {
+    let stripped = raw_name.trim_start_matches('-');
+    let (_, value) = stripped.split_once(' ')?;
+    Some(strip_arg_decoration(value).to_owned())
+}
+
+/// Split clap's combined missing-arg group identifier into individual alternatives.
+///
+/// Clap reports required `ArgGroup`s as a single token such as
+/// `<--a <a>|--b <b>>` or `<--one|--two>`.
+fn split_missing_group_alternatives(raw_name: &str) -> Vec<String> {
+    let trimmed = raw_name.trim();
+    let inner = trimmed
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(trimmed);
+    if !inner.contains('|') {
+        return vec![raw_name.to_owned()];
+    }
+    inner
+        .split('|')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn format_missing_group_label(raw_name: &str, command: &clap::Command) -> String {
+    let labels: Vec<String> = split_missing_group_alternatives(raw_name)
+        .iter()
+        .map(|alt| format_missing_arg_label(alt, find_arg_def(command, alt)))
+        .collect();
+    format!("one of: {}", labels.join(", "))
+}
+
+fn append_prompted_arg(prompted_args: &mut Vec<String>, arg: &clap::Arg, value: &str) {
+    if let Some(long) = arg.get_long() {
+        if matches!(
+            arg.get_action(),
+            clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+        ) {
+            // Boolean flags: clap expects `--flag` alone, no value.
+            if value == "true" {
+                prompted_args.push(format!("--{long}"));
+            }
+        } else {
+            prompted_args.push(format!("--{long}"));
+            prompted_args.push(value.to_owned());
+        }
+    } else {
+        prompted_args.push(value.to_owned());
+    }
+}
+
+/// Normalize prompt/help text and append a single trailing colon.
+fn normalize_prompt_base(text: &str) -> String {
+    let trimmed = text.trim_end_matches('.').trim_end();
+    if trimmed.ends_with(':') {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}:")
+    }
 }
 
 /// Format a human-friendly prompt message from a raw clap arg identifier.
@@ -364,10 +484,12 @@ fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>) -> String 
         && let Some(help) = arg.get_help().map(|s| s.to_string())
     {
         help.trim_end_matches('.').to_owned()
+    } else if let Some(value_name) = extract_value_name_suffix(raw_name) {
+        value_name
     } else {
-        strip_arg_decoration(raw_name).replace('-', " ")
+        missing_arg_lookup_key(raw_name).replace('-', " ")
     };
-    format!("{base}:")
+    normalize_prompt_base(&base)
 }
 
 /// Build a resume command string from the already-supplied args.
@@ -434,6 +556,24 @@ mod tests {
     fn format_prompt_message_from_positional() {
         let msg = format_prompt_message("<domain>", None);
         assert_eq!(msg, "domain:");
+    }
+
+    #[test]
+    fn strip_arg_decoration_preserves_flag_value_name_pairs() {
+        assert_eq!(strip_arg_decoration("tld <TLD>"), "tld <TLD>");
+    }
+
+    #[test]
+    fn missing_arg_lookup_key_extracts_flag_id() {
+        assert_eq!(missing_arg_lookup_key("tld <TLD>"), "tld");
+        assert_eq!(missing_arg_lookup_key("--team-name"), "team-name");
+        assert_eq!(missing_arg_lookup_key("<domain>"), "domain");
+    }
+
+    #[test]
+    fn format_prompt_message_from_flag_value_name_pair() {
+        let msg = format_prompt_message("tld <TLD>", None);
+        assert_eq!(msg, "TLD:");
     }
 
     #[test]
@@ -547,5 +687,153 @@ mod tests {
         // auto_interactive = false, no explicit --interactive flag → no recovery
         let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test", false);
         assert!(result.is_none());
+    }
+
+    #[allow(clippy::panic)]
+    fn missing_arg_names(cmd: &clap::Command, argv: &[&str]) -> Vec<String> {
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        let err = cmd
+            .clone()
+            .try_get_matches_from(argv)
+            .expect_err("expected missing required argument");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        match err.get(ContextKind::InvalidArg) {
+            Some(ContextValue::Strings(names)) => names.clone(),
+            Some(ContextValue::String(name)) => vec![name.clone()],
+            other => panic!("unexpected InvalidArg context: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clap_reports_flag_value_name_pair_for_missing_flag_value() {
+        let cmd = clap::Command::new("agreements").arg(
+            clap::Arg::new("tld")
+                .long("tld")
+                .value_name("TLD")
+                .required(true),
+        );
+        let names = missing_arg_names(&cmd, &["agreements"]);
+        assert_eq!(names, vec!["--tld <TLD>"]);
+        let arg_def = find_arg_def(&cmd, &names[0]);
+        assert!(arg_def.is_some());
+        assert_eq!(format_prompt_message(&names[0], arg_def), "TLD:");
+        assert_eq!(format_missing_arg_label(&names[0], arg_def), "--tld");
+    }
+
+    #[test]
+    fn clap_reports_positional_value_name_for_missing_positional() {
+        let cmd = clap::Command::new("suggest").arg(
+            clap::Arg::new("query")
+                .value_name("QUERY")
+                .help("Seed domain or keywords to base suggestions on")
+                .required(true),
+        );
+        let names = missing_arg_names(&cmd, &["suggest"]);
+        assert_eq!(names, vec!["<QUERY>"]);
+        let arg_def = find_arg_def(&cmd, &names[0]);
+        assert!(arg_def.is_some());
+        assert_eq!(
+            format_prompt_message(&names[0], arg_def),
+            "Seed domain or keywords to base suggestions on:"
+        );
+        assert_eq!(
+            format_missing_arg_label(&names[0], arg_def),
+            "Seed domain or keywords to base suggestions on"
+        );
+    }
+
+    #[test]
+    fn clap_reports_flag_value_name_pair_with_dashed_long_flag() {
+        let cmd = clap::Command::new("test").arg(
+            clap::Arg::new("team_name")
+                .long("team-name")
+                .value_name("TEAM")
+                .required(true),
+        );
+        let names = missing_arg_names(&cmd, &["test"]);
+        assert_eq!(names, vec!["--team-name <TEAM>"]);
+        let arg_def = find_arg_def(&cmd, &names[0]);
+        assert!(arg_def.is_some());
+        assert_eq!(format_missing_arg_label(&names[0], arg_def), "--team-name");
+        assert_eq!(format_prompt_message(&names[0], arg_def), "TEAM:");
+    }
+
+    #[test]
+    fn format_prompt_message_handles_legacy_flag_value_name_without_dashes() {
+        // Older clap versions reported `tld <TLD>` without a `--` prefix.
+        let cmd = clap::Command::new("agreements").arg(
+            clap::Arg::new("tld")
+                .long("tld")
+                .value_name("TLD")
+                .required(true),
+        );
+        let arg_def = find_arg_def(&cmd, "tld <TLD>");
+        assert!(arg_def.is_some());
+        assert_eq!(format_prompt_message("tld <TLD>", arg_def), "TLD:");
+    }
+
+    #[test]
+    fn format_prompt_message_avoids_double_colon_when_help_ends_with_colon() {
+        let arg = clap::Arg::new("domain")
+            .long("domain")
+            .help("Enter domain:");
+        let msg = format_prompt_message("--domain", Some(&arg));
+        assert_eq!(msg, "Enter domain:");
+    }
+
+    #[test]
+    fn find_arg_def_matches_short_flag_value_name_pair() {
+        let cmd = clap::Command::new("test").arg(
+            clap::Arg::new("tld")
+                .short('t')
+                .long("tld")
+                .value_name("TLD")
+                .required(true),
+        );
+        let arg_def = find_arg_def(&cmd, "t <TLD>");
+        assert!(arg_def.is_some());
+        assert_eq!(format_missing_arg_label("t <TLD>", arg_def), "--tld");
+    }
+
+    #[test]
+    fn required_arg_group_lists_member_flags_in_missing_context() {
+        use clap::ArgGroup;
+        let cmd = clap::Command::new("update")
+            .arg(clap::Arg::new("a").long("a"))
+            .arg(clap::Arg::new("b").long("b"))
+            .group(ArgGroup::new("ab").args(["a", "b"]).required(true));
+        let names = missing_arg_names(&cmd, &["update"]);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].contains('|'));
+        let alternatives = split_missing_group_alternatives(&names[0]);
+        assert_eq!(alternatives, vec!["--a <a>", "--b <b>"]);
+        assert!(find_arg_def(&cmd, &alternatives[0]).is_some());
+        assert!(find_arg_def(&cmd, &alternatives[1]).is_some());
+    }
+
+    #[test]
+    fn derive_exclusive_group_reports_alternatives() {
+        use clap::CommandFactory;
+
+        #[derive(clap::Parser)]
+        #[command(name = "bump")]
+        struct Bump {
+            #[command(flatten)]
+            args: ExclusiveArgs,
+        }
+
+        #[derive(clap::Args)]
+        #[group(required = true, multiple = false)]
+        struct ExclusiveArgs {
+            #[arg(long)]
+            one: bool,
+            #[arg(long)]
+            two: bool,
+        }
+
+        let names = missing_arg_names(&Bump::command(), &["bump"]);
+        assert_eq!(names.len(), 1);
+        let alternatives = split_missing_group_alternatives(&names[0]);
+        assert_eq!(alternatives, vec!["--one", "--two"]);
     }
 }
