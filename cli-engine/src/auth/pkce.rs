@@ -402,7 +402,7 @@ impl PkceAuthProvider {
     /// re-authenticates when the current token genuinely lacks a required
     /// scope.
     ///
-    /// Unset by default, which preserves exact-string scope matching.
+    /// Empty by default, which preserves exact-string scope matching.
     #[must_use]
     pub fn with_scope_hierarchy(mut self, hierarchy: ScopeHierarchy) -> Self {
         self.scope_hierarchy = hierarchy;
@@ -1048,9 +1048,8 @@ fn scopes_from_claim(value: &Value) -> Vec<String> {
 ///
 /// Attach one to a [`PkceAuthProvider`] with
 /// [`with_scope_hierarchy`](PkceAuthProvider::with_scope_hierarchy) so scope
-/// coverage checks stop treating scopes as opaque, unrelated strings. Left
-/// unset (the default), coverage falls back to exact-string matching, which
-/// is today's behavior.
+/// coverage checks stop treating scopes as opaque, unrelated strings. Empty
+/// by default, which falls back to exact-string matching — today's behavior.
 #[derive(Debug, Default, Clone)]
 pub struct ScopeHierarchy {
     implies: HashMap<String, Vec<String>>,
