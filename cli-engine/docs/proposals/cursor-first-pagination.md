@@ -43,7 +43,7 @@ The continuation token could be one of two things:
 | Handle       | `x83fd20`          | An opaque value, understood by the API, used to recall a suspended stream of data. When the API is asked to continue iteration, it knows what to resume |
 | Instructions | `page:2,limit:100` | An instruction-bearing string that can be translated into specific parameters for calling the backing API |
 
-Thus, for a command that is using API-managed continuation tokens, the sequence may look liks this:
+Thus, for a command that is using API-managed continuation tokens, the sequence may look like this:
 
 ```
 gddy domain list --limit 100
@@ -59,11 +59,11 @@ gddy email list --continue limit:20,page:2
 gddy email list --continue limit:20,page:3
 ```
 
-Any command implementing cursoring operations uses a wrapping envelope, like we do for paginated results, that communicates if there is more data, the total number of items, the remaining number of items (if we know that from the API response), and the continuation token if we haven't reached the end of iteration. Additionally, the suggested next steps will include the exact full command for fetching the next page of results.
+Any command implementing cursor-based pagination uses a wrapping envelope, like we do for paginated results, that communicates whether there is more data, the total number of items, the remaining number of items (if we know that from the API response), and the continuation token if we haven't reached the end of iteration. Additionally, the suggested next steps will include the exact full command for fetching the next page of results.
 
 This shared pattern should be flexible to accommodate any back-end scheme while not degrading to horrible performance in other cases.
 
-However, there is an important caveat. With Slice- or Paging- based APIs that work off a naturally-sorted data set (like by domain name), binary searches are possible; this is not possible with a cursor-based linear iteration approach. This concern could be waved away with this justification:
+However, there is an important caveat. With Slicing- or Paging-based APIs that work off a naturally-sorted data set (like by domain name), binary searches are possible; this is not possible with a cursor-based linear iteration approach. This concern could be waved away with this justification:
 
 - An API ought to support _searching_ or _filtering_ to help users find the specific objects that they need so that client-conducted exploration is less necessary.
 - A command _could_ support optional additional arguments that work directly with the API's paging options, supplementing the _standard_ cursor arguments.
@@ -97,17 +97,19 @@ Registers `--limit`/`--continue` the same way `with_pagination` registers
 
 Today's `PaginationMeta { total, offset, limit, count, has_more }` assumes both `total` and `offset` are always known — true for a client-side slice, not guaranteed for a real cursor API that may never report a true count. The `.with_cursor` counterpart needs `total`/`offset` to become optional (present when an adapter can supply them, absent for a pure opaque cursor) and add `continue_from: Option<String>`.
 
-Human output changes correspondingly when a total is unknown: "Showing 25 items so far — run with `--continue-from <token>` for more" instead of "Showing 25 of 143 rows, offset 0, limit 25". When a total *is* available (some cursor backends do report one, and every client-side-slice command still knows its own total), the existing "N of M" phrasing still applies.
+Human output changes correspondingly when a total is unknown: "Showing 25 items so far — run with `--continue <token>` for more" instead of "Showing 25 of 143 rows, offset 0, limit 25". When a total *is* available (some cursor backends do report one, and every client-side-slice command still knows its own total), the existing "N of M" phrasing still applies.
 
 `next_actions` needs no new mechanism — it already replays every flag the user passed and appends an updated pagination flag; for a `.with_cursor` command it appends `--continue <token>`.
 
-**5 production `gddy` commands lose `--offset` outright**, in the same release:
+**6 production `gddy` commands lose `--offset` outright**, in the same release:
 
   - `dns list`
-  - `api_explorer response/search/parameter`
+  - `api_explorer response`
+  - `api_explorer search`
+  - `api_explorer parameter`
   - `application list`
   - `actions_catalog`
-  
+
 Any script, alias, or muscle-memory usage of `--offset` against these commands breaks immediately upon upgrade.
 
 ## Prior art
