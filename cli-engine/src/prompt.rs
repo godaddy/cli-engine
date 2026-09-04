@@ -288,10 +288,16 @@ pub fn confirm_command_correction(
 #[derive(Debug)]
 pub enum RecoveryResult {
     /// Successfully prompted for all missing values; `args` has the augmented list.
-    Recovered { args: Vec<String> },
+    Recovered {
+        /// The augmented argument list, with prompted values filled in.
+        args: Vec<String>,
+    },
     /// User cancelled mid-prompt; `resume` is the command to resume with
     /// already-supplied flags.
-    Cancelled { resume: String },
+    Cancelled {
+        /// The command to resume with, including already-supplied flags.
+        resume: String,
+    },
 }
 
 /// Determine interactivity from raw args (before full clap parse).
