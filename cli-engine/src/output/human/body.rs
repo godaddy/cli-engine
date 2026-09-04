@@ -288,7 +288,7 @@ fn render_table(
             out.push_str("  ");
         }
         out.push_str(&pad_column(
-            &header.to_uppercase(),
+            &header.to_ascii_uppercase(),
             widths[index],
             alignments[index],
         ));
