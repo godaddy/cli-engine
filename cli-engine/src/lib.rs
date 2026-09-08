@@ -104,8 +104,10 @@ pub mod middleware;
 pub mod module;
 /// Structured output envelopes, renderers, schemas, and field projection.
 pub mod output;
-/// Search indexing for commands, guides, and extra documents.
+/// Interactive terminal prompting for missing-argument recovery and
+/// unknown-command correction.
 pub mod prompt;
+/// Search indexing for commands, guides, and extra documents.
 pub mod search;
 /// Command risk tiers used by authentication, authorization, and dry-run.
 pub mod tier;

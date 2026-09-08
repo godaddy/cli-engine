@@ -11,6 +11,12 @@ These instructions apply to the Rust `cli_engine` crate in this workspace.
   integration tests in `tests/`.
 - Do not add implementation code, docs, fixtures, or tests from unrelated implementations to this repository.
 
+## Code File Structure
+
+- No hand-written `.rs` file exceeds 1000 lines. CI enforces this with `cli-engine/scripts/check-module-size.sh`. When a file grows past the limit, split it into a directory module (`foo.rs` becomes `foo/mod.rs` plus sibling files) grouped by cohesive purpose — not by mechanically chopping it into equal chunks. `cli-engine/src/cli/` (`builtins.rs`, `completion.rs`, `help.rs`, `tree_render.rs`) is an example of this pattern.
+- Prefer functions that fit on one "screen" (~35 lines) as a rule of thumb. When a function's purpose can't be seen without scrolling, extract named helper steps.
+- Keep comments succinct and useful to a reader with no memory of this coding session or its PR review thread: explain a non-obvious local decision (a hidden constraint, a workaround, a subtle invariant), not what the code does or why *this change* did it.
+
 ## Design Direction
 
 - Preserve the cli-engine concepts: domain modules, noun-based groups, leaf commands, colon-separated command paths, middleware, authentication, authorization, output envelopes, schemas, guides, search, and transport helpers.
@@ -29,7 +35,6 @@ These instructions apply to the Rust `cli_engine` crate in this workspace.
 - Keep public names idiomatic Rust: snake_case functions and fields, PascalCase types, clear module names.
 - Avoid clever abstractions unless they clearly reduce repeated command-author work.
 - Public APIs should have useful rustdoc comments. Explain behavior, errors, and invariants where they matter.
-- Source comments should explain non-obvious local decisions.
 
 ## Creating A Consumer CLI
 
@@ -278,6 +283,7 @@ cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS='-D warnings' cargo doc --no-deps
 cargo test --all-targets
 cargo test --doc
+./cli-engine/scripts/check-module-size.sh
 ```
 
 Some human-output tests assume width 80 (non-TTY). On a wide interactive terminal they
