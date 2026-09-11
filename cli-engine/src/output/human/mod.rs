@@ -354,7 +354,9 @@ pub fn render_human_with_registry_selected(
     if let Some(data) = &envelope.data
         && let Some(custom) = registry.custom(schema_id)
     {
-        return custom.render(data);
+        let mut output = custom.render(data);
+        append_next_actions(&mut output, &envelope.next_actions);
+        return output;
     }
     match registry.columns(schema_id) {
         Some(columns) => {
