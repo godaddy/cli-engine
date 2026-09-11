@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.4...cli-engine-v0.9.5) (2026-09-11)
+
+
+### Features
+
+* **structure:** enforce 1000-line module cap and split oversized files ([#113](https://github.com/godaddy/cli-engine/issues/113)) ([860e15f](https://github.com/godaddy/cli-engine/commit/860e15f9ebb1524800a7e2554b63ba6152beffcd))
+
+
+### Bug Fixes
+
+* **output:** render next actions for custom views ([#116](https://github.com/godaddy/cli-engine/issues/116)) ([ef1132e](https://github.com/godaddy/cli-engine/commit/ef1132e657c5d05f9bab067d746e171b615aec5e))
+
 ## [0.9.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.3...cli-engine-v0.9.4) (2026-09-02)
 
 
