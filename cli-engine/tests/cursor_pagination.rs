@@ -115,7 +115,13 @@ async fn default_limit_applies_when_neither_flag_is_passed() {
     // total/remaining are absent — this fake backend never reports them.
     assert_eq!(
         rendered["cursor"],
-        json!({"limit": 2, "count": 2, "continue_from": "2", "has_more": true})
+        json!({
+            "limit": 2,
+            "count": 2,
+            "continue_from": "2",
+            "has_more": true,
+            "self_sufficient_limit": false
+        })
     );
     assert_eq!(
         rendered["next_actions"][0]["command"],
@@ -226,7 +232,8 @@ async fn with_total_and_remaining_surface_on_the_envelope() {
             "total": 4,
             "remaining": 2,
             "continue_from": "tok-2",
-            "has_more": true
+            "has_more": true,
+            "self_sufficient_limit": false
         })
     );
 }
@@ -320,6 +327,7 @@ async fn with_limit_overrides_the_envelope_and_omits_limit_from_the_next_action(
     assert_eq!(output.exit_code, 0, "{}", output.rendered);
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(rendered["cursor"]["limit"], json!(2));
+    assert_eq!(rendered["cursor"]["self_sufficient_limit"], json!(true));
     let next_actions = rendered["next_actions"].as_array().expect("next_actions");
     // `with_limit` means the token is self-sufficient about page size, so
     // the replay omits `--limit` entirely rather than repeating a value
@@ -559,6 +567,44 @@ async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_meta
             .rendered
             .contains("so far; use --limit 2 --continue \"a b;c\" for more"),
         "{}",
+        output.rendered
+    );
+}
+
+/// The "so far" hint must agree with the generated `next_actions` command:
+/// when the handler called `with_limit`, the token alone is self-sufficient
+/// about page size, so `next_actions` omits `--limit` — and this hint must
+/// omit it too, or copy-pasting it would suggest a `--limit` that could
+/// differ from (or exceed the command's own cap for) the effective size the
+/// token actually carries.
+#[tokio::test]
+async fn human_output_so_far_summary_omits_limit_when_the_token_is_self_sufficient() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig {
+                default_limit: 25,
+                max_limit: 0,
+            }),
+        async |_ctx| {
+            Ok(CommandResult::new(json!(items()))
+                .with_cursor(CursorContinuation::more("tok-2").with_limit(2)))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("so far; use --continue tok-2 for more"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        !output.rendered.contains("--limit"),
+        "self-sufficient token must not suggest a --limit: {}",
         output.rendered
     );
 }

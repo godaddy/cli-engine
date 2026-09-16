@@ -614,6 +614,7 @@ impl Middleware {
                 remaining: continuation.remaining,
                 continue_from: continuation.continue_from,
                 has_more,
+                self_sufficient_limit: continuation.limit.is_some(),
             });
         }
         envelope.with_context(

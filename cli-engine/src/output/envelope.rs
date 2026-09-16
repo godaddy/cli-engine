@@ -204,6 +204,15 @@ pub struct CursorMeta {
     pub continue_from: Option<String>,
     /// Whether more data is available (`continue_from.is_some()`).
     pub has_more: bool,
+    /// Whether `continue_from` alone is sufficient to resume at `limit`
+    /// (the handler called
+    /// [`CursorContinuation::with_limit`](crate::CursorContinuation::with_limit)),
+    /// so a replay command can omit `--limit` — the same condition the
+    /// engine uses to decide whether `next_actions` includes it. `false` for
+    /// a plain [`CursorContinuation::more`](crate::CursorContinuation::more)
+    /// token, where `limit` is just the parsed `--limit` and resuming with a
+    /// different one could change page size.
+    pub self_sufficient_limit: bool,
 }
 
 /// Structured error payload in an [`Envelope`].

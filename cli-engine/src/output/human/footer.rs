@@ -100,9 +100,8 @@ pub(super) fn cursor_summary_text(
         }
         (SummaryStyle::TableFooter, None, None, Some(token)) => {
             format!(
-                "{count} rows so far; use --limit {} --continue {} for more",
-                cursor.limit,
-                quote_pagination_value(token)
+                "{count} rows so far; use {} for more",
+                resume_hint(cursor, token)
             )
         }
         (SummaryStyle::TableFooter, None, None, None) => format!("{count} rows"),
@@ -112,12 +111,31 @@ pub(super) fn cursor_summary_text(
         }
         (SummaryStyle::Standalone, None, None, Some(token)) => {
             format!(
-                "Showing {count} items so far; use --limit {} --continue {} for more",
-                cursor.limit,
-                quote_pagination_value(token)
+                "Showing {count} items so far; use {} for more",
+                resume_hint(cursor, token)
             )
         }
         (SummaryStyle::Standalone, None, None, None) => format!("Showing {count}"),
+    }
+}
+
+/// Builds the `--limit N --continue <token>`/`--continue <token>` fragment
+/// for a cursor "so far" hint, matching exactly what the engine appends to
+/// `next_actions` for the same response (`middleware::run::render_envelope`):
+/// `--limit` is included unless `cursor.self_sufficient_limit` says the
+/// token alone already carries the effective page size. Copy-pasting this
+/// hint must produce the same command the machine-readable `next_actions`
+/// entry already suggests — including `--limit` when the token doesn't
+/// need it would print a fabricated size, but omitting it when the token
+/// truly doesn't carry one could resume at a different page size (or, if
+/// the handler's effective limit exceeds this command's own `max_limit`,
+/// print a `--limit` the parser would reject outright).
+fn resume_hint(cursor: &CursorMeta, token: &str) -> String {
+    let token = quote_pagination_value(token);
+    if cursor.self_sufficient_limit {
+        format!("--continue {token}")
+    } else {
+        format!("--limit {} --continue {token}", cursor.limit)
     }
 }
 
