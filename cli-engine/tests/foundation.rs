@@ -9270,6 +9270,21 @@ fn toon_renderer_covers_nested_empty_and_escaped_goldens() {
     }
 }
 
+/// A string field can be backend-controlled (e.g. a cursor continuation
+/// token), not authored by this crate — a raw control character (ESC, the
+/// start of most ANSI escape sequences) must never reach the terminal
+/// unescaped just because it isn't one of the three with a named escape
+/// (`\n`/`\r`/`\t`).
+#[test]
+fn toon_renderer_escapes_arbitrary_control_characters() {
+    let envelope = Envelope::success(json!({"continue_from": "a\x1b[31mb"}), "things-api")
+        .prepare_for_render("");
+    assert_eq!(
+        render(OutputFormat::Toon, &envelope).expect("toon render should succeed"),
+        "data:\n  continue_from: \"a\\x1b[31mb\""
+    );
+}
+
 #[test]
 fn toon_renderer_covers_nested_array_and_non_tabular_object_paths() {
     let envelope = Envelope::success(
