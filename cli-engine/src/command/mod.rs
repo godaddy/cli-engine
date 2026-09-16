@@ -17,7 +17,7 @@ pub use matches::{
     command_args_from_matches, command_path_from_matches, command_path_from_parts, leaf_matches,
 };
 pub use runtime::RuntimeCommandSpec;
-pub use spec::{CommandSpec, PaginationConfig};
+pub use spec::{CommandSpec, CursorConfig, PaginationConfig};
 
 /// Sender half for streaming command output.
 ///
@@ -92,6 +92,21 @@ impl CommandResult {
         self.metadata.dry_run = true;
         self
     }
+
+    /// Attaches what this handler learned from a cursor-backed backend call.
+    ///
+    /// Only meaningful for a command that opted into
+    /// [`CommandSpec::with_cursor`]. Unlike offset pagination — which the
+    /// engine slices and measures itself — a cursor is backend-opaque, so
+    /// only the handler that made the call can supply the next resume token
+    /// (and, when the backend reports them, a total/remaining count). Omit
+    /// this call, or pass [`CursorContinuation::done`], to report that
+    /// iteration has reached its end.
+    #[must_use]
+    pub fn with_cursor(mut self, continuation: CursorContinuation) -> Self {
+        self.metadata.cursor = Some(continuation);
+        self
+    }
 }
 
 impl From<Value> for CommandResult {
@@ -111,6 +126,86 @@ pub struct CommandResultMetadata {
     /// mutating step. Middleware tags the audit/activity outcome and envelope
     /// as `dry-run` instead of `ok` when this is `true`.
     pub dry_run: bool,
+    /// Set by [`CommandResult::with_cursor`] to report cursor-pagination
+    /// progress for a [`with_cursor`](CommandSpec::with_cursor) command.
+    pub cursor: Option<CursorContinuation>,
+}
+
+/// What a cursor-aware handler learned from its own backend call.
+///
+/// Construct with [`CursorContinuation::more`] or [`CursorContinuation::done`],
+/// then chain [`with_total`](CursorContinuation::with_total)/
+/// [`with_remaining`](CursorContinuation::with_remaining) when the backend
+/// reported them. Attach to a [`CommandResult`] with
+/// [`CommandResult::with_cursor`].
+#[non_exhaustive]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CursorContinuation {
+    /// Opaque token the engine replays as `--continue <token>` in the next
+    /// page's `next_actions` entry. `None` means iteration has reached its
+    /// end.
+    pub continue_from: Option<String>,
+    /// Total item count, when the backend reports one.
+    pub total: Option<i64>,
+    /// Remaining item count, when the backend reports one.
+    pub remaining: Option<i64>,
+    /// The page size actually applied, when it differs from the parsed
+    /// `--limit` the engine would otherwise report.
+    ///
+    /// Only needed when a handler's *effective* page size isn't simply
+    /// `ctx.middleware.cursor_limit` — e.g. it derived the size from the
+    /// `--continue` token itself (so a caller resuming with `--continue`
+    /// alone doesn't have to repeat `--limit`) rather than from this
+    /// invocation's own parsed flag. `None` means the parsed `--limit` is
+    /// exactly what was applied, the common case.
+    ///
+    /// Setting this does double duty: it also tells the engine `continue_from`
+    /// is self-sufficient about page size, so the auto-generated next-page
+    /// command omits `--limit` entirely rather than repeating a value the
+    /// token already carries. Leave it `None` for an opaque token the
+    /// handler didn't itself encode (e.g. a real server-side cursor) — the
+    /// engine can't know whether *that* backend tolerates a different size on
+    /// resume, so it plays it safe and keeps `--limit` in the replay.
+    pub limit: Option<i64>,
+}
+
+impl CursorContinuation {
+    /// Reports that more data is available, resumed with `token`.
+    #[must_use]
+    pub fn more(token: impl Into<String>) -> Self {
+        Self {
+            continue_from: Some(token.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Reports that iteration has reached its end.
+    #[must_use]
+    pub fn done() -> Self {
+        Self::default()
+    }
+
+    /// Records the backend's reported total item count, if any.
+    #[must_use]
+    pub fn with_total(mut self, total: i64) -> Self {
+        self.total = Some(total);
+        self
+    }
+
+    /// Records the backend's reported remaining item count, if any.
+    #[must_use]
+    pub fn with_remaining(mut self, remaining: i64) -> Self {
+        self.remaining = Some(remaining);
+        self
+    }
+
+    /// Records the page size actually applied, when it differs from this
+    /// invocation's parsed `--limit`. See [`CursorContinuation::limit`].
+    #[must_use]
+    pub fn with_limit(mut self, limit: i64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
 }
 
 /// Runtime context passed to advanced command handlers.

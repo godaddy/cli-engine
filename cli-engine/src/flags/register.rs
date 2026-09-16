@@ -286,6 +286,55 @@ fn pagination_offset_value_parser() -> ValueParser {
     })
 }
 
+/// Registers `--limit`/`--continue` directly on one command's own `clap`
+/// `Command`, for a command whose [`CommandSpec`](crate::CommandSpec) opted
+/// into cursor pagination via `with_cursor`.
+pub(crate) fn apply_cursor_args(command: Command, default_limit: i64, max_limit: i64) -> Command {
+    command
+        .arg(
+            Arg::new("limit")
+                .long("limit")
+                .value_parser(cursor_limit_value_parser(max_limit))
+                .allow_hyphen_values(true)
+                .default_value(default_limit.to_string())
+                .display_order(global_flag_order::LIMIT)
+                .help(cursor_limit_help(default_limit, max_limit)),
+        )
+        .arg(
+            Arg::new("continue")
+                .long("continue")
+                .value_name("TOKEN")
+                .allow_hyphen_values(true)
+                .display_order(global_flag_order::CONTINUE)
+                .help("Token to fetch the next page of data from a multi-page response (omit to start from the beginning)"),
+        )
+}
+
+fn cursor_limit_help(default_limit: i64, max_limit: i64) -> String {
+    let mut help = format!("Max items to return per page (default {default_limit}");
+    if max_limit > 0 {
+        help.push_str(&format!(", max {max_limit}"));
+    }
+    help.push(')');
+    help
+}
+
+/// Rejects a non-positive `--limit` at parse time.
+fn cursor_limit_value_parser(max_limit: i64) -> ValueParser {
+    ValueParser::new(move |raw: &str| -> Result<i64, String> {
+        let value = raw
+            .parse::<i64>()
+            .map_err(|_| format!("invalid limit value {raw:?}"))?;
+        if value <= 0 {
+            return Err(format!("limit {value} must be greater than 0"));
+        }
+        if max_limit > 0 && value > max_limit {
+            return Err(format!("limit {value} exceeds the maximum of {max_limit}"));
+        }
+        Ok(value)
+    })
+}
+
 pub(crate) fn compat_bool_value_parser() -> ValueParser {
     ValueParser::new(parse_compat_bool)
 }

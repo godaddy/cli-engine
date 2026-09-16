@@ -282,6 +282,17 @@ CommandSpec::new("list", "List projects").with_pagination(PaginationConfig {
 })
 ```
 
+`--limit`/`--continue` are the cursor-pagination counterpart, for a command backed by aserver-maintained, forward-only cursor API — see [cursor pagination](#cursor-pagination):
+
+```rust
+CommandSpec::new("list", "List domains").with_cursor(CursorConfig {
+    default_limit: 25,
+    max_limit: 500,
+})
+```
+
+A command opts into exactly one of `with_pagination`/`with_cursor`, never both.
+
 ## Middleware
 
 Command execution flows through a consistent middleware chain:
@@ -508,6 +519,16 @@ the user ran — including every flag they passed — with `--limit`/`--offset` 
 page, so both agent callers (`next_actions[]`) and human callers (the "Next steps:" footer) get a
 literal follow-up command instead of having to compute the next offset themselves.
 
+### cursor pagination
+
+A command that opted into `--limit`/`--continue` cursor pagination via `CommandSpec::with_cursor` gets a top-level `cursor` field on the envelope instead of `pagination` — `limit`, `count`, `total`, `remaining`, `continue_from`, and `has_more` — whenever it returned array data. Unlike `pagination`, the engine cannot compute this itself: a cursor is opaque to everything except the handler that called the backend, so `limit`/`count` are the only pieces the engine derives (the parsed `--limit` and the returned array's length); `total`/`remaining`/`continue_from` come from whatever the handler reported via `CommandResult::with_cursor(CursorContinuation::more(token).with_total(n).with_remaining(n))` — or `CursorContinuation::done()` (or no call at all) to report the end of iteration. `total`/`remaining` are `None` when the backend never reports them, which a pure opaque-cursor API is not obligated to do.
+
+Human output merges this into the table's row-count footer: `(N of M rows)` when a total is known, `(N rows, M remaining)` when only a remaining count is known, or `(N rows so far; use --continue <token> for more)` when neither is known. A cursor-paginated response that doesn't render as a table gets the standalone counterpart: `Showing N of M`, `Showing N (M remaining)`, or `Showing N items so far; use --continue <token> for more`.
+
+When `continue_from` is present (`has_more`), the engine appends a `next_actions` entry replaying the command with `--limit`/`--continue <token>` for the next page.
+
+A command registers `with_pagination` or `with_cursor`, never both.
+
 ### fix
 
 Failed commands can attach recovery guidance as a top-level `fix` on the error envelope
@@ -529,8 +550,7 @@ it.
 The output pipeline runs in this order:
 
 1. **Filtering**: `--filter` evaluates a JMESPath predicate against each item in list data.
-2. **Pagination**: `--limit` and `--offset` slice list data and attach the envelope's top-level
-   `pagination` field (see [pagination](#pagination) above).
+2. **Pagination**: `--limit` and `--offset` slice list data and attach the envelope's top-level `pagination` field (see [pagination](#pagination) above). Inert for a `with_cursor` command.
 3. **Expression**: `--expr` evaluates a JMESPath query against the whole current result.
 4. **Field selection**: `--fields` selects comma-separated fields and nested dot paths.
 5. **Formatting**: `--output` renders `json`, `human`, or `toon`.
