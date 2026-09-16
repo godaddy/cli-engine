@@ -210,6 +210,15 @@ fn pagination_arg_display(value: &serde_json::Value) -> String {
 /// ANSI escape sequence that could otherwise repaint the terminal when this
 /// is printed — is rendered as a literal `\xHH`/`\n`/`\r`/`\t` placeholder
 /// rather than passed through raw.
+///
+/// Display-safe, not round-trip-safe: a plain shell does not decode `\n`/
+/// `\xHH` inside a double-quoted string back into the original byte, so a
+/// value containing a control character cannot be copy-pasted back into an
+/// exact resend — a deliberate trade-off, since the alternative (an escape
+/// a shell *would* decode, e.g. ANSI-C `$'...'` quoting) is not POSIX and
+/// would make every other, ordinary replayed value non-portable to gain
+/// exact reproduction for a case that, in practice, only a malformed or
+/// adversarial backend cursor token would ever hit.
 pub(crate) fn quote_pagination_value(value: &str) -> String {
     let safe_unquoted =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
