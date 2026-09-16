@@ -176,15 +176,19 @@ pub struct PaginationMeta {
 
 /// Cursor-pagination metadata.
 ///
-/// `limit` and `count` are computed by the engine (the requested page size
-/// and the returned array's length); `total`, `remaining`, and
-/// `continue_from` come from the handler's
+/// `count` is computed by the engine (the returned array's length). `limit`
+/// is normally the requested `--limit`, but a handler can override it via
+/// [`CursorContinuation::with_limit`](crate::CursorContinuation::with_limit)
+/// to report the effective page size it actually resumed with — e.g. one
+/// decoded from `continue_from` itself rather than the parsed flag. `total`,
+/// `remaining`, and `continue_from` come from the handler's
 /// [`CursorContinuation`](crate::CursorContinuation), since only it talked to
 /// the opaque backend cursor. `total`/`remaining` are `None` when the backend
 /// never reports them — a cursor API is not guaranteed to know its own total.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CursorMeta {
-    /// Requested page size.
+    /// Effective page size — the parsed `--limit`, unless overridden by
+    /// [`CursorContinuation::with_limit`](crate::CursorContinuation::with_limit).
     pub limit: i64,
     /// Item count in this response.
     pub count: i64,

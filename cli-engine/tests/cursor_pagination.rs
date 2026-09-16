@@ -197,14 +197,14 @@ async fn last_page_has_no_next_action_and_has_more_is_false() {
 #[tokio::test]
 async fn with_total_and_remaining_surface_on_the_envelope() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 2,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(
                 CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}])).with_cursor(
                     CursorContinuation::more("tok-2")
@@ -240,14 +240,14 @@ async fn with_total_and_remaining_surface_on_the_envelope() {
 #[tokio::test]
 async fn cursor_metadata_is_absent_when_the_handler_result_is_not_an_array() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 2,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(CommandResult::new(json!({"name": "alpha"}))
                 .with_cursor(CursorContinuation::more("tok-2")))
         },
@@ -299,14 +299,14 @@ async fn cursor_metadata_is_absent_after_expr_reshapes_data_to_a_scalar() {
 #[tokio::test]
 async fn with_limit_overrides_the_envelope_and_omits_limit_from_the_next_action() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 25,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(
                 CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}]))
                     .with_cursor(CursorContinuation::more("tok-2").with_limit(2)),
@@ -420,7 +420,7 @@ fn with_cursor_panics_when_default_limit_exceeds_max_limit() {
 )]
 fn with_pagination_and_with_cursor_together_panics_on_registration() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("bad", "Bad")
             .no_auth(true)
             .with_pagination(cli_engine::PaginationConfig::default())
@@ -428,7 +428,7 @@ fn with_pagination_and_with_cursor_together_panics_on_registration() {
                 default_limit: 1,
                 max_limit: 0,
             }),
-        async |_credential, _args| Ok(CommandResult::new(json!([]))),
+        async |_ctx| Ok(CommandResult::new(json!([]))),
     ));
 }
 
@@ -439,7 +439,7 @@ fn with_pagination_and_with_cursor_together_panics_on_registration() {
 #[cfg_attr(debug_assertions, should_panic(expected = "mutually exclusive"))]
 fn raw_output_paired_with_cursor_panics_on_registration() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("bad", "Bad")
             .no_auth(true)
             .raw_output(true)
@@ -447,7 +447,7 @@ fn raw_output_paired_with_cursor_panics_on_registration() {
                 default_limit: 1,
                 max_limit: 0,
             }),
-        async |_credential, _args| Ok(CommandResult::new(json!("text"))),
+        async |_ctx| Ok(CommandResult::new(json!("text"))),
     ));
 }
 
@@ -477,14 +477,14 @@ async fn next_page_action_replays_other_flags_the_user_passed() {
 #[tokio::test]
 async fn next_page_action_quotes_a_continuation_token_with_shell_metacharacters() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 2,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
         },
     ));
@@ -514,7 +514,7 @@ async fn human_output_shows_so_far_summary_when_total_is_unknown() {
     assert!(
         output
             .rendered
-            .contains("(2 rows so far; use --continue 2 for more)"),
+            .contains("(2 rows so far; use --limit 2 --continue 2 for more)"),
         "{}",
         output.rendered
     );
@@ -540,14 +540,14 @@ async fn human_output_shows_so_far_summary_when_total_is_unknown() {
 #[tokio::test]
 async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_metacharacters() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 2,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
         },
     ));
@@ -557,7 +557,7 @@ async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_meta
     assert!(
         output
             .rendered
-            .contains("so far; use --continue \"a b;c\" for more"),
+            .contains("so far; use --limit 2 --continue \"a b;c\" for more"),
         "{}",
         output.rendered
     );
@@ -566,14 +566,14 @@ async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_meta
 #[tokio::test]
 async fn human_output_shows_total_when_known() {
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 2,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(
                 CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}]))
                     .with_cursor(CursorContinuation::more("2").with_total(4)),
@@ -629,14 +629,14 @@ async fn human_standalone_summary_for_a_non_table_cursor_response() {
     // not `render_table`, so the standalone `append_cursor_summary` line is
     // the one that must fire, not the merged table footer.
     let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
-    cli.add_command(RuntimeCommandSpec::new(
+    cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_cursor(CursorConfig {
                 default_limit: 2,
                 max_limit: 0,
             }),
-        async |_credential, _args| {
+        async |_ctx| {
             Ok(CommandResult::new(json!(["alpha", "beta"]))
                 .with_cursor(CursorContinuation::more("2")))
         },
@@ -647,7 +647,7 @@ async fn human_standalone_summary_for_a_non_table_cursor_response() {
     assert!(
         output
             .rendered
-            .contains("Showing 2 items so far; use --continue 2 for more"),
+            .contains("Showing 2 items so far; use --limit 2 --continue 2 for more"),
         "{}",
         output.rendered
     );

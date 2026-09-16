@@ -100,7 +100,8 @@ pub(super) fn cursor_summary_text(
         }
         (SummaryStyle::TableFooter, None, None, Some(token)) => {
             format!(
-                "{count} rows so far; use --continue {} for more",
+                "{count} rows so far; use --limit {} --continue {} for more",
+                cursor.limit,
                 quote_pagination_value(token)
             )
         }
@@ -111,7 +112,8 @@ pub(super) fn cursor_summary_text(
         }
         (SummaryStyle::Standalone, None, None, Some(token)) => {
             format!(
-                "Showing {count} items so far; use --continue {} for more",
+                "Showing {count} items so far; use --limit {} --continue {} for more",
+                cursor.limit,
                 quote_pagination_value(token)
             )
         }

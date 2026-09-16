@@ -670,14 +670,22 @@ impl<'request> MiddlewareRequest<'request> {
     }
 
     /// Sets the replayable command text for offset pagination's `next_actions`.
+    ///
+    /// Clears `cursor_command` — a command replays as one pagination style or
+    /// the other, never both; setting one via its builder is how a caller
+    /// signals the other no longer applies.
     pub fn with_pagination_command(mut self, pagination_command: impl Into<String>) -> Self {
         self.pagination_command = Some(pagination_command.into());
+        self.cursor_command = None;
         self
     }
 
     /// Sets the replayable command text for cursor pagination's `next_actions`.
+    ///
+    /// Clears `pagination_command` — see [`with_pagination_command`](Self::with_pagination_command).
     pub fn with_cursor_command(mut self, cursor_command: impl Into<String>) -> Self {
         self.cursor_command = Some(cursor_command.into());
+        self.pagination_command = None;
         self
     }
 }
