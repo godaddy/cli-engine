@@ -1,6 +1,7 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use super::RenderNotes;
+use crate::cli::quote_pagination_value;
 use crate::output::{CursorMeta, NextAction, NextActionParam, PaginationMeta};
 
 /// Appends footer hints for truncated cells and/or hidden columns to `out`
@@ -98,7 +99,10 @@ pub(super) fn cursor_summary_text(
             format!("{count} rows, {remaining} remaining")
         }
         (SummaryStyle::TableFooter, None, None, Some(token)) => {
-            format!("{count} rows so far; use --continue {token} for more")
+            format!(
+                "{count} rows so far; use --continue {} for more",
+                quote_pagination_value(token)
+            )
         }
         (SummaryStyle::TableFooter, None, None, None) => format!("{count} rows"),
         (SummaryStyle::Standalone, Some(total), _, _) => format!("Showing {count} of {total}"),
@@ -106,7 +110,10 @@ pub(super) fn cursor_summary_text(
             format!("Showing {count} ({remaining} remaining)")
         }
         (SummaryStyle::Standalone, None, None, Some(token)) => {
-            format!("Showing {count} items so far; use --continue {token} for more")
+            format!(
+                "Showing {count} items so far; use --continue {} for more",
+                quote_pagination_value(token)
+            )
         }
         (SummaryStyle::Standalone, None, None, None) => format!("Showing {count}"),
     }
@@ -159,7 +166,12 @@ pub(super) fn append_pagination_summary(
 /// [`append_pagination_summary`] — same fallback role (only fires when
 /// `render_table`'s footer didn't already merge these facts), same `shown`
 /// semantics (the actual post-`--expr` rendered count, not the possibly-stale
-/// `cursor.count`).
+/// `cursor.count`) and the same `None` handling: `--expr` reshaping the data
+/// into something that's no longer an array (e.g. `length(@)`) must not
+/// print a "Showing N ..." claim built from the now-stale pre-`--expr`
+/// `cursor.count` — falling back to `cursor.count` here (rather than a
+/// neutral line, as `append_pagination_summary` does) would do exactly
+/// that.
 pub(super) fn append_cursor_summary(
     out: &mut String,
     cursor: Option<&CursorMeta>,
@@ -168,11 +180,20 @@ pub(super) fn append_cursor_summary(
     let Some(cursor) = cursor else {
         return;
     };
-    let count = shown.unwrap_or(cursor.count);
-    out.push_str(&format!(
-        "\n{}\n",
-        cursor_summary_text(SummaryStyle::Standalone, count, cursor)
-    ));
+    match shown {
+        Some(count) => out.push_str(&format!(
+            "\n{}\n",
+            cursor_summary_text(SummaryStyle::Standalone, count, cursor)
+        )),
+        None => out.push_str(&format!(
+            "\n(cursor: limit {}{})\n",
+            cursor.limit,
+            cursor
+                .total
+                .map(|total| format!(", {total} total"))
+                .unwrap_or_default()
+        )),
+    }
 }
 
 /// Append a "Next steps:" footer listing suggested follow-up commands to `out`

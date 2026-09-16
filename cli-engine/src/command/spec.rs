@@ -173,7 +173,10 @@ pub struct PaginationConfig {
 /// Unlike [`PaginationConfig`], `default_limit` must be greater than zero:
 /// there is no "unlimited" sentinel here, since `--limit` is a per-request
 /// page size sent to a backend, not a bound on an already-in-memory
-/// collection.
+/// collection. Deliberately does not derive `Default` — unlike
+/// `PaginationConfig`, where `0` is itself a valid ("unlimited")
+/// `default_limit`, there is no valid all-zero `CursorConfig`, so both
+/// fields must always be given explicitly.
 ///
 /// ```
 /// use cli_engine::CursorConfig;
@@ -184,7 +187,7 @@ pub struct PaginationConfig {
 /// };
 /// assert_eq!(cursor.default_limit, 25);
 /// ```
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorConfig {
     /// Page size sent to the backend when the user passes no `--limit`. Must
     /// be greater than zero.

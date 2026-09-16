@@ -231,6 +231,64 @@ async fn with_total_and_remaining_surface_on_the_envelope() {
     );
 }
 
+/// Cursor metadata is for array data (mirrors offset pagination's identical
+/// `let Value::Array(items) = data else { return Ok(None) }` guard in
+/// `apply_pipeline`'s `apply_pagination`): a handler that calls
+/// `with_cursor` but returns a non-array result gets no `cursor` field at
+/// all, rather than a bogus page (`count: 0`, but still `has_more`/a
+/// `next_actions` entry) over data that was never actually paginated.
+#[tokio::test]
+async fn cursor_metadata_is_absent_when_the_handler_result_is_not_an_array() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig {
+                default_limit: 2,
+                max_limit: 0,
+            }),
+        async |_credential, _args| {
+            Ok(CommandResult::new(json!({"name": "alpha"}))
+                .with_cursor(CursorContinuation::more("tok-2")))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "{}",
+        output.rendered
+    );
+}
+
+/// Same guard, reached via `--expr` reshaping an originally-array result into
+/// a scalar rather than the handler returning a non-array result directly —
+/// `apply_pipeline`'s `--expr` step runs after the cursor block would
+/// otherwise see the data, so this exercises the same code path a real
+/// `length(@)` query would.
+#[tokio::test]
+async fn cursor_metadata_is_absent_after_expr_reshapes_data_to_a_scalar() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig {
+                default_limit: 2,
+                max_limit: 0,
+            }),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--expr", "length(@)", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!(2));
+    assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
+}
+
 /// A handler that derives its own effective page size from the `--continue`
 /// token (e.g. to let a caller resume with `--continue` alone, without
 /// repeating `--limit`) reports that via `CursorContinuation::with_limit`.
@@ -469,6 +527,37 @@ async fn human_output_shows_so_far_summary_when_total_is_unknown() {
         output
             .rendered
             .contains("my-cli list --limit 2 --continue 2"),
+        "{}",
+        output.rendered
+    );
+}
+
+/// The table-footer "so far" line interpolates the resume token directly
+/// into a sentence, separately from the `next_actions` command (which
+/// already quotes it) — a token containing shell metacharacters needs the
+/// same quoting here too, or the printed instruction is unusable/unsafe to
+/// copy-paste.
+#[tokio::test]
+async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_metacharacters() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig {
+                default_limit: 2,
+                max_limit: 0,
+            }),
+        async |_credential, _args| {
+            Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("so far; use --continue \"a b;c\" for more"),
         "{}",
         output.rendered
     );
