@@ -67,6 +67,18 @@ pub(super) fn apply_cursor_flags(
         .copied()
         .unwrap_or(cursor.default_limit);
     middleware.continue_token = leaf.get_one::<String>("continue").cloned();
+    // `Middleware` is long-lived across repeated `Cli::run` calls (and
+    // pre-settable via `Cli::middleware_mut`), but `apply_pagination_flags`
+    // only touches `limit`/`offset` for a `with_pagination` command — a
+    // prior command's nonzero values would otherwise survive into this
+    // cursor command's run. `apply_pipeline`'s offset-slicing triggers on
+    // `limit > 0 || offset > 0` with no idea which pagination style (if any)
+    // the current command declared, so a stale value here would client-slice
+    // a response the handler already computed exactly the requested page
+    // for. Cursor and offset pagination are mutually exclusive per command,
+    // so this command never wants pipeline-level slicing at all.
+    middleware.limit = 0;
+    middleware.offset = 0;
 }
 
 /// Replays a paginating command's own explicit args, plus the global
