@@ -542,12 +542,29 @@ impl Middleware {
         }
         let projection_fields = if human_view { "" } else { effective_fields };
         if let Some(data) = &mut envelope.data {
+            // A cursor command never wants pipeline-level slicing — the
+            // handler already returned exactly the page its own backend call
+            // asked for. `apply_cursor_flags` already zeroes
+            // `limit`/`offset` for this reason, but that's an earlier step
+            // in the same call chain, not the only way to reach this point:
+            // a `run_pre_run` hook (a legitimate, documented extension
+            // point) runs after it and could still mutate the public
+            // `Middleware` fields, and a caller driving `Middleware::run`
+            // directly (bypassing `Cli::run`'s flag application entirely)
+            // could preset them. Forcing zero here, at the one place that
+            // actually performs the slicing, is authoritative regardless of
+            // how `self.limit`/`self.offset` got set.
+            let (pipeline_limit, pipeline_offset) = if cursor_command.is_some() {
+                (0, 0)
+            } else {
+                (self.limit, self.offset)
+            };
             let pagination = apply_pipeline(
                 data,
                 &PipelineOpts {
                     filter: self.filter.clone(),
-                    limit: self.limit,
-                    offset: self.offset,
+                    limit: pipeline_limit,
+                    offset: pipeline_offset,
                     expr: self.expr.clone(),
                     fields: projection_fields.to_owned(),
                     fields_are_default: !self.fields_explicit,
