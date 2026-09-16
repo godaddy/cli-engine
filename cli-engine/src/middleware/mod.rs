@@ -495,6 +495,16 @@ pub struct Middleware {
     pub limit: i64,
     /// Client-side page offset.
     pub offset: i64,
+    /// Parsed `--limit` for a [`with_cursor`](crate::CommandSpec::with_cursor)
+    /// command. Unlike `limit`/`offset`, the engine never slices with this
+    /// itself — a cursor-aware handler reads it back via
+    /// [`CommandContext::middleware`](crate::command::CommandContext::middleware)
+    /// to drive its own backend call.
+    pub cursor_limit: i64,
+    /// Parsed `--continue` for a
+    /// [`with_cursor`](crate::CommandSpec::with_cursor) command. `None` means
+    /// the user passed no `--continue`, i.e. start from the beginning.
+    pub continue_token: Option<String>,
     /// User reason passed to authorization and audit.
     pub reason: String,
     /// Whether schema rendering was requested.
@@ -589,6 +599,16 @@ pub struct MiddlewareRequest<'request> {
     /// directly (e.g. [`Middleware::run_no_auth`]) instead of through
     /// [`Cli`](crate::Cli), which is what computes this.
     pub pagination_command: Option<String>,
+    /// The invoked command replayed as `--flag value` text with
+    /// `--limit`/`--continue` omitted.
+    ///
+    /// `Some` only for a command that opted into `with_cursor`; the engine
+    /// appends `--limit`/`--continue` for the next page and surfaces it as a
+    /// `next_actions` entry when the handler reported more data via
+    /// [`CommandResult::with_cursor`](crate::CommandResult::with_cursor).
+    /// Mutually exclusive with `pagination_command` — a command registers
+    /// one pagination style, not both.
+    pub cursor_command: Option<String>,
 }
 
 /// Convenience helper for building a JSON object map.

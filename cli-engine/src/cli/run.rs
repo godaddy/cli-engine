@@ -16,8 +16,8 @@ use super::{
         single_leaf_subcommand,
     },
     flags_apply::{
-        apply_global_flags, apply_pagination_flags, install_debug_transport_logger,
-        pagination_command_base, parse_command_timeout,
+        apply_cursor_flags, apply_global_flags, apply_pagination_flags, command_replay_base,
+        install_debug_transport_logger, parse_command_timeout,
     },
     lookup::{
         find_command_by_colon_path, has_root_version_flag,
@@ -462,10 +462,20 @@ where
 
     let leaf = leaf_matches(&matches);
     apply_pagination_flags(&mut middleware, &command.spec, leaf);
+    apply_cursor_flags(&mut middleware, &command.spec, leaf);
     let args = command_args_from_matches(leaf, &command.spec, false);
     let user_args = command_args_from_matches(leaf, &command.spec, true);
     let pagination_command = command.spec.pagination.is_some().then(|| {
-        pagination_command_base(
+        command_replay_base(
+            &cli.config.name,
+            &command_path,
+            &command.spec,
+            &user_args,
+            &flags,
+        )
+    });
+    let cursor_command = command.spec.cursor.is_some().then(|| {
+        command_replay_base(
             &cli.config.name,
             &command_path,
             &command.spec,
@@ -506,6 +516,7 @@ where
                     auth: command.spec.auth,
                     raw_output: command.spec.raw_output,
                     pagination_command,
+                    cursor_command,
                 },
                 Arc::new(leaf.clone()),
                 streaming_handler,
@@ -542,6 +553,7 @@ where
                 auth: command.spec.auth,
                 raw_output: command.spec.raw_output,
                 pagination_command,
+                cursor_command,
             },
             async move |credential| {
                 handler(CommandContext {

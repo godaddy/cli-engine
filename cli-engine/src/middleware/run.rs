@@ -7,11 +7,13 @@ use super::{
     MiddlewareRequest, ValueMap, effective_request_system, fallback_system,
 };
 use crate::{
-    CommandResult, Credential, Result,
+    CommandResult, Credential, CursorContinuation, Result,
+    cli::quote_pagination_value,
     error::{CliCoreError, exit_code_for_error},
     output::{
-        Envelope, NextAction, OutputFormat, PipelineOpts, apply_pipeline, build_error_envelope,
-        is_valid_output_format, render_human_with_registry_selected, unknown_fields_message,
+        CursorMeta, Envelope, NextAction, OutputFormat, PipelineOpts, apply_pipeline,
+        build_error_envelope, is_valid_output_format, render_human_with_registry_selected,
+        unknown_fields_message,
     },
 };
 
@@ -45,6 +47,7 @@ impl Middleware {
             auth,
             raw_output,
             pagination_command,
+            cursor_command,
         } = request;
         let no_auth = auth.is_none();
         let command_system = effective_request_system(system, command_path);
@@ -167,6 +170,8 @@ impl Middleware {
                 &args,
                 identity,
                 None,
+                None,
+                None,
                 false,
             );
         }
@@ -245,6 +250,11 @@ impl Middleware {
         // always runs, dry-run or not) — must not mis-tag that execution as a
         // dry-run in the audit trail.
         let is_dry_run = self.dry_run && meta.handles_dry_run && metadata.dry_run;
+        // Extracted ahead of `metadata.next_actions` below (a partial move):
+        // only the handler that made the backend cursor call can supply
+        // this, so it travels alongside the envelope rather than being
+        // recomputed.
+        let cursor_continuation = metadata.cursor.clone();
         let outcome = if is_dry_run { "dry-run" } else { "ok" };
         self.write_audit(command_path, &args, identity, outcome)
             .await;
@@ -274,6 +284,8 @@ impl Middleware {
             &args,
             identity,
             pagination_command.as_deref(),
+            cursor_command.as_deref(),
+            cursor_continuation,
             raw_output && !is_dry_run,
         )
     }
@@ -304,6 +316,7 @@ impl Middleware {
                 auth: AuthRequirement::None,
                 raw_output: false,
                 pagination_command: None,
+                cursor_command: None,
             },
             async move |_resolver| command().await,
         )
@@ -401,6 +414,8 @@ impl Middleware {
                     effective_args,
                     identity,
                     None,
+                    None,
+                    None,
                     false,
                 )
                 .map(Some);
@@ -420,6 +435,8 @@ impl Middleware {
         effective_args: &ValueMap,
         identity: &str,
         pagination_command: Option<&str>,
+        cursor_command: Option<&str>,
+        cursor_continuation: Option<CursorContinuation>,
         raw_output: bool,
     ) -> Result<MiddlewareOutput> {
         if !is_valid_output_format(&self.output_format) {
@@ -552,6 +569,46 @@ impl Middleware {
                 envelope.pagination = Some(pagination);
             }
         }
+        if let Some(base) = cursor_command
+            && let Some(data) = &envelope.data
+        {
+            let count = data.as_array().map_or(0, |items| items.len() as i64);
+            let continuation = cursor_continuation.unwrap_or_default();
+            let has_more = continuation.continue_from.is_some();
+            // A handler that reported an effective limit is telling us its
+            // `--continue` token is self-sufficient about page size — the
+            // same fact that makes `cursor.limit` need correcting also
+            // makes repeating `--limit` in the replay redundant (two numbers
+            // to keep in sync that are really just one). Omit it in that
+            // case; keep it when the token is opaque to us (a real
+            // server-side cursor, e.g. `domain list`'s `pageToken`) and the
+            // engine has no way to know whether the backend even tolerates a
+            // different page size on resume.
+            let effective_limit = continuation.limit.unwrap_or(self.cursor_limit);
+            if has_more {
+                let token = continuation.continue_from.as_deref().unwrap_or_default();
+                let command = if continuation.limit.is_some() {
+                    format!("{base} --continue {}", quote_pagination_value(token))
+                } else {
+                    format!(
+                        "{base} --limit {effective_limit} --continue {}",
+                        quote_pagination_value(token)
+                    )
+                };
+                envelope.next_actions.push(NextAction::new(
+                    command,
+                    next_page_description(continuation.total, continuation.remaining),
+                ));
+            }
+            envelope.cursor = Some(CursorMeta {
+                limit: effective_limit,
+                count,
+                total: continuation.total,
+                remaining: continuation.remaining,
+                continue_from: continuation.continue_from,
+                has_more,
+            });
+        }
         envelope.with_context(
             command_path,
             &self.env,
@@ -603,5 +660,18 @@ impl Middleware {
             rendered,
             exit_code: exit_code_for_error(err),
         })
+    }
+}
+
+/// Builds the human-readable description for a cursor "next page"
+/// [`NextAction`], surfacing whatever the backend reported.
+fn next_page_description(total: Option<i64>, remaining: Option<i64>) -> String {
+    match (remaining, total) {
+        (Some(remaining), Some(total)) => {
+            format!("View the next page ({remaining} remaining of {total} total)")
+        }
+        (Some(remaining), None) => format!("View the next page ({remaining} remaining)"),
+        (None, Some(total)) => format!("View the next page (of {total} total)"),
+        (None, None) => "View the next page".to_owned(),
     }
 }

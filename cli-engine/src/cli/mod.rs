@@ -23,6 +23,8 @@ mod run;
 mod schema_tree;
 mod tree_render;
 
+pub(crate) use flags_apply::quote_pagination_value;
+
 use crate::{
     AuthProvider, CliCoreError, GuideEntry, Middleware, Module, RuntimeCommandSpec,
     RuntimeGroupSpec,

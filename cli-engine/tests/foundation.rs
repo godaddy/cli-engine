@@ -65,6 +65,7 @@ fn middleware_request<'request>(
         auth: auth_requirement(no_auth),
         raw_output: false,
         pagination_command: None,
+        cursor_command: None,
     }
 }
 
@@ -92,6 +93,7 @@ fn middleware_request_with_view<'request>(
         auth: auth_requirement(no_auth),
         raw_output: false,
         pagination_command: None,
+        cursor_command: None,
     }
 }
 
@@ -126,6 +128,7 @@ fn middleware_request_with_system<'request>(
         auth: auth_requirement(no_auth),
         raw_output: false,
         pagination_command: None,
+        cursor_command: None,
     }
 }
 
@@ -10936,6 +10939,7 @@ async fn optional_skips_auth_when_handler_ignores_credential() {
                 auth: cli_engine::AuthRequirement::Optional,
                 raw_output: false,
                 pagination_command: None,
+                cursor_command: None,
             },
             async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
         )
@@ -10975,6 +10979,7 @@ async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() 
                 auth: cli_engine::AuthRequirement::Optional,
                 raw_output: false,
                 pagination_command: None,
+                cursor_command: None,
             },
             async |resolver: CredentialResolver| {
                 // Best-effort identity; the missing provider makes this fail, and
@@ -11027,6 +11032,7 @@ async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
                 auth: cli_engine::AuthRequirement::Optional,
                 raw_output: false,
                 pagination_command: None,
+                cursor_command: None,
             },
             async |resolver: CredentialResolver| {
                 resolver.resolve().await?;

@@ -48,13 +48,34 @@ pub(super) fn apply_pagination_flags(
     middleware.offset = leaf.get_one::<i64>("offset").copied().unwrap_or(0);
 }
 
+/// Sets `middleware.cursor_limit`/`middleware.continue_token` from a
+/// cursor-paginating command's own `--limit`/`--continue`. Unlike
+/// [`apply_pagination_flags`], the framework never slices with these itself
+/// — a cursor-aware handler reads them back off
+/// [`CommandContext::middleware`](crate::command::CommandContext::middleware)
+/// to drive its own backend call.
+pub(super) fn apply_cursor_flags(
+    middleware: &mut Middleware,
+    spec: &CommandSpec,
+    leaf: &ArgMatches,
+) {
+    let Some(cursor) = spec.cursor else {
+        return;
+    };
+    middleware.cursor_limit = leaf
+        .get_one::<i64>("limit")
+        .copied()
+        .unwrap_or(cursor.default_limit);
+    middleware.continue_token = leaf.get_one::<String>("continue").cloned();
+}
+
 /// Replays a paginating command's own explicit args, plus the global
 /// `--filter`/`--expr`/`--fields` flags, as `--flag value` text, prefixed
 /// with the CLI's binary name — the base a "view the next page"
 /// [`crate::NextAction`] is built from once the response's
-/// [`crate::PaginationMeta`] is known. Leading with the binary name keeps the
-/// suggested command copy-pastable rather than a fragment starting at the
-/// noun/verb path.
+/// [`crate::PaginationMeta`] or [`crate::CursorMeta`] is known. Leading with
+/// the binary name keeps the suggested command copy-pastable rather than a
+/// fragment starting at the noun/verb path.
 ///
 /// `--filter`/`--expr`/`--fields` sit in the same output pipeline as
 /// pagination itself (filter -> paginate -> expr -> fields) and change what
@@ -71,10 +92,11 @@ pub(super) fn apply_pagination_flags(
 /// flag occurrence per value (round-trips correctly whether the arg is a
 /// plain repeatable `ArgAction::Append` or also sets a `value_delimiter`),
 /// and quotes/escapes values containing whitespace or shell metacharacters
-/// (see `quote_pagination_value`). Deliberately omits `--limit`/`--offset` —
-/// those are added by the caller once it knows the
-/// next page's offset.
-pub(super) fn pagination_command_base(
+/// (see `quote_pagination_value`). Deliberately omits `--limit`/`--offset`
+/// and `--limit`/`--continue` — those are never part of `spec.args` to begin
+/// with, and the caller appends the right pair once it knows the next
+/// page's offset or continuation token.
+pub(super) fn command_replay_base(
     binary_name: &str,
     command_path: &str,
     spec: &CommandSpec,
@@ -170,7 +192,7 @@ fn pagination_arg_display(value: &serde_json::Value) -> String {
 /// re-escape the backslashes it just inserted) so the value can't break out
 /// of the double quotes or trigger POSIX-shell expansion (`$VAR`, `$(...)`,
 /// backticks) if the suggestion is copy-pasted into a shell.
-fn quote_pagination_value(value: &str) -> String {
+pub(crate) fn quote_pagination_value(value: &str) -> String {
     let safe_unquoted =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
     if value.is_empty() || !value.chars().all(safe_unquoted) {

@@ -5,7 +5,7 @@ mod register;
 mod resolve;
 
 pub use introspect::{debug_component_enabled, derive_bool_flags, derive_value_flags};
-pub(crate) use register::{apply_pagination_args, compat_bool_value_parser};
+pub(crate) use register::{apply_cursor_args, apply_pagination_args, compat_bool_value_parser};
 pub use register::{register_global_flags, register_reason_flag};
 pub use resolve::{
     app_id_env_prefix, default_output_format, extract_command_path, extract_output_format,
@@ -142,13 +142,16 @@ impl Default for GlobalFlags {
 /// `apply_filter_and_expr_examples`) with contextual help text; they must
 /// reuse these same values or the override would drift out of position.
 ///
-/// `LIMIT` and `OFFSET` are never registered by [`register_global_flags`]
-/// itself — unlike every other value here, `--limit`/`--offset` are not
-/// framework-global at all; `cli.rs` registers them directly on a single
-/// command's own `Command` (see `apply_pagination_args`), and only for a
-/// command that opted in via `CommandSpec::with_pagination`. These two
-/// constants exist purely so that per-command registration still parks the
-/// flags in the same relative `--help` position other engine flags occupy.
+/// `LIMIT`, `OFFSET`, and `CONTINUE` are never registered by
+/// [`register_global_flags`] itself — unlike every other value here,
+/// `--limit`/`--offset`/`--continue` are not framework-global at all;
+/// `cli.rs` registers them directly on a single command's own `Command` (see
+/// `apply_pagination_args`/`apply_cursor_args`), and only for a command that
+/// opted in via `CommandSpec::with_pagination` or `CommandSpec::with_cursor`
+/// respectively — mutually exclusive, so a single command registers `OFFSET`
+/// or `CONTINUE`, never both. These constants exist purely so that
+/// per-command registration still parks the flags in the same relative
+/// `--help` position other engine flags occupy.
 ///
 /// `REASON` and `ENV` cover the two global flags `Cli::new` registers
 /// directly (conditionally, outside `register_global_flags`) rather than
@@ -166,16 +169,17 @@ pub(crate) mod global_flag_order {
     pub(crate) const EXPR: usize = 1006;
     pub(crate) const LIMIT: usize = 1007;
     pub(crate) const OFFSET: usize = 1008;
-    pub(crate) const SCHEMA: usize = 1009;
-    pub(crate) const TIMEOUT: usize = 1010;
-    pub(crate) const DEBUG: usize = 1011;
-    pub(crate) const CREDENTIAL_STORE: usize = 1012;
-    pub(crate) const JSON: usize = 1013;
-    pub(crate) const TOON: usize = 1014;
-    pub(crate) const HUMAN: usize = 1015;
-    pub(crate) const INTERACTIVE: usize = 1016;
-    pub(crate) const REASON: usize = 1017;
-    pub(crate) const ENV: usize = 1018;
+    pub(crate) const CONTINUE: usize = 1009;
+    pub(crate) const SCHEMA: usize = 1010;
+    pub(crate) const TIMEOUT: usize = 1011;
+    pub(crate) const DEBUG: usize = 1012;
+    pub(crate) const CREDENTIAL_STORE: usize = 1013;
+    pub(crate) const JSON: usize = 1014;
+    pub(crate) const TOON: usize = 1015;
+    pub(crate) const HUMAN: usize = 1016;
+    pub(crate) const INTERACTIVE: usize = 1017;
+    pub(crate) const REASON: usize = 1018;
+    pub(crate) const ENV: usize = 1019;
 }
 
 #[cfg(test)]

@@ -203,14 +203,21 @@ pub(super) fn command_clap_command_with_schema_help(
     schemas: &SchemaRegistry,
 ) -> Command {
     debug_assert!(
-        !(spec.raw_output && spec.pagination.is_some()),
-        "command {:?} sets both raw_output and with_pagination; a single verbatim string \
-         has no pages, so the two are mutually exclusive",
+        !(spec.raw_output && (spec.pagination.is_some() || spec.cursor.is_some())),
+        "command {:?} sets both raw_output and with_pagination/with_cursor; a single verbatim \
+         string has no pages, so they are mutually exclusive",
+        spec.name
+    );
+    debug_assert!(
+        !(spec.pagination.is_some() && spec.cursor.is_some()),
+        "command {:?} sets both with_pagination and with_cursor; a command picks one \
+         pagination style, not both",
         spec.name
     );
     let mut command = spec.clap_command();
     command = apply_dry_run_visibility(command, spec);
     command = apply_pagination_args(command, spec);
+    command = apply_cursor_args(command, spec);
     let schema = schemas.get_by_path(command_path);
     let default_fields = default_field_names(spec);
     command = apply_fields_arg(
@@ -287,6 +294,17 @@ fn apply_pagination_args(command: Command, spec: &CommandSpec) -> Command {
         return command;
     };
     crate::flags::apply_pagination_args(command, pagination.default_limit, pagination.max_limit)
+}
+
+/// Registers `--limit`/`--continue` on this command's own `Command` when its
+/// spec opted in via [`CommandSpec::with_cursor`], and leaves the command
+/// untouched otherwise so a non-cursor command never sees those flags — in
+/// `--help` or on its command line. See [`flags::apply_cursor_args`].
+fn apply_cursor_args(command: Command, spec: &CommandSpec) -> Command {
+    let Some(cursor) = spec.cursor else {
+        return command;
+    };
+    crate::flags::apply_cursor_args(command, cursor.default_limit, cursor.max_limit)
 }
 
 /// Splits a command's raw `default_fields` string into individual field
