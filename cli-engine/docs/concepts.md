@@ -282,7 +282,7 @@ CommandSpec::new("list", "List projects").with_pagination(PaginationConfig {
 })
 ```
 
-`--limit`/`--continue` are the cursor-pagination counterpart, for a command backed by aserver-maintained, forward-only cursor API — see [cursor pagination](#cursor-pagination):
+`--limit`/`--continue` are the cursor-pagination counterpart, for a command backed by a server-maintained, forward-only cursor API — see [cursor pagination](#cursor-pagination):
 
 ```rust
 CommandSpec::new("list", "List domains").with_cursor(CursorConfig {
