@@ -203,16 +203,31 @@ fn pagination_arg_display(value: &serde_json::Value) -> String {
 /// are backslash-escaped (backslash first, so escaping the others doesn't
 /// re-escape the backslashes it just inserted) so the value can't break out
 /// of the double quotes or trigger POSIX-shell expansion (`$VAR`, `$(...)`,
-/// backticks) if the suggestion is copy-pasted into a shell.
+/// backticks) if the suggestion is copy-pasted into a shell. A cursor token
+/// is backend-controlled (unlike most other replayed values, which are the
+/// user's own prior flags), so a control character — an embedded newline
+/// that would make the printed command look like more than one line, or an
+/// ANSI escape sequence that could otherwise repaint the terminal when this
+/// is printed — is rendered as a literal `\xHH`/`\n`/`\r`/`\t` placeholder
+/// rather than passed through raw.
 pub(crate) fn quote_pagination_value(value: &str) -> String {
     let safe_unquoted =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
     if value.is_empty() || !value.chars().all(safe_unquoted) {
-        let escaped = value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('$', "\\$")
-            .replace('`', "\\`");
+        let mut escaped = String::with_capacity(value.len());
+        for c in value.chars() {
+            match c {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '$' => escaped.push_str("\\$"),
+                '`' => escaped.push_str("\\`"),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                c if c.is_control() => escaped.push_str(&format!("\\x{:02x}", c as u32)),
+                c => escaped.push(c),
+            }
+        }
         format!("\"{escaped}\"")
     } else {
         value.to_owned()
@@ -583,5 +598,28 @@ mod prescan_env_flag_tests {
             prescan_env_flag(argv(&["--env", "dev", "--", "positional"])),
             Some("dev".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod quote_pagination_value_tests {
+    use super::quote_pagination_value;
+
+    #[test]
+    fn newline_carriage_return_and_tab_render_as_named_escapes() {
+        assert_eq!(quote_pagination_value("a\nb\rc\td"), "\"a\\nb\\rc\\td\"");
+    }
+
+    #[test]
+    fn other_control_characters_render_as_hex_escapes() {
+        // ESC (0x1b), the start of most ANSI escape sequences a backend-
+        // supplied token could otherwise smuggle straight to the terminal.
+        assert_eq!(quote_pagination_value("a\x1b[31mb"), "\"a\\x1b[31mb\"");
+    }
+
+    #[test]
+    fn ordinary_text_is_unaffected() {
+        assert_eq!(quote_pagination_value("tok-2"), "tok-2");
+        assert_eq!(quote_pagination_value("a b;c"), "\"a b;c\"");
     }
 }
