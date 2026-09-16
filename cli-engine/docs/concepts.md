@@ -275,20 +275,13 @@ values into middleware through `CliConfig::apply_flags`.
 `--limit`/`--offset` are not framework-global; a command only gets them by opting in:
 
 ```rust
-CommandSpec::new("list", "List projects").with_pagination(PaginationConfig {
-    default_limit: 20,
-    max_limit: 100,
-    ..Default::default()
-})
+CommandSpec::new("list", "List projects").with_pagination(PaginationConfig::new(20, 100))
 ```
 
 `--limit`/`--continue` are the cursor-pagination counterpart, for a command backed by a server-maintained, forward-only cursor API — see [cursor pagination](#cursor-pagination):
 
 ```rust
-CommandSpec::new("list", "List domains").with_cursor(CursorConfig {
-    default_limit: 25,
-    max_limit: 500,
-})
+CommandSpec::new("list", "List domains").with_cursor(CursorConfig::new(25, 500))
 ```
 
 A command opts into exactly one of `with_pagination`/`with_cursor`, never both.

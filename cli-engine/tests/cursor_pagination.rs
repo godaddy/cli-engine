@@ -83,10 +83,7 @@ async fn opted_in_command_documents_limit_and_continue_in_help() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 3,
-            }),
+            .with_cursor(CursorConfig::new(2, 3)),
     );
 
     let help = cli.run(["my-cli", "list", "--help"]).await;
@@ -99,10 +96,7 @@ async fn default_limit_applies_when_neither_flag_is_passed() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli.run(["my-cli", "list", "--output", "json"]).await;
@@ -135,10 +129,7 @@ async fn explicit_limit_and_continue_fetch_the_requested_page() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli
@@ -171,10 +162,7 @@ async fn last_page_has_no_next_action_and_has_more_is_false() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli
@@ -206,10 +194,7 @@ async fn with_total_and_remaining_surface_on_the_envelope() {
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
         async |_ctx| {
             Ok(
                 CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}])).with_cursor(
@@ -250,10 +235,7 @@ async fn cursor_metadata_is_absent_when_the_handler_result_is_not_an_array() {
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
         async |_ctx| {
             Ok(CommandResult::new(json!({"name": "alpha"}))
                 .with_cursor(CursorContinuation::more("tok-2")))
@@ -281,10 +263,7 @@ async fn cursor_metadata_is_absent_after_expr_reshapes_data_to_a_scalar() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli
@@ -309,10 +288,7 @@ async fn with_limit_overrides_the_envelope_and_omits_limit_from_the_next_action(
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 25,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(25, 0)),
         async |_ctx| {
             Ok(
                 CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}]))
@@ -345,10 +321,7 @@ async fn max_limit_rejects_an_explicit_limit_above_the_cap_but_allows_the_cap_it
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 1,
-                max_limit: 3,
-            }),
+            .with_cursor(CursorConfig::new(1, 3)),
     );
 
     let output = cli.run(["my-cli", "list", "--limit", "4"]).await;
@@ -372,10 +345,7 @@ async fn zero_and_negative_limit_are_rejected_at_parse_time() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 1,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(1, 0)),
     );
 
     let output = cli.run(["my-cli", "list", "--limit", "0"]).await;
@@ -400,10 +370,7 @@ async fn zero_and_negative_limit_are_rejected_at_parse_time() {
 #[test]
 #[cfg_attr(debug_assertions, should_panic(expected = "greater than zero"))]
 fn with_cursor_panics_when_default_limit_is_not_positive() {
-    let _unused = CommandSpec::new("list", "List things").with_cursor(CursorConfig {
-        default_limit: 0,
-        max_limit: 5,
-    });
+    let _unused = CommandSpec::new("list", "List things").with_cursor(CursorConfig::new(0, 5));
 }
 
 #[test]
@@ -412,10 +379,7 @@ fn with_cursor_panics_when_default_limit_is_not_positive() {
     should_panic(expected = "greater than its max_limit")
 )]
 fn with_cursor_panics_when_default_limit_exceeds_max_limit() {
-    let _unused = CommandSpec::new("list", "List things").with_cursor(CursorConfig {
-        default_limit: 10,
-        max_limit: 5,
-    });
+    let _unused = CommandSpec::new("list", "List things").with_cursor(CursorConfig::new(10, 5));
 }
 
 /// A command picks one pagination style, not both; caught at registration
@@ -432,10 +396,7 @@ fn with_pagination_and_with_cursor_together_panics_on_registration() {
         CommandSpec::new("bad", "Bad")
             .no_auth(true)
             .with_pagination(cli_engine::PaginationConfig::default())
-            .with_cursor(CursorConfig {
-                default_limit: 1,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(1, 0)),
         async |_ctx| Ok(CommandResult::new(json!([]))),
     ));
 }
@@ -451,10 +412,7 @@ fn raw_output_paired_with_cursor_panics_on_registration() {
         CommandSpec::new("bad", "Bad")
             .no_auth(true)
             .raw_output(true)
-            .with_cursor(CursorConfig {
-                default_limit: 1,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(1, 0)),
         async |_ctx| Ok(CommandResult::new(json!("text"))),
     ));
 }
@@ -465,10 +423,7 @@ async fn next_page_action_replays_other_flags_the_user_passed() {
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_arg(Arg::new("status").long("status"))
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli
@@ -488,10 +443,7 @@ async fn next_page_action_quotes_a_continuation_token_with_shell_metacharacters(
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
         async |_ctx| {
             Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
         },
@@ -511,10 +463,7 @@ async fn human_output_shows_so_far_summary_when_total_is_unknown() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli.run(["my-cli", "list", "--output", "human"]).await;
@@ -551,10 +500,7 @@ async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_meta
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
         async |_ctx| {
             Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
         },
@@ -583,10 +529,7 @@ async fn human_output_so_far_summary_omits_limit_when_the_token_is_self_sufficie
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 25,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(25, 0)),
         async |_ctx| {
             Ok(CommandResult::new(json!(items()))
                 .with_cursor(CursorContinuation::more("tok-2").with_limit(2)))
@@ -615,10 +558,7 @@ async fn human_output_shows_total_when_known() {
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
         async |_ctx| {
             Ok(
                 CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}]))
@@ -641,10 +581,7 @@ async fn human_output_on_last_page_shows_summary_but_no_next_steps() {
     let cli = cli_with_cursor_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
     );
 
     let output = cli
@@ -678,10 +615,7 @@ async fn human_standalone_summary_for_a_non_table_cursor_response() {
     cli.add_command(RuntimeCommandSpec::new_with_context(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_cursor(CursorConfig {
-                default_limit: 2,
-                max_limit: 0,
-            }),
+            .with_cursor(CursorConfig::new(2, 0)),
         async |_ctx| {
             Ok(CommandResult::new(json!(["alpha", "beta"]))
                 .with_cursor(CursorContinuation::more("2")))

@@ -61,10 +61,7 @@ async fn opted_in_command_documents_limit_and_offset_in_help() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                max_limit: 3,
-            }),
+            .with_pagination(PaginationConfig::new(2, 3)),
     );
 
     let help = cli.run(["my-cli", "list", "--help"]).await;
@@ -77,10 +74,7 @@ async fn default_limit_applies_when_neither_flag_is_passed() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli.run(["my-cli", "list", "--output", "json"]).await;
@@ -108,10 +102,7 @@ async fn explicit_limit_and_offset_override_the_default_and_expose_pagination() 
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -144,10 +135,7 @@ async fn last_page_has_no_next_action_and_has_more_is_false() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -171,10 +159,7 @@ async fn next_page_action_replays_other_flags_the_user_passed() {
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_arg(Arg::new("status").long("status"))
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -194,10 +179,7 @@ async fn next_page_action_quotes_values_with_whitespace() {
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_arg(Arg::new("status").long("status"))
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -224,10 +206,7 @@ async fn next_page_action_quotes_a_binary_name_with_whitespace() {
     cli.add_command(RuntimeCommandSpec::new(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
         async |_credential, _args| Ok(CommandResult::new(json!(items()))),
     ));
 
@@ -256,10 +235,7 @@ async fn next_page_action_uses_the_real_long_flag_not_the_value_map_key() {
     cli.add_command(RuntimeCommandSpec::new_typed::<ListArgs, _, _, _>(
         CommandSpec::from_args::<ListArgs>("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
         async |_credential: CredentialResolver, _args: ListArgs| {
             Ok(CommandResult::new(json!(items())))
         },
@@ -281,10 +257,7 @@ async fn max_limit_rejects_an_explicit_limit_above_the_cap_but_allows_the_cap_it
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                max_limit: 3,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(0, 3)),
     );
 
     let output = cli.run(["my-cli", "list", "--limit", "4"]).await;
@@ -308,10 +281,7 @@ async fn max_limit_does_not_constrain_a_negative_limit() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                max_limit: 1,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(0, 1)),
     );
 
     let output = cli
@@ -355,10 +325,8 @@ async fn negative_offset_is_rejected_at_parse_time_not_at_runtime() {
     should_panic(expected = "greater than its max_limit")
 )]
 fn with_pagination_panics_when_default_limit_exceeds_max_limit() {
-    let _unused = CommandSpec::new("list", "List things").with_pagination(PaginationConfig {
-        default_limit: 10,
-        max_limit: 5,
-    });
+    let _unused =
+        CommandSpec::new("list", "List things").with_pagination(PaginationConfig::new(10, 5));
 }
 
 #[tokio::test]
@@ -366,10 +334,7 @@ async fn human_output_shows_pagination_summary_and_next_steps() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli.run(["my-cli", "list", "--output", "human"]).await;
@@ -398,10 +363,7 @@ async fn human_output_on_last_page_shows_summary_but_no_next_steps() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -431,10 +393,7 @@ async fn next_page_action_preserves_filter_expr_and_fields() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -472,10 +431,7 @@ async fn next_page_action_replays_a_set_false_flag_as_a_bare_switch() {
                     .long("no-cache")
                     .action(clap::ArgAction::SetFalse),
             )
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -498,10 +454,7 @@ async fn human_footer_shows_rows_actually_rendered_after_expr_reshapes_data() {
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -538,10 +491,7 @@ async fn next_page_action_replays_a_multi_value_arg_as_repeated_flags() {
                     .long("scope")
                     .action(clap::ArgAction::Append),
             )
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -568,10 +518,7 @@ async fn human_standalone_summary_shows_rows_actually_rendered_after_expr_reshap
     cli.add_command(RuntimeCommandSpec::new(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
         async |_credential, _args| {
             Ok(CommandResult::new(json!([
                 "alpha", "beta", "gamma", "delta"
@@ -609,10 +556,7 @@ async fn next_page_action_escapes_shell_metacharacters_and_expansions() {
         CommandSpec::new("list", "List things")
             .no_auth(true)
             .with_arg(Arg::new("status").long("status"))
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
@@ -642,10 +586,7 @@ async fn human_output_uses_a_neutral_pagination_line_when_expr_leaves_no_array()
     let cli = cli_with_list_command(
         CommandSpec::new("list", "List things")
             .no_auth(true)
-            .with_pagination(PaginationConfig {
-                default_limit: 2,
-                ..PaginationConfig::default()
-            }),
+            .with_pagination(PaginationConfig::new(2, 0)),
     );
 
     let output = cli
