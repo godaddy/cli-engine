@@ -84,10 +84,7 @@ However, there is an important caveat. With Slicing- or Paging-based APIs that w
 ### `CommandSpec::with_cursor`
 
 ```rust
-CommandSpec::new("list", "List things").with_cursor(CursorConfig {
-    default_limit: 25,
-    max_limit: 500,
-})
+CommandSpec::new("list", "List things").with_cursor(CursorConfig::new(25, 500))
 ```
 
 Registers `--limit`/`--continue` the same way `with_pagination` registers
