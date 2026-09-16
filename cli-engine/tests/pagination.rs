@@ -414,7 +414,10 @@ async fn next_page_action_preserves_filter_expr_and_fields() {
     let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
     assert_eq!(
         rendered["next_actions"][0]["command"],
-        "my-cli list --filter \"name != 'alpha'\" --expr \"sort_by(@, &name)\" --fields name --limit 2 --offset 2"
+        // `!` is spliced into its own single-quoted segment (immune to Bash
+        // history expansion) rather than left bare inside the double
+        // quotes — see `quote_pagination_value`.
+        "my-cli list --filter \"name \"'!'\"= 'alpha'\" --expr \"sort_by(@, &name)\" --fields name --limit 2 --offset 2"
     );
 }
 

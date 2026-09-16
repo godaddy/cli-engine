@@ -211,33 +211,53 @@ fn pagination_arg_display(value: &serde_json::Value) -> String {
 /// is printed — is rendered as a literal `\xHH`/`\n`/`\r`/`\t` placeholder
 /// rather than passed through raw.
 ///
-/// Display-safe, not round-trip-safe: a plain shell does not decode `\n`/
-/// `\xHH` inside a double-quoted string back into the original byte, so a
-/// value containing a control character cannot be copy-pasted back into an
-/// exact resend — a deliberate trade-off, since the alternative (an escape
-/// a shell *would* decode, e.g. ANSI-C `$'...'` quoting) is not POSIX and
-/// would make every other, ordinary replayed value non-portable to gain
-/// exact reproduction for a case that, in practice, only a malformed or
-/// adversarial backend cursor token would ever hit.
+/// Display-safe, not round-trip-safe for a control character: a plain shell
+/// does not decode `\n`/`\xHH` inside a double-quoted string back into the
+/// original byte, so a value containing one cannot be copy-pasted back into
+/// an exact resend — a deliberate trade-off, since the alternative (an
+/// escape a shell *would* decode, e.g. ANSI-C `$'...'` quoting) is not
+/// POSIX and would make every other, ordinary replayed value non-portable
+/// to gain exact reproduction for a case that, in practice, only a
+/// malformed or adversarial backend cursor token would ever hit.
+///
+/// `!` gets different treatment because a fix that *does* both round-trip
+/// and stay safe exists: interactive Bash performs history expansion on an
+/// unescaped `!` even inside double quotes (so `"a!b"` can expand against
+/// history or fail with "event not found"), and backslash-escaping it
+/// there leaves the backslash itself in the resulting argument (`\!`, not
+/// `!` — its own round-trip failure, verified against a real Bash). A
+/// single-quoted segment is immune to history expansion and, spliced
+/// between double-quoted segments with no separator, still concatenates
+/// into one argument (`"a"'!'"b"` parses as the single word `a!b`) — this
+/// stitches every `!` in as its own single-quoted segment instead.
 pub(crate) fn quote_pagination_value(value: &str) -> String {
     let safe_unquoted =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
     if value.is_empty() || !value.chars().all(safe_unquoted) {
-        let mut escaped = String::with_capacity(value.len());
+        let mut out = String::with_capacity(value.len() + 2);
+        let mut segment = String::new();
+        out.push('"');
         for c in value.chars() {
             match c {
-                '\\' => escaped.push_str("\\\\"),
-                '"' => escaped.push_str("\\\""),
-                '$' => escaped.push_str("\\$"),
-                '`' => escaped.push_str("\\`"),
-                '\n' => escaped.push_str("\\n"),
-                '\r' => escaped.push_str("\\r"),
-                '\t' => escaped.push_str("\\t"),
-                c if c.is_control() => escaped.push_str(&format!("\\x{:02x}", c as u32)),
-                c => escaped.push(c),
+                '!' => {
+                    out.push_str(&segment);
+                    segment.clear();
+                    out.push_str("\"'!'\"");
+                }
+                '\\' => segment.push_str("\\\\"),
+                '"' => segment.push_str("\\\""),
+                '$' => segment.push_str("\\$"),
+                '`' => segment.push_str("\\`"),
+                '\n' => segment.push_str("\\n"),
+                '\r' => segment.push_str("\\r"),
+                '\t' => segment.push_str("\\t"),
+                c if c.is_control() => segment.push_str(&format!("\\x{:02x}", c as u32)),
+                c => segment.push(c),
             }
         }
-        format!("\"{escaped}\"")
+        out.push_str(&segment);
+        out.push('"');
+        out
     } else {
         value.to_owned()
     }
@@ -630,5 +650,19 @@ mod quote_pagination_value_tests {
     fn ordinary_text_is_unaffected() {
         assert_eq!(quote_pagination_value("tok-2"), "tok-2");
         assert_eq!(quote_pagination_value("a b;c"), "\"a b;c\"");
+    }
+
+    #[test]
+    fn bang_is_spliced_into_its_own_single_quoted_segment() {
+        // Verified against a real interactive Bash (with history expansion
+        // enabled) that this exact splicing both round-trips to the
+        // original value and never triggers history expansion, unlike a
+        // backslash-escaped `\!` (which leaves the backslash itself in the
+        // resulting argument) or a bare `!` inside double quotes (which can
+        // silently substitute in unrelated history text).
+        assert_eq!(quote_pagination_value("a!b"), "\"a\"'!'\"b\"");
+        assert_eq!(quote_pagination_value("!abc"), "\"\"'!'\"abc\"");
+        assert_eq!(quote_pagination_value("abc!"), "\"abc\"'!'\"\"");
+        assert_eq!(quote_pagination_value("a!!b"), "\"a\"'!'\"\"'!'\"b\"");
     }
 }
