@@ -652,7 +652,12 @@ impl Middleware {
                 remaining: continuation.remaining,
                 continue_from: continuation.continue_from,
                 has_more,
-                self_sufficient_limit: continuation.limit.is_some(),
+                // `with_limit` only means anything relative to a token to
+                // resume with — `CursorContinuation::done().with_limit(n)`
+                // is a handler misuse (there's no `continue_from` for `n`
+                // to describe), and must not claim self-sufficiency about a
+                // token that doesn't exist.
+                self_sufficient_limit: has_more && continuation.limit.is_some(),
             });
         }
         envelope.with_context(
