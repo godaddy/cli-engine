@@ -382,6 +382,36 @@ async fn with_limit_overrides_the_envelope_and_omits_limit_from_the_next_action(
     );
 }
 
+/// `with_limit` only means anything relative to a token to resume with —
+/// calling it on `CursorContinuation::done()` (a handler misuse: there's no
+/// `continue_from` for the reported limit to describe) must not claim
+/// `self_sufficient_limit`, since there's no token for it to be
+/// self-sufficient *about*.
+#[tokio::test]
+async fn self_sufficient_limit_is_false_on_a_completed_page_even_if_with_limit_was_called() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!([{"name": "alpha"}]))
+                .with_cursor(CursorContinuation::done().with_limit(2)))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["cursor"]["has_more"], false);
+    assert_eq!(rendered["cursor"]["self_sufficient_limit"], json!(false));
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "{}",
+        output.rendered
+    );
+}
+
 #[tokio::test]
 async fn max_limit_rejects_an_explicit_limit_above_the_cap_but_allows_the_cap_itself() {
     let cli = cli_with_cursor_list_command(
