@@ -52,20 +52,17 @@ fn middleware_request<'request>(
     default_fields: &'request str,
     no_auth: bool,
 ) -> MiddlewareRequest<'request> {
-    MiddlewareRequest {
+    MiddlewareRequest::new(
         meta,
         command_path,
-        system: command_path
+        command_path
             .split_once(':')
             .map_or(command_path, |(system, _)| system),
         user_args,
         args,
         default_fields,
-        view_id: None,
-        auth: auth_requirement(no_auth),
-        raw_output: false,
-        pagination_command: None,
-    }
+    )
+    .with_auth(auth_requirement(no_auth))
 }
 
 /// Builds a request that declares a human view id, the way the engine does for a
@@ -79,20 +76,18 @@ fn middleware_request_with_view<'request>(
     default_fields: &'request str,
     no_auth: bool,
 ) -> MiddlewareRequest<'request> {
-    MiddlewareRequest {
+    MiddlewareRequest::new(
         meta,
         command_path,
-        system: command_path
+        command_path
             .split_once(':')
             .map_or(command_path, |(system, _)| system),
         user_args,
         args,
         default_fields,
-        view_id: Some(view_id),
-        auth: auth_requirement(no_auth),
-        raw_output: false,
-        pagination_command: None,
-    }
+    )
+    .with_view_id(view_id)
+    .with_auth(auth_requirement(no_auth))
 }
 
 /// Maps the legacy `no_auth` bool used by these helpers to an [`AuthRequirement`]:
@@ -115,18 +110,8 @@ fn middleware_request_with_system<'request>(
     default_fields: &'request str,
     no_auth: bool,
 ) -> MiddlewareRequest<'request> {
-    MiddlewareRequest {
-        meta,
-        command_path,
-        system,
-        user_args,
-        args,
-        default_fields,
-        view_id: None,
-        auth: auth_requirement(no_auth),
-        raw_output: false,
-        pagination_command: None,
-    }
+    MiddlewareRequest::new(meta, command_path, system, user_args, args, default_fields)
+        .with_auth(auth_requirement(no_auth))
 }
 
 #[derive(Debug, Default)]
@@ -9285,6 +9270,21 @@ fn toon_renderer_covers_nested_empty_and_escaped_goldens() {
     }
 }
 
+/// A string field can be backend-controlled (e.g. a cursor continuation
+/// token), not authored by this crate — a raw control character (ESC, the
+/// start of most ANSI escape sequences) must never reach the terminal
+/// unescaped just because it isn't one of the three with a named escape
+/// (`\n`/`\r`/`\t`).
+#[test]
+fn toon_renderer_escapes_arbitrary_control_characters() {
+    let envelope = Envelope::success(json!({"continue_from": "a\x1b[31mb"}), "things-api")
+        .prepare_for_render("");
+    assert_eq!(
+        render(OutputFormat::Toon, &envelope).expect("toon render should succeed"),
+        "data:\n  continue_from: \"a\\u001b[31mb\""
+    );
+}
+
 #[test]
 fn toon_renderer_covers_nested_array_and_non_tabular_object_paths() {
     let envelope = Envelope::success(
@@ -10925,18 +10925,15 @@ async fn optional_skips_auth_when_handler_ignores_credential() {
 
     let output = middleware
         .run(
-            MiddlewareRequest {
-                meta: CommandMeta::default(),
-                command_path: "things:list",
-                system: "things",
-                user_args: value_map([]),
-                args: value_map([]),
-                default_fields: "",
-                view_id: None,
-                auth: cli_engine::AuthRequirement::Optional,
-                raw_output: false,
-                pagination_command: None,
-            },
+            MiddlewareRequest::new(
+                CommandMeta::default(),
+                "things:list",
+                "things",
+                value_map([]),
+                value_map([]),
+                "",
+            )
+            .with_auth(cli_engine::AuthRequirement::Optional),
             async |_resolver| Ok(CommandResult::new(json!({"ok": true}))),
         )
         .await
@@ -10964,18 +10961,15 @@ async fn optional_swallowed_auth_failure_then_command_error_is_not_auth_error() 
 
     let output = middleware
         .run(
-            MiddlewareRequest {
-                meta: CommandMeta::default(),
-                command_path: "things:list",
-                system: "things-api",
-                user_args: value_map([]),
-                args: value_map([]),
-                default_fields: "",
-                view_id: None,
-                auth: cli_engine::AuthRequirement::Optional,
-                raw_output: false,
-                pagination_command: None,
-            },
+            MiddlewareRequest::new(
+                CommandMeta::default(),
+                "things:list",
+                "things-api",
+                value_map([]),
+                value_map([]),
+                "",
+            )
+            .with_auth(cli_engine::AuthRequirement::Optional),
             async |resolver: CredentialResolver| {
                 // Best-effort identity; the missing provider makes this fail, and
                 // the handler deliberately ignores it.
@@ -11016,18 +11010,15 @@ async fn optional_handler_propagated_auth_failure_is_classified_auth_error() {
 
     let output = middleware
         .run(
-            MiddlewareRequest {
-                meta: CommandMeta::default(),
-                command_path: "things:list",
-                system: "things-api",
-                user_args: value_map([]),
-                args: value_map([]),
-                default_fields: "",
-                view_id: None,
-                auth: cli_engine::AuthRequirement::Optional,
-                raw_output: false,
-                pagination_command: None,
-            },
+            MiddlewareRequest::new(
+                CommandMeta::default(),
+                "things:list",
+                "things-api",
+                value_map([]),
+                value_map([]),
+                "",
+            )
+            .with_auth(cli_engine::AuthRequirement::Optional),
             async |resolver: CredentialResolver| {
                 resolver.resolve().await?;
                 Ok(CommandResult::new(json!({})))

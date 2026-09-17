@@ -275,12 +275,16 @@ values into middleware through `CliConfig::apply_flags`.
 `--limit`/`--offset` are not framework-global; a command only gets them by opting in:
 
 ```rust
-CommandSpec::new("list", "List projects").with_pagination(PaginationConfig {
-    default_limit: 20,
-    max_limit: 100,
-    ..Default::default()
-})
+CommandSpec::new("list", "List projects").with_pagination(PaginationConfig::new(20, 100))
 ```
+
+`--limit`/`--continue` are the cursor-pagination counterpart, for a command backed by a server-maintained, forward-only cursor API — see [cursor pagination](#cursor-pagination):
+
+```rust
+CommandSpec::new("list", "List domains").with_cursor(CursorConfig::new(25, 500))
+```
+
+A command opts into exactly one of `with_pagination`/`with_cursor`, never both.
 
 ## Middleware
 
@@ -508,6 +512,16 @@ the user ran — including every flag they passed — with `--limit`/`--offset` 
 page, so both agent callers (`next_actions[]`) and human callers (the "Next steps:" footer) get a
 literal follow-up command instead of having to compute the next offset themselves.
 
+### cursor pagination
+
+A command that opted into `--limit`/`--continue` cursor pagination via `CommandSpec::with_cursor` gets a top-level `cursor` field on the envelope instead of `pagination` — `limit`, `count`, `total`, `remaining`, `continue_from`, `has_more`, and `self_sufficient_limit` — whenever it returned array data. Unlike `pagination`, the engine cannot compute this itself: a cursor is opaque to everything except the handler that called the backend, so `count` is the only piece the engine derives itself (the returned array's length); `limit` defaults to the parsed `--limit`, but a handler can override it via `CursorContinuation::with_limit` to report the effective page size it actually resumed with (e.g. one decoded from `continue_from` itself) — `self_sufficient_limit` is `true` exactly when a next page exists *and* that override happened (`with_limit` alone isn't enough — calling it on a completed `CursorContinuation::done()`, with no `continue_from` at all, must not claim a nonexistent token is self-sufficient), meaning `continue_from` alone is enough to resume and a replay command can omit `--limit`; `total`/`remaining`/`continue_from` come from whatever the handler reported via `CommandResult::with_cursor(CursorContinuation::more(token).with_total(n).with_remaining(n))` — or `CursorContinuation::done()` (or no call at all) to report the end of iteration. `total`/`remaining` are `None` when the backend never reports them, which a pure opaque-cursor API is not obligated to do.
+
+Human output merges this into the table's row-count footer: `(N of M rows)` when a total is known, `(N rows, M remaining)` when only a remaining count is known, or `(N rows so far; use --limit L --continue <token> for more)` when neither is known — `--limit L` is omitted from this hint exactly when `self_sufficient_limit` is `true`, matching the `next_actions` entry below. A cursor-paginated response that doesn't render as a table gets the standalone counterpart: `Showing N of M`, `Showing N (M remaining)`, or `Showing N items so far; use --limit L --continue <token> for more` (same `--limit` omission rule).
+
+When `continue_from` is present (`has_more`), the engine appends a `next_actions` entry replaying the command with `--continue <token>` for the next page, plus `--limit` — unless the handler's `CursorContinuation::with_limit` marked the token itself as already self-sufficient about page size, in which case `--limit` is omitted from the suggested command.
+
+A command registers `with_pagination` or `with_cursor`, never both.
+
 ### fix
 
 Failed commands can attach recovery guidance as a top-level `fix` on the error envelope
@@ -529,8 +543,7 @@ it.
 The output pipeline runs in this order:
 
 1. **Filtering**: `--filter` evaluates a JMESPath predicate against each item in list data.
-2. **Pagination**: `--limit` and `--offset` slice list data and attach the envelope's top-level
-   `pagination` field (see [pagination](#pagination) above).
+2. **Pagination**: `--limit` and `--offset` slice list data and attach the envelope's top-level `pagination` field (see [pagination](#pagination) above). Inert for a `with_cursor` command.
 3. **Expression**: `--expr` evaluates a JMESPath query against the whole current result.
 4. **Field selection**: `--fields` selects comma-separated fields and nested dot paths.
 5. **Formatting**: `--output` renders `json`, `human`, or `toon`.

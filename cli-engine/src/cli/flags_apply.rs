@@ -48,13 +48,46 @@ pub(super) fn apply_pagination_flags(
     middleware.offset = leaf.get_one::<i64>("offset").copied().unwrap_or(0);
 }
 
+/// Sets `middleware.cursor_limit`/`middleware.continue_token` from a
+/// cursor-paginating command's own `--limit`/`--continue`. Unlike
+/// [`apply_pagination_flags`], the framework never slices with these itself
+/// — a cursor-aware handler reads them back off
+/// [`CommandContext::middleware`](crate::command::CommandContext::middleware)
+/// to drive its own backend call.
+pub(super) fn apply_cursor_flags(
+    middleware: &mut Middleware,
+    spec: &CommandSpec,
+    leaf: &ArgMatches,
+) {
+    let Some(cursor) = spec.cursor else {
+        return;
+    };
+    middleware.cursor_limit = leaf
+        .get_one::<i64>("limit")
+        .copied()
+        .unwrap_or(cursor.default_limit);
+    middleware.continue_token = leaf.get_one::<String>("continue").cloned();
+    // `Middleware` is long-lived across repeated `Cli::run` calls (and
+    // pre-settable via `Cli::middleware_mut`), but `apply_pagination_flags`
+    // only touches `limit`/`offset` for a `with_pagination` command — a
+    // prior command's nonzero values would otherwise survive into this
+    // cursor command's run. `apply_pipeline`'s offset-slicing triggers on
+    // `limit > 0 || offset > 0` with no idea which pagination style (if any)
+    // the current command declared, so a stale value here would client-slice
+    // a response the handler already computed exactly the requested page
+    // for. Cursor and offset pagination are mutually exclusive per command,
+    // so this command never wants pipeline-level slicing at all.
+    middleware.limit = 0;
+    middleware.offset = 0;
+}
+
 /// Replays a paginating command's own explicit args, plus the global
 /// `--filter`/`--expr`/`--fields` flags, as `--flag value` text, prefixed
 /// with the CLI's binary name — the base a "view the next page"
 /// [`crate::NextAction`] is built from once the response's
-/// [`crate::PaginationMeta`] is known. Leading with the binary name keeps the
-/// suggested command copy-pastable rather than a fragment starting at the
-/// noun/verb path.
+/// [`crate::PaginationMeta`] or [`crate::CursorMeta`] is known. Leading with
+/// the binary name keeps the suggested command copy-pastable rather than a
+/// fragment starting at the noun/verb path.
 ///
 /// `--filter`/`--expr`/`--fields` sit in the same output pipeline as
 /// pagination itself (filter -> paginate -> expr -> fields) and change what
@@ -71,10 +104,11 @@ pub(super) fn apply_pagination_flags(
 /// flag occurrence per value (round-trips correctly whether the arg is a
 /// plain repeatable `ArgAction::Append` or also sets a `value_delimiter`),
 /// and quotes/escapes values containing whitespace or shell metacharacters
-/// (see `quote_pagination_value`). Deliberately omits `--limit`/`--offset` —
-/// those are added by the caller once it knows the
-/// next page's offset.
-pub(super) fn pagination_command_base(
+/// (see `quote_pagination_value`). Deliberately omits `--limit`/`--offset`
+/// and `--limit`/`--continue` — those are never part of `spec.args` to begin
+/// with, and the caller appends the right pair once it knows the next
+/// page's offset or continuation token.
+pub(super) fn command_replay_base(
     binary_name: &str,
     command_path: &str,
     spec: &CommandSpec,
@@ -169,17 +203,61 @@ fn pagination_arg_display(value: &serde_json::Value) -> String {
 /// are backslash-escaped (backslash first, so escaping the others doesn't
 /// re-escape the backslashes it just inserted) so the value can't break out
 /// of the double quotes or trigger POSIX-shell expansion (`$VAR`, `$(...)`,
-/// backticks) if the suggestion is copy-pasted into a shell.
-fn quote_pagination_value(value: &str) -> String {
+/// backticks) if the suggestion is copy-pasted into a shell. A cursor token
+/// is backend-controlled (unlike most other replayed values, which are the
+/// user's own prior flags), so a control character — an embedded newline
+/// that would make the printed command look like more than one line, or an
+/// ANSI escape sequence that could otherwise repaint the terminal when this
+/// is printed — is rendered as a literal `\xHH`/`\n`/`\r`/`\t` placeholder
+/// rather than passed through raw.
+///
+/// Display-safe, not round-trip-safe for a control character: a plain shell
+/// does not decode `\n`/`\xHH` inside a double-quoted string back into the
+/// original byte, so a value containing one cannot be copy-pasted back into
+/// an exact resend — a deliberate trade-off, since the alternative (an
+/// escape a shell *would* decode, e.g. ANSI-C `$'...'` quoting) is not
+/// POSIX and would make every other, ordinary replayed value non-portable
+/// to gain exact reproduction for a case that, in practice, only a
+/// malformed or adversarial backend cursor token would ever hit.
+///
+/// `!` gets different treatment because a fix that *does* both round-trip
+/// and stay safe exists: interactive Bash performs history expansion on an
+/// unescaped `!` even inside double quotes (so `"a!b"` can expand against
+/// history or fail with "event not found"), and backslash-escaping it
+/// there leaves the backslash itself in the resulting argument (`\!`, not
+/// `!` — its own round-trip failure, verified against a real Bash). A
+/// single-quoted segment is immune to history expansion and, spliced
+/// between double-quoted segments with no separator, still concatenates
+/// into one argument (`"a"'!'"b"` parses as the single word `a!b`) — this
+/// stitches every `!` in as its own single-quoted segment instead.
+pub(crate) fn quote_pagination_value(value: &str) -> String {
     let safe_unquoted =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@');
     if value.is_empty() || !value.chars().all(safe_unquoted) {
-        let escaped = value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('$', "\\$")
-            .replace('`', "\\`");
-        format!("\"{escaped}\"")
+        let mut out = String::with_capacity(value.len() + 2);
+        let mut segment = String::new();
+        out.push('"');
+        for c in value.chars() {
+            match c {
+                '!' => {
+                    out.push_str(&segment);
+                    segment.clear();
+                    out.push_str("\"'!'\"");
+                }
+                '\\' => segment.push_str("\\\\"),
+                '"' => segment.push_str("\\\""),
+                '$' => segment.push_str("\\$"),
+                '`' => segment.push_str("\\`"),
+                '\n' => segment.push_str("\\n"),
+                '\r' => segment.push_str("\\r"),
+                '\t' => segment.push_str("\\t"),
+                c if c.is_control() => segment.push_str(&format!("\\x{:02x}", c as u32)),
+                c => segment.push(c),
+            }
+        }
+        out.push_str(&segment);
+        out.push('"');
+        out
     } else {
         value.to_owned()
     }
@@ -549,5 +627,42 @@ mod prescan_env_flag_tests {
             prescan_env_flag(argv(&["--env", "dev", "--", "positional"])),
             Some("dev".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod quote_pagination_value_tests {
+    use super::quote_pagination_value;
+
+    #[test]
+    fn newline_carriage_return_and_tab_render_as_named_escapes() {
+        assert_eq!(quote_pagination_value("a\nb\rc\td"), "\"a\\nb\\rc\\td\"");
+    }
+
+    #[test]
+    fn other_control_characters_render_as_hex_escapes() {
+        // ESC (0x1b), the start of most ANSI escape sequences a backend-
+        // supplied token could otherwise smuggle straight to the terminal.
+        assert_eq!(quote_pagination_value("a\x1b[31mb"), "\"a\\x1b[31mb\"");
+    }
+
+    #[test]
+    fn ordinary_text_is_unaffected() {
+        assert_eq!(quote_pagination_value("tok-2"), "tok-2");
+        assert_eq!(quote_pagination_value("a b;c"), "\"a b;c\"");
+    }
+
+    #[test]
+    fn bang_is_spliced_into_its_own_single_quoted_segment() {
+        // Verified against a real interactive Bash (with history expansion
+        // enabled) that this exact splicing both round-trips to the
+        // original value and never triggers history expansion, unlike a
+        // backslash-escaped `\!` (which leaves the backslash itself in the
+        // resulting argument) or a bare `!` inside double quotes (which can
+        // silently substitute in unrelated history text).
+        assert_eq!(quote_pagination_value("a!b"), "\"a\"'!'\"b\"");
+        assert_eq!(quote_pagination_value("!abc"), "\"\"'!'\"abc\"");
+        assert_eq!(quote_pagination_value("abc!"), "\"abc\"'!'\"\"");
+        assert_eq!(quote_pagination_value("a!!b"), "\"a\"'!'\"\"'!'\"b\"");
     }
 }

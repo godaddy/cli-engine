@@ -71,6 +71,16 @@ impl RuntimeCommandSpec {
              new_typed_with_context to keep typed args) instead",
             spec.name
         );
+        debug_assert!(
+            spec.cursor.is_none(),
+            "command {:?} sets with_cursor but RuntimeCommandSpec::new's handler \
+             (CredentialResolver, args) has no CommandContext and can never read back \
+             middleware.cursor_limit/continue_token to drive its own backend call, so \
+             --continue would advertise resumption the handler cannot perform; use \
+             RuntimeCommandSpec::new_with_context (or new_typed_with_context to keep typed \
+             args) instead",
+            spec.name
+        );
         Self {
             spec,
             streaming_handler: None,
@@ -117,6 +127,14 @@ impl RuntimeCommandSpec {
              raw_output is only supported on non-streaming commands",
             spec.name
         );
+        debug_assert!(
+            spec.cursor.is_none(),
+            "command {:?} sets with_cursor but a streaming handler's result is always wrapped \
+             as CommandResult::new(Value::Null) — there is no array or CursorContinuation to \
+             report, so --continue would advertise resumption that can never happen; \
+             with_cursor is only supported on non-streaming commands",
+            spec.name
+        );
         let streaming: StreamingCommandHandler = Arc::new(move |context, sender| {
             let future = handler(context, sender);
             Box::pin(future)
@@ -157,6 +175,16 @@ impl RuntimeCommandSpec {
              CommandContext::dry_run(), so it would silently run its real side effects \
              under --dry-run; use RuntimeCommandSpec::new_with_context (or \
              new_typed_with_context to keep typed args) instead",
+            spec.name
+        );
+        debug_assert!(
+            spec.cursor.is_none(),
+            "command {:?} sets with_cursor but RuntimeCommandSpec::new_typed's handler \
+             (CredentialResolver, args) has no CommandContext and can never read back \
+             middleware.cursor_limit/continue_token to drive its own backend call, so \
+             --continue would advertise resumption the handler cannot perform; use \
+             RuntimeCommandSpec::new_with_context (or new_typed_with_context to keep typed \
+             args) instead",
             spec.name
         );
         let handler = Arc::new(handler);
@@ -249,6 +277,14 @@ impl RuntimeCommandSpec {
             "command {:?} sets raw_output but RuntimeCommandSpec::new_typed_streaming writes \
              chunked NDJSON events, which does not fit a single-verbatim-string contract; \
              raw_output is only supported on non-streaming commands",
+            spec.name
+        );
+        debug_assert!(
+            spec.cursor.is_none(),
+            "command {:?} sets with_cursor but a streaming handler's result is always wrapped \
+             as CommandResult::new(Value::Null) — there is no array or CursorContinuation to \
+             report, so --continue would advertise resumption that can never happen; \
+             with_cursor is only supported on non-streaming commands",
             spec.name
         );
         let handler = Arc::new(handler);

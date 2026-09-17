@@ -292,11 +292,17 @@ Framework global flags populate middleware and apply consistently to every comma
 Applications can add their own global flags with `CliConfig::with_register_flags` and copy parsed
 values into middleware with `CliConfig::with_apply_flags`.
 
-`--limit`/`--offset` are the one exception: they are not global at all. A command registers them
-for itself with `CommandSpec::with_pagination(PaginationConfig { default_limit, max_limit, ..Default::default() })`;
-a command that never calls this has neither flag, in `--help` or on its command line.
-`default_limit` applies when the user passes neither flag; `max_limit` (when non-zero) rejects an
-explicit `--limit` above the cap.
+Pagination flags are the one exception: they are not global at all, and a command registers at
+most one of two mutually exclusive styles for itself. `CommandSpec::with_pagination(PaginationConfig::new(default_limit, max_limit))`
+registers `--limit`/`--offset`, purely client-side (the engine slices whatever array the handler
+returns). `CommandSpec::with_cursor(CursorConfig::new(default_limit, max_limit))` registers
+`--limit`/`--continue` instead, for a backend with its own server-maintained, forward-only cursor —
+the engine never slices or measures a cursor itself; the handler reads the parsed values back off
+`Middleware::cursor_limit`/`.continue_token` and reports what it learned via
+`CommandResult::with_cursor`. A command that calls neither has none of these flags, in `--help` or
+on its command line. `default_limit` applies when the user passes neither flag; `max_limit` (when
+non-zero) rejects an explicit `--limit` above the cap. See [concepts.md](concepts.md#cursor-pagination)
+for the full cursor contract.
 
 ## Middleware
 
@@ -365,10 +371,13 @@ Handlers return JSON-serializable data and a system id. Middleware wraps the res
 - `fix` (optional recovery guidance on failed commands)
 
 Metadata is omitted unless `--verbose` is requested. Selective metadata is supported with
-comma-separated verbose fields. `pagination`, unlike `metadata`, is never gated by `--verbose` —
-a caller relies on it to know whether more data exists at all. It's still conditional on
-pagination actually running, though: a paginating command with `default_limit: 0` ("unlimited")
-and neither flag passed produces no `pagination` field at all.
+comma-separated verbose fields. `pagination`/`cursor`, unlike `metadata`, are never gated by
+`--verbose` — a caller relies on them to know whether more data exists at all. `pagination` is
+still conditional on pagination actually running, though: a paginating command with
+`default_limit: 0` ("unlimited") and neither flag passed produces no `pagination` field at all.
+`cursor` is present whenever a `with_cursor` command returned array data, regardless of `--limit`/
+`--continue`, since the engine can't measure a cursor itself the way it slices an offset — see
+[concepts.md](concepts.md#cursor-pagination).
 
 The output pipeline runs in this order:
 
