@@ -602,16 +602,22 @@ impl Middleware {
             }
         }
         if let Some(base) = cursor_command
+            && let Some(count) = raw_cursor_array_len
             && let Some(data) = &envelope.data
-            && let Some(items) = data.as_array()
+            && data.as_array().is_some()
         {
             // Cursor metadata is for array data (per `Envelope::cursor`'s own
             // contract) — a handler result that isn't an array (or one
             // `--expr` reshaped into a scalar/object) gets no cursor field
             // at all, mirroring offset pagination's identical guard in
             // `apply_pagination`, rather than advertising a bogus page over
-            // data that was never actually paginated.
-            let count = raw_cursor_array_len.unwrap_or(items.len() as i64);
+            // data that was never actually paginated. Both checks are
+            // required, not either/or: `raw_cursor_array_len` catches a
+            // handler result that was never an array to begin with (even if
+            // `--expr` later synthesizes one — that's still not a real
+            // cursor page); the post-pipeline `is_some()` catches the
+            // opposite direction, `--expr` reshaping a real page into a
+            // scalar.
             let continuation = cursor_continuation.unwrap_or_default();
             let has_more = continuation.continue_from.is_some();
             // A handler that reported an effective limit is telling us its

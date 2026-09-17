@@ -253,6 +253,39 @@ async fn cursor_metadata_is_absent_when_the_handler_result_is_not_an_array() {
     );
 }
 
+/// The inverse direction from the non-array test above: the handler's raw
+/// result was never an array, but `--expr` happens to synthesize one
+/// (`[@]`, wrapping the object in a single-element list) — this must still
+/// produce no cursor metadata, since there was never a real backend page to
+/// describe, regardless of what shape `--expr` leaves the *displayed* data
+/// in.
+#[tokio::test]
+async fn cursor_metadata_is_absent_when_expr_synthesizes_an_array_from_a_non_array_result() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!({"name": "alpha"}))
+                .with_cursor(CursorContinuation::more("tok-2")))
+        },
+    ));
+
+    let output = cli
+        .run(["my-cli", "list", "--expr", "[@]", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!([{"name": "alpha"}]));
+    assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "{}",
+        output.rendered
+    );
+}
+
 /// Same guard, reached via `--expr` reshaping an originally-array result into
 /// a scalar rather than the handler returning a non-array result directly —
 /// `apply_pipeline`'s `--expr` step runs after the cursor block would

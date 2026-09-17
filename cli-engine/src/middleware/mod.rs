@@ -632,6 +632,7 @@ impl<'request> MiddlewareRequest<'request> {
     /// everything else defaulted (`auth: AuthRequirement::Required`,
     /// `view_id`/`pagination_command`/`cursor_command`: `None`, `raw_output:
     /// false`). Chain the `with_*` methods below for anything else.
+    #[must_use]
     pub fn new(
         meta: CommandMeta,
         command_path: &'request str,
@@ -652,18 +653,21 @@ impl<'request> MiddlewareRequest<'request> {
     }
 
     /// Sets the authentication requirement enforced for this command.
+    #[must_use]
     pub fn with_auth(mut self, auth: AuthRequirement) -> Self {
         self.auth = auth;
         self
     }
 
     /// Sets the human view id this command declared.
+    #[must_use]
     pub fn with_view_id(mut self, view_id: &'request str) -> Self {
         self.view_id = Some(view_id);
         self
     }
 
     /// Sets whether a successful string result renders verbatim.
+    #[must_use]
     pub fn with_raw_output(mut self, raw_output: bool) -> Self {
         self.raw_output = raw_output;
         self
@@ -674,6 +678,7 @@ impl<'request> MiddlewareRequest<'request> {
     /// Clears `cursor_command` — a command replays as one pagination style or
     /// the other, never both; setting one via its builder is how a caller
     /// signals the other no longer applies.
+    #[must_use]
     pub fn with_pagination_command(mut self, pagination_command: impl Into<String>) -> Self {
         self.pagination_command = Some(pagination_command.into());
         self.cursor_command = None;
@@ -683,6 +688,7 @@ impl<'request> MiddlewareRequest<'request> {
     /// Sets the replayable command text for cursor pagination's `next_actions`.
     ///
     /// Clears `pagination_command` — see [`with_pagination_command`](Self::with_pagination_command).
+    #[must_use]
     pub fn with_cursor_command(mut self, cursor_command: impl Into<String>) -> Self {
         self.cursor_command = Some(cursor_command.into());
         self.pagination_command = None;
