@@ -319,9 +319,12 @@ fn escape_string(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             // Any other control character (e.g. ESC, the start of most ANSI
             // escape sequences) — not just the three above with a named
-            // escape — gets a `\xHH` placeholder rather than passing through
-            // raw to a terminal rendering this output.
-            c if c.is_control() => escaped.push_str(&format!("\\x{:02x}", c as u32)),
+            // escape — gets a `\uXXXX` escape rather than passing through
+            // raw to a terminal rendering this output. Every other escape
+            // here is JSON-style, so this must be too (`\xHH` is not valid
+            // JSON/TOON string syntax and would itself make the output
+            // unparseable, defeating machine-readable TOON).
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
             c => escaped.push(c),
         }
     }

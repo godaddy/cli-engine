@@ -541,6 +541,21 @@ impl Middleware {
             }
         }
         let projection_fields = if human_view { "" } else { effective_fields };
+        // Captured before `apply_pipeline` runs below: cursor metadata
+        // describes the page the handler's own backend call actually
+        // returned, not whatever `--expr` reshapes it into for display. An
+        // `--expr` that keeps the result an array (e.g. a JMESPath filter)
+        // would otherwise silently substitute the post-expression display
+        // count for the real page size — `PaginationMeta.count` already
+        // avoids this because `apply_pipeline` captures it internally, at
+        // the pagination step, before `--expr` runs; cursor metadata is
+        // built entirely outside `apply_pipeline`, so it needs its own
+        // snapshot instead.
+        let raw_cursor_array_len = envelope
+            .data
+            .as_ref()
+            .and_then(Value::as_array)
+            .map(|items| items.len() as i64);
         if let Some(data) = &mut envelope.data {
             // A cursor command never wants pipeline-level slicing — the
             // handler already returned exactly the page its own backend call
@@ -596,7 +611,7 @@ impl Middleware {
             // at all, mirroring offset pagination's identical guard in
             // `apply_pagination`, rather than advertising a bogus page over
             // data that was never actually paginated.
-            let count = items.len() as i64;
+            let count = raw_cursor_array_len.unwrap_or(items.len() as i64);
             let continuation = cursor_continuation.unwrap_or_default();
             let has_more = continuation.continue_from.is_some();
             // A handler that reported an effective limit is telling us its
