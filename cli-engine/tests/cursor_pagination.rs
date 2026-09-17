@@ -275,6 +275,39 @@ async fn cursor_metadata_is_absent_after_expr_reshapes_data_to_a_scalar() {
     assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
 }
 
+/// `cursor.count` must describe the page the handler's backend call
+/// actually returned, not whatever `--expr` reshapes it into for display —
+/// unlike the scalar case above, an `--expr` that filters but keeps the
+/// result an array doesn't trip the "not an array" guard, so this exercises
+/// the count itself rather than cursor metadata's presence.
+#[tokio::test]
+async fn cursor_count_reflects_the_raw_page_size_not_the_expr_filtered_display_count() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--expr",
+            "[?name=='alpha']",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!([{"name": "alpha"}]));
+    assert_eq!(
+        rendered["cursor"]["count"], 2,
+        "count must reflect the real 2-item page, not the 1 item --expr left displayed: {}",
+        output.rendered
+    );
+}
+
 /// A handler that derives its own effective page size from the `--continue`
 /// token (e.g. to let a caller resume with `--continue` alone, without
 /// repeating `--limit`) reports that via `CursorContinuation::with_limit`.

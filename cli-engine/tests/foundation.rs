@@ -9281,7 +9281,7 @@ fn toon_renderer_escapes_arbitrary_control_characters() {
         .prepare_for_render("");
     assert_eq!(
         render(OutputFormat::Toon, &envelope).expect("toon render should succeed"),
-        "data:\n  continue_from: \"a\\x1b[31mb\""
+        "data:\n  continue_from: \"a\\u001b[31mb\""
     );
 }
 

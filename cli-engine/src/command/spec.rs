@@ -115,21 +115,29 @@ pub struct CommandSpec {
     /// ancestor chain happens when a [`Cli`](crate::Cli) mounts the enclosing
     /// module or group.
     pub feature_flag: Option<FeatureFlag>,
-    /// This command's opt-in pagination policy, if any.
+    /// This command's opt-in offset-pagination policy, if any.
     ///
-    /// `None` (the default) means the command does not paginate: `--limit`/
-    /// `--offset` are not registered for it, so they neither show up in its
-    /// `--help` nor parse on its command line. Set with
-    /// [`with_pagination`](CommandSpec::with_pagination). Mutually exclusive
-    /// with [`cursor`](CommandSpec::cursor).
+    /// `None` (the default) means this command doesn't register `--offset`
+    /// (and doesn't register `--limit` for the offset-pagination reading of
+    /// it) — but that alone doesn't mean the command has no `--limit` at
+    /// all: [`cursor`](CommandSpec::cursor) registers its own `--limit`
+    /// alongside `--continue`. A command has at most one of `pagination`/
+    /// `cursor` set (mutually exclusive, enforced at registration), so
+    /// exactly one of the two config docs describes any given `--limit`
+    /// that shows up in `--help`. Set with
+    /// [`with_pagination`](CommandSpec::with_pagination).
     pub pagination: Option<PaginationConfig>,
     /// This command's opt-in cursor-pagination policy, if any.
     ///
-    /// `None` (the default) means the command does not register `--limit`/
-    /// `--continue`. Set with [`with_cursor`](CommandSpec::with_cursor) for a
-    /// command backed by a server-maintained, forward-only cursor API, where
-    /// client-side offset slicing would cost O(N²) requests to page through.
-    /// Mutually exclusive with [`pagination`](CommandSpec::pagination).
+    /// `None` (the default) means this command doesn't register `--continue`
+    /// (and doesn't register `--limit` for the cursor-pagination reading of
+    /// it) — but that alone doesn't mean the command has no `--limit` at
+    /// all: [`pagination`](CommandSpec::pagination) registers its own
+    /// `--limit` alongside `--offset`. Same mutual-exclusivity note as
+    /// `pagination`. Set with [`with_cursor`](CommandSpec::with_cursor) for
+    /// a command backed by a server-maintained, forward-only cursor API,
+    /// where client-side offset slicing would cost O(N²) requests to page
+    /// through.
     pub cursor: Option<CursorConfig>,
 }
 
