@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -14,6 +13,8 @@ pub(super) struct TokenResponse {
     refresh_token: Option<String>,
     /// Space-delimited scopes the server actually granted, when it echoes them.
     scope: Option<String>,
+    /// OIDC ID token, present when `openid` is among the granted scopes.
+    id_token: Option<String>,
 }
 
 /// Decodes the claims (payload) segment of a JWT **without verifying the
@@ -24,15 +25,44 @@ pub(super) struct TokenResponse {
 /// scope step-up needs a fresh login. These are convenience/optimization reads,
 /// **not** trust or authorization decisions — the authorization server remains
 /// the source of truth for granted scopes — so signature verification is
-/// intentionally skipped. Opaque (non-JWT) tokens and any decode/parse failure
-/// yield `None`, leaving the identity blank (and treating scopes as absent, which
+/// intentionally skipped (via `jsonwebtoken::dangerous`, which performs zero
+/// validation — no signature, no expiry — rather than hand-rolled base64 +
+/// `serde_json`). Opaque (non-JWT) tokens and any decode/parse failure yield
+/// `None`, leaving the identity blank (and treating scopes as absent, which
 /// just forces a re-auth).
 pub(super) fn decode_jwt_claims(token: &str) -> Option<Map<String, Value>> {
-    // A JWT is `header.payload.signature`; the payload is the middle segment,
-    // base64url-encoded without padding.
-    let payload = token.split('.').nth(1)?;
-    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    jsonwebtoken::dangerous::insecure_decode_claims(token).ok()
+}
+
+/// Confirms a freshly-obtained token's id_token (if any) was minted for
+/// *this* authorization request, guarding against a substituted/replayed
+/// id_token from a different flow.
+///
+/// Checked via the same unverified [`decode_jwt_claims`] used for
+/// `identity`/`sub` display, not a signature-verified read — real protection
+/// against a forged claim still requires verifying against the IdP's JWKS
+/// (not done here; see [`decode_jwt_claims`]'s doc), but this still catches a
+/// genuine mismatch from a token that was issued for a different request.
+///
+/// Degrades gracefully like [`scopes_from_jwt`]: no id_token, an
+/// undecodable id_token, or an id_token with no `nonce` claim at all (an IdP
+/// that doesn't echo it) are all treated as "nothing to check" rather than an
+/// error — only an actual mismatch is rejected.
+pub(super) fn verify_id_token_nonce(token: &StoredToken, expected_nonce: &str) -> Result<()> {
+    let Some(id_token) = token.id_token.as_deref() else {
+        return Ok(());
+    };
+    let Some(claims) = decode_jwt_claims(id_token) else {
+        return Ok(());
+    };
+    match claims.get("nonce").and_then(Value::as_str) {
+        None | Some("") => Ok(()),
+        Some(actual) if actual == expected_nonce => Ok(()),
+        Some(_) => Err(CliCoreError::message(
+            "id_token nonce did not match this authorization request — rejecting token \
+             (possible substitution/replay)",
+        )),
+    }
 }
 
 /// Returns `defaults ∪ granted ∪ required`, order-preserving and de-duplicated.
@@ -263,5 +293,6 @@ pub(super) async fn parse_token_response(
         expires_at,
         refresh_token: body.refresh_token,
         scopes,
+        id_token: body.id_token,
     })
 }

@@ -9,24 +9,16 @@ use serde_json::{Value, json};
 use super::callback_server::{extract_query_param, extract_request_path};
 use super::scopes::{
     ScopeHierarchy, StepUp, decode_jwt_claims, ensure_granted, extract_identity, granted_scopes,
-    plan_step_up, scopes_from_jwt, union_scopes,
+    plan_step_up, scopes_from_jwt, union_scopes, verify_id_token_nonce,
 };
-use super::{DEFAULT_IDENTITY_CLAIMS, PkceAuthProvider, StoredToken, TOKEN_EXPIRY_BUFFER_SECS};
+use super::{
+    DEFAULT_IDENTITY_CLAIMS, PkceAuthProvider, StoredToken, TOKEN_EXPIRY_BUFFER_SECS, test_provider,
+};
 use crate::CredentialRequest;
 use crate::auth::AuthProvider;
 use crate::auth::storage::{CredentialKey, CredentialStorage};
 use crate::config::CredentialStore;
 use std::collections::HashMap;
-
-fn test_provider() -> PkceAuthProvider {
-    PkceAuthProvider::new(
-        "test",
-        "https://example.com/auth",
-        "https://example.com/token",
-        "client-id",
-        &["openid"],
-    )
-}
 
 fn valid_token(access_token: &str) -> StoredToken {
     StoredToken {
@@ -34,6 +26,7 @@ fn valid_token(access_token: &str) -> StoredToken {
         expires_at: Utc::now().timestamp() + 3600,
         refresh_token: None,
         scopes: Vec::new(),
+        id_token: None,
     }
 }
 
@@ -45,6 +38,7 @@ fn token_with_scopes(access_token: &str, scopes: &[&str]) -> StoredToken {
         expires_at: Utc::now().timestamp() + 3600,
         refresh_token: None,
         scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+        id_token: None,
     }
 }
 
@@ -55,6 +49,7 @@ fn expired_token() -> StoredToken {
         expires_at: Utc::now().timestamp() - TOKEN_EXPIRY_BUFFER_SECS - 1,
         refresh_token: None,
         scopes: Vec::new(),
+        id_token: None,
     }
 }
 
@@ -426,51 +421,6 @@ async fn get_credential_for_no_scopes_returns_cached() {
 }
 
 #[test]
-fn redirect_uri_default_uses_127_0_0_1_and_redirect_port() {
-    let provider = test_provider().with_redirect_port(9000);
-    assert_eq!(
-        provider.effective_redirect_uri(),
-        "http://127.0.0.1:9000/callback"
-    );
-}
-
-#[test]
-fn with_redirect_uri_overrides_default() {
-    let provider = test_provider().with_redirect_uri("http://localhost:8080/auth/callback");
-    assert_eq!(
-        provider.effective_redirect_uri(),
-        "http://localhost:8080/auth/callback"
-    );
-}
-
-#[test]
-fn parse_redirect_uri_extracts_port_and_path_from_default() {
-    let provider = test_provider().with_redirect_port(9000);
-    let (port, path) = provider.parse_redirect_uri().expect("valid URI");
-    assert_eq!(port, 9000);
-    assert_eq!(path, "/callback");
-}
-
-#[test]
-fn parse_redirect_uri_extracts_port_and_path_from_custom_uri() {
-    let provider = test_provider().with_redirect_uri("http://localhost:8080/auth/callback");
-    let (port, path) = provider.parse_redirect_uri().expect("valid URI");
-    assert_eq!(port, 8080);
-    assert_eq!(path, "/auth/callback");
-}
-
-#[test]
-fn with_redirect_uri_does_not_affect_listener_host() {
-    // The port is derived from the URI, but the listener always binds to
-    // 127.0.0.1 — this test confirms the URI host does not change that.
-    let provider = test_provider().with_redirect_uri("http://localhost:7777/callback");
-    let (port, _) = provider.parse_redirect_uri().expect("valid URI");
-    assert_eq!(port, 7777);
-    // Caller uses 127.0.0.1 for bind regardless; SocketAddr construction
-    // is in run_pkce_flow and is not repeated here.
-}
-
-#[test]
 fn extract_request_path_strips_query_string() {
     assert_eq!(
         extract_request_path("GET /auth/callback?code=abc&state=xyz HTTP/1.1\r\n"),
@@ -641,6 +591,90 @@ fn build_credential_leaves_identity_blank_for_opaque_token() {
     let credential = provider.build_credential("prod", &token);
     assert_eq!(credential.identity, "");
     assert_eq!(credential.sub, "");
+}
+
+#[test]
+fn build_credential_uses_id_token_claims_when_access_token_lacks_them() {
+    let provider = test_provider();
+    // Access token carries only `sub` (no identity claim); the id_token is
+    // where the IdP put `email` — the situation `openid`/`profile` scopes are
+    // requested for in the first place.
+    let mut token = valid_token(&make_jwt(&json!({"sub": "subject-1"})));
+    token.id_token = Some(make_jwt(&json!({
+        "email": "user@example.com",
+        "sub": "subject-1",
+    })));
+    let credential = provider.build_credential("prod", &token);
+    assert_eq!(credential.identity, "user@example.com");
+    assert_eq!(credential.sub, "subject-1");
+}
+
+#[test]
+fn build_credential_prefers_id_token_claims_over_access_token_on_overlap() {
+    let provider = test_provider();
+    let mut token = valid_token(&make_jwt(&json!({"email": "access@example.com"})));
+    token.id_token = Some(make_jwt(&json!({"email": "id@example.com"})));
+    let credential = provider.build_credential("prod", &token);
+    assert_eq!(credential.identity, "id@example.com");
+}
+
+#[test]
+fn build_credential_falls_back_to_access_token_claims_missing_from_id_token() {
+    let provider = test_provider();
+    // id_token has no `email`; the access token's should still be used rather
+    // than the merge discarding it.
+    let mut token = valid_token(&make_jwt(&json!({"email": "access@example.com"})));
+    token.id_token = Some(make_jwt(&json!({"aud": "some-client"})));
+    let credential = provider.build_credential("prod", &token);
+    assert_eq!(credential.identity, "access@example.com");
+}
+
+#[test]
+fn build_credential_ignores_unparseable_id_token() {
+    let provider = test_provider();
+    let mut token = valid_token(&make_jwt(&json!({"email": "access@example.com"})));
+    token.id_token = Some("not-a-jwt".to_owned());
+    let credential = provider.build_credential("prod", &token);
+    assert_eq!(credential.identity, "access@example.com");
+}
+
+#[test]
+fn verify_id_token_nonce_accepts_matching_nonce() {
+    let token = valid_token("opaque-access-token");
+    let mut token = token;
+    token.id_token = Some(make_jwt(&json!({"nonce": "abc123"})));
+    assert!(verify_id_token_nonce(&token, "abc123").is_ok());
+}
+
+#[test]
+fn verify_id_token_nonce_rejects_mismatched_nonce() {
+    let mut token = valid_token("opaque-access-token");
+    token.id_token = Some(make_jwt(&json!({"nonce": "abc123"})));
+    let err = verify_id_token_nonce(&token, "different-nonce")
+        .expect_err("mismatched nonce must be rejected");
+    let message = format!("{err}");
+    assert!(message.contains("nonce"), "unexpected message: {message}");
+}
+
+#[test]
+fn verify_id_token_nonce_allows_missing_id_token() {
+    let token = valid_token("opaque-access-token");
+    assert!(verify_id_token_nonce(&token, "any-nonce").is_ok());
+}
+
+#[test]
+fn verify_id_token_nonce_allows_id_token_without_nonce_claim() {
+    // An IdP that doesn't echo `nonce` at all shouldn't fail every login.
+    let mut token = valid_token("opaque-access-token");
+    token.id_token = Some(make_jwt(&json!({"email": "user@example.com"})));
+    assert!(verify_id_token_nonce(&token, "any-nonce").is_ok());
+}
+
+#[test]
+fn verify_id_token_nonce_allows_unparseable_id_token() {
+    let mut token = valid_token("opaque-access-token");
+    token.id_token = Some("not-a-jwt".to_owned());
+    assert!(verify_id_token_nonce(&token, "any-nonce").is_ok());
 }
 
 #[test]

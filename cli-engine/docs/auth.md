@@ -215,7 +215,7 @@ let config = CliConfig::new("my-cli", "My CLI", "my-cli")
 Tokens are stored per `(app_id, provider_name, env)` tuple. The in-process cache avoids
 redundant keychain reads. A 30-second expiry buffer triggers proactive refresh.
 
-The redirect port defaults to `7443`. Override it with `PkceAuthProvider::with_redirect_port`.
+The redirect port defaults to `7443`. Override it with `PkceAuthProvider::with_redirect_port`, or opt into an OS-assigned ephemeral port with `PkceAuthProvider::with_ephemeral_redirect_port` — only if the authorization server does RFC 8252 §7.3 port-agnostic loopback matching for this client; the default is unchanged until that's confirmed.
 
 ### Environment Variable Overrides
 
