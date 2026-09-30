@@ -640,17 +640,18 @@ fn build_credential_ignores_unparseable_id_token() {
 
 #[test]
 fn verify_id_token_nonce_accepts_matching_nonce() {
-    let token = valid_token("opaque-access-token");
-    let mut token = token;
+    let mut token = valid_token("opaque-access-token");
     token.id_token = Some(make_jwt(&json!({"nonce": "abc123"})));
-    assert!(verify_id_token_nonce(&token, "abc123").is_ok());
+    assert!(verify_id_token_nonce(&token, "abc123", false).is_ok());
+    // A matching nonce is accepted the same way whether or not it's required.
+    assert!(verify_id_token_nonce(&token, "abc123", true).is_ok());
 }
 
 #[test]
 fn verify_id_token_nonce_rejects_mismatched_nonce() {
     let mut token = valid_token("opaque-access-token");
     token.id_token = Some(make_jwt(&json!({"nonce": "abc123"})));
-    let err = verify_id_token_nonce(&token, "different-nonce")
+    let err = verify_id_token_nonce(&token, "different-nonce", false)
         .expect_err("mismatched nonce must be rejected");
     let message = format!("{err}");
     assert!(message.contains("nonce"), "unexpected message: {message}");
@@ -659,22 +660,39 @@ fn verify_id_token_nonce_rejects_mismatched_nonce() {
 #[test]
 fn verify_id_token_nonce_allows_missing_id_token() {
     let token = valid_token("opaque-access-token");
-    assert!(verify_id_token_nonce(&token, "any-nonce").is_ok());
+    // No id_token at all (non-OIDC provider) is fine even with require_nonce.
+    assert!(verify_id_token_nonce(&token, "any-nonce", false).is_ok());
+    assert!(verify_id_token_nonce(&token, "any-nonce", true).is_ok());
 }
 
 #[test]
-fn verify_id_token_nonce_allows_id_token_without_nonce_claim() {
-    // An IdP that doesn't echo `nonce` at all shouldn't fail every login.
+fn verify_id_token_nonce_allows_missing_nonce_claim_by_default() {
+    // An IdP that doesn't echo `nonce` at all shouldn't fail every login
+    // unless the caller has explicitly opted into requiring it.
     let mut token = valid_token("opaque-access-token");
     token.id_token = Some(make_jwt(&json!({"email": "user@example.com"})));
-    assert!(verify_id_token_nonce(&token, "any-nonce").is_ok());
+    assert!(verify_id_token_nonce(&token, "any-nonce", false).is_ok());
 }
 
 #[test]
-fn verify_id_token_nonce_allows_unparseable_id_token() {
+fn verify_id_token_nonce_rejects_missing_nonce_claim_when_required() {
+    let mut token = valid_token("opaque-access-token");
+    token.id_token = Some(make_jwt(&json!({"email": "user@example.com"})));
+    let err = verify_id_token_nonce(&token, "any-nonce", true)
+        .expect_err("a missing nonce claim must be rejected when required");
+    let message = format!("{err}");
+    assert!(message.contains("nonce"), "unexpected message: {message}");
+}
+
+#[test]
+fn verify_id_token_nonce_rejects_unparseable_id_token() {
+    // A real OAuth server's id_token should always decode; one that doesn't
+    // is anomalous enough to reject rather than silently wave through —
+    // regardless of require_nonce, which only governs an absent claim.
     let mut token = valid_token("opaque-access-token");
     token.id_token = Some("not-a-jwt".to_owned());
-    assert!(verify_id_token_nonce(&token, "any-nonce").is_ok());
+    assert!(verify_id_token_nonce(&token, "any-nonce", false).is_err());
+    assert!(verify_id_token_nonce(&token, "any-nonce", true).is_err());
 }
 
 #[test]
@@ -686,6 +704,16 @@ fn with_identity_claims_overrides_selection() {
     })));
     let credential = provider.build_credential("prod", &token);
     assert_eq!(credential.identity, "picked");
+}
+
+#[test]
+fn require_nonce_defaults_to_false() {
+    assert!(!test_provider().require_nonce);
+}
+
+#[test]
+fn with_required_nonce_sets_flag() {
+    assert!(test_provider().with_required_nonce().require_nonce);
 }
 
 /// In-memory [`CredentialStorage`] double: lets us assert the provider

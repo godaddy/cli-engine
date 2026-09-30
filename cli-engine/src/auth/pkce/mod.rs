@@ -236,6 +236,9 @@ pub struct PkceAuthProvider {
     /// Scope implication relationships from [`PkceAuthProvider::with_scope_hierarchy`].
     /// Empty by default, which preserves exact-string scope matching.
     scope_hierarchy: ScopeHierarchy,
+    /// Whether an id_token with no `nonce` claim at all is rejected outright.
+    /// `false` by default — see [`PkceAuthProvider::with_required_nonce`].
+    require_nonce: bool,
 }
 
 /// Default prioritized claim names for deriving a human-readable identity.
@@ -279,6 +282,7 @@ impl PkceAuthProvider {
                 .collect(),
             cache: Arc::new(RwLock::new(HashMap::new())),
             scope_hierarchy: ScopeHierarchy::new(),
+            require_nonce: false,
         }
     }
 
@@ -475,6 +479,21 @@ impl PkceAuthProvider {
         self
     }
 
+    /// Rejects a returned id_token that has no `nonce` claim at all, instead
+    /// of the default of waving it through.
+    ///
+    /// Off by default: not every IdP echoes `nonce` back on the id_token, and
+    /// without confirming this one does, turning it on risks a hard failure
+    /// on every login rather than closing a real gap. Turn this on once
+    /// you've confirmed the IdP you're talking to reliably includes it — an
+    /// actual nonce *mismatch* is always rejected regardless of this setting;
+    /// this only controls what happens when the claim is absent entirely.
+    #[must_use]
+    pub fn with_required_nonce(mut self) -> Self {
+        self.require_nonce = true;
+        self
+    }
+
     /// Builds a [`Credential`] from a stored token, deriving `identity` and `sub`
     /// from the access-token JWT claims when present.
     fn build_credential(&self, env: &str, token: &StoredToken) -> Credential {
@@ -611,8 +630,17 @@ impl PkceAuthProvider {
     /// taken, so it can't differ). For [`RedirectPort::Ephemeral`] — or a
     /// `with_redirect_uri` that itself names port `0` — it's the only way to
     /// learn the port at all.
+    ///
+    /// Whenever the bound port matches what was requested, an explicit
+    /// [`with_redirect_uri`](Self::with_redirect_uri) override is returned
+    /// **verbatim**, byte-for-byte, rather than re-serialized from the parsed
+    /// `Url` — re-serializing can silently rewrite it (an empty path becomes
+    /// `/`, an explicit port matching the scheme's default gets dropped),
+    /// and OAuth servers commonly match `redirect_uri` exactly, so a rewrite
+    /// the caller never asked for can turn a previously-working
+    /// configuration into an `invalid_grant`/`invalid_request` failure.
     fn bind_callback_listener(&self) -> Result<(TcpListener, String, String)> {
-        let (mut redirect_url, requested_port) = self.redirect_url_template()?;
+        let (redirect_url, requested_port) = self.redirect_url_template()?;
 
         let listener =
             TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], requested_port)))
@@ -628,6 +656,14 @@ impl PkceAuthProvider {
             })?
             .port();
 
+        if let Some(uri) = &self.redirect_uri
+            && actual_port == requested_port
+        {
+            let callback_path = redirect_url.path().to_owned();
+            return Ok((listener, uri.clone(), callback_path));
+        }
+
+        let mut redirect_url = redirect_url;
         redirect_url.set_port(Some(actual_port)).map_err(|()| {
             CliCoreError::message(format!("redirect URI '{redirect_url}' cannot carry a port"))
         })?;
@@ -789,7 +825,7 @@ impl PkceAuthProvider {
         let token = self
             .exchange_code_for_token(&oauth, &code, &code_verifier, &redirect_uri, scopes)
             .await?;
-        verify_id_token_nonce(&token, &nonce)?;
+        verify_id_token_nonce(&token, &nonce, self.require_nonce)?;
         emit_auth_complete_message();
         Ok(token)
     }

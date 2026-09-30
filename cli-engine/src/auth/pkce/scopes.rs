@@ -44,24 +44,43 @@ pub(super) fn decode_jwt_claims(token: &str) -> Option<Map<String, Value>> {
 /// (not done here; see [`decode_jwt_claims`]'s doc), but this still catches a
 /// genuine mismatch from a token that was issued for a different request.
 ///
-/// Degrades gracefully like [`scopes_from_jwt`]: no id_token, an
-/// undecodable id_token, or an id_token with no `nonce` claim at all (an IdP
-/// that doesn't echo it) are all treated as "nothing to check" rather than an
-/// error — only an actual mismatch is rejected.
-pub(super) fn verify_id_token_nonce(token: &StoredToken, expected_nonce: &str) -> Result<()> {
+/// No id_token at all is always "nothing to check" (non-OIDC providers never
+/// send one). An id_token that's present but fails to even decode is
+/// rejected outright — a real OAuth server's response should always decode,
+/// so one that doesn't is anomalous enough not to wave through. Whether an
+/// id_token that decodes but has no `nonce` claim at all (an IdP that
+/// doesn't echo it) is rejected or waved through like [`scopes_from_jwt`]
+/// depends on `require_nonce` (see
+/// [`PkceAuthProvider::with_required_nonce`](super::PkceAuthProvider::with_required_nonce));
+/// an actual mismatch is always rejected regardless of `require_nonce`.
+pub(super) fn verify_id_token_nonce(
+    token: &StoredToken,
+    expected_nonce: &str,
+    require_nonce: bool,
+) -> Result<()> {
     let Some(id_token) = token.id_token.as_deref() else {
         return Ok(());
     };
     let Some(claims) = decode_jwt_claims(id_token) else {
-        return Ok(());
+        return Err(CliCoreError::message(
+            "id_token could not be decoded to verify its nonce — rejecting token",
+        ));
     };
-    match claims.get("nonce").and_then(Value::as_str) {
-        None | Some("") => Ok(()),
+    let nonce_claim = claims
+        .get("nonce")
+        .and_then(Value::as_str)
+        .filter(|nonce| !nonce.is_empty());
+    match nonce_claim {
         Some(actual) if actual == expected_nonce => Ok(()),
         Some(_) => Err(CliCoreError::message(
             "id_token nonce did not match this authorization request — rejecting token \
              (possible substitution/replay)",
         )),
+        None if require_nonce => Err(CliCoreError::message(
+            "id_token has no nonce claim and strict nonce validation is enabled (see \
+             PkceAuthProvider::with_required_nonce) — rejecting token",
+        )),
+        None => Ok(()),
     }
 }
 
