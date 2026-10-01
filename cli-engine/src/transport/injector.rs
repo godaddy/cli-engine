@@ -15,6 +15,8 @@ pub type TokenFunc =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
 
 #[async_trait::async_trait]
+// See the matching `#[allow]` on `AuthProvider` in `auth/mod.rs` for why.
+#[allow(clippy::double_must_use)]
 /// Mutates an outbound request with authentication material.
 pub trait AuthInjector: Send + Sync + std::fmt::Debug {
     /// Adds auth headers or cookies to `request`.

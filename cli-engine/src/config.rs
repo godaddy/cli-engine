@@ -4,7 +4,7 @@
 //! `<config-base>/<app_id>/config.toml`, where `<config-base>` is
 //! `$XDG_CONFIG_HOME`, `$HOME/Library/Application Support` (macOS),
 //! `$HOME/.config` (other Unix), or `%APPDATA%` (Windows) (see
-//! [`config_base_dir`](crate::fs::config_base_dir)).
+//! [`crate::fs::config_base_dir`]).
 //! Loading is best-effort: a missing file yields defaults, and a malformed file
 //! logs a warning and falls back to defaults rather than failing the command.
 //!
@@ -32,7 +32,7 @@
 //!   [`crate::flags::resolve_default_output_format`].
 //!
 //! where `${PREFIX}` is the app id sanitized by
-//! [`app_id_env_prefix`](crate::flags::app_id_env_prefix).
+//! [`crate::flags::app_id_env_prefix`].
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -252,19 +252,14 @@ pub fn load(app_id: &str) -> EngineConfig {
 /// cli-engine reads a single TOML file at `<config-base>/<app_id>/config.toml`
 /// (see [`config_file_path`]). Engine-reserved settings live in documented
 /// top-level tables (today just `[credentials]`, see [`EngineConfig`]); consumer
-/// CLIs own every other top-level table and read them with [`section`] or
-/// [`deserialize`]. The file is also surfaced to command handlers via
-/// [`CommandContext::config`](crate::command::CommandContext::config) and to
+/// CLIs own every other top-level table and read them with [`ConfigFile::section`]
+/// or [`ConfigFile::deserialize`]. The file is also surfaced to command handlers via
+/// [`crate::command::CommandContext::config`] and to
 /// module registration via
-/// [`ModuleContext::config`](crate::module::ModuleContext::config).
+/// [`crate::module::ModuleContext::config`].
 ///
-/// Edits made with [`set`] preserve existing comments and formatting (backed by
-/// `toml_edit`) and are persisted with [`save`].
-///
-/// [`section`]: ConfigFile::section
-/// [`deserialize`]: ConfigFile::deserialize
-/// [`set`]: ConfigFile::set
-/// [`save`]: ConfigFile::save
+/// Edits made with [`ConfigFile::set`] preserve existing comments and formatting
+/// (backed by `toml_edit`) and are persisted with [`ConfigFile::save`].
 #[derive(Clone, Debug)]
 pub struct ConfigFile {
     path: Option<PathBuf>,
