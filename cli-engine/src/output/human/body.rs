@@ -178,9 +178,18 @@ pub(crate) fn render_array_with_columns(
         .map(|index| columns[index].header.clone())
         .collect::<Vec<_>>();
     let columns: Vec<TableColumn> = kept.iter().map(|&index| columns[index].clone()).collect();
+    // Each row is already owned here, so move the kept cells out instead of
+    // cloning them — a large response's row data would otherwise be
+    // temporarily duplicated in full just to narrow down to `kept`.
     let rows: Vec<Vec<String>> = rows
         .into_iter()
-        .map(|row| kept.iter().map(|&index| row[index].clone()).collect())
+        .map(|row| {
+            row.into_iter()
+                .enumerate()
+                .filter(|(index, _)| kept.contains(index))
+                .map(|(_, value)| value)
+                .collect()
+        })
         .collect();
 
     let table = render_table(

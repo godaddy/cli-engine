@@ -626,7 +626,7 @@ Human output is designed for readable terminal display:
 - `TableColumn::nested(columns)` opts a column into rendering its value as an indented child table (when the value is a list of objects) or an indented child property bag (when it's a single object), instead of the raw-JSON fallback every other column gets. It's a strict opt-in: a column with no `.nested(...)` renders exactly as before even if its runtime value happens to be list/object shaped. Nesting only applies inside an object's property bag — a row cell inside an array-of-objects table always renders as a single flat value, since a table row is one monospace line and can't itself contain a rendered sub-block. A nested child's own columns may set `.nested(...)` again for a grandchild table or property bag; the width budget and hide-before-truncate behavior below apply to every nesting level, narrowed by two spaces of indent per level.
 - Hiding and truncation are convenience behaviors reserved for a *default* view — declared column order with no `--fields`, or a command's `default_fields` — because cli-engine, not the user, picked that field set, so it's also free to trim it back down to whatever fits. When the terminal is too narrow for every column in a default view, hiding a column is preferred over truncating a cell: the lowest-priority (trailing) non-essential columns — see "Column order is priority" below — are hidden one at a time until the survivors fit in full, or only one column remains. A footer names whatever got hidden and suggests `--fields`/`--json`. A similar footer appears if a cell still had to be shortened (only possible once hiding can't help further — e.g. a single remaining non-essential column whose value alone exceeds the display width). When the narrowing happened inside a `TableColumn::nested` column's own child table or property bag, the footer suggests only `--json` — `--fields` selects among top-level declared columns and can drop a nested column entirely, but can't narrow what's shown inside one.
 - `TableColumn::essential(true)` exempts a column from both hiding and truncation for width, even if it alone exceeds the terminal — use it for a column a default view is useless without, e.g. a DNS record list needs `type`/`name`/`data` at minimum to mean anything. If every remaining column ends up essential and they still don't fit together, the row simply overflows the terminal rather than losing or shortening any of them. An essential column can still be dropped entirely by an explicit `--fields` selection that simply omits it — `essential` only governs the default view's trimming, not what the user explicitly asked to see.
-- An *explicit* `--fields` (as opposed to a command's `default_fields` fallback) disables hiding and truncation altogether for the columns it selects, regardless of their `essential` flag: the user named exactly what they want to see, so it's no longer cli-engine's call whether that fits — every selected column renders at full natural width, and the row overflows the terminal if it must. This makes `essential` purely a default-view concern; once the user has typed `--fields`, the whole selection already behaves as if every column in it were essential.
+- An *explicit* `--fields` (as opposed to a command's `default_fields` fallback) disables terminal-width-driven hiding and shrinking altogether for the columns it selects, regardless of their `essential` flag: the user named exactly what they want to see, so it's no longer cli-engine's call whether that fits — every selected column renders at its natural width, and the row overflows the terminal if it must. The `NO_TRUNCATE_MAX_WIDTH` pathological-value safety cap still applies underneath that, same as for an `essential` or `no_truncate` column — a value past that cap is still shortened, just never for terminal-width reasons. This makes `essential` purely a default-view concern; once the user has typed `--fields`, the whole selection already behaves as if every column in it were essential.
 
 Views can be assigned to commands. There are two ways to do it.
 
@@ -698,6 +698,30 @@ Column order is a priority order, most important first — put the column a read
 A view's *declared* order is only the fallback, though: whenever `--fields`/`default_fields` gives an explicit selection, that order wins instead — for both display and hide-priority — the same way for a view or a no-view command. `--fields` (defaulting to the command's `default_fields`) selects which fields appear and in what order: which of a view's declared columns show (a field the view doesn't declare never appears, no matter what `--fields` says — the view is a closed, complete set), or which JSON fields show when there's no view (open — whatever's named, or present, shows). So a command with a view of `id`/`name`/`status` columns and `default_fields = "id,name"` shows just those two by default, in that order; `--fields status,id` shows `status` before `id`; `--fields all` shows every declared column in its declared order. A custom view renderer receives the full payload and ignores field selection.
 
 A user-typed `--fields` (not the `default_fields` fallback) additionally disables width-based hiding and truncation for the columns it selects: the user asked for exactly these fields, so the engine won't second-guess that by dropping or shortening one for width — the row overflows the terminal instead if it has to. `default_fields` carries no such guarantee — it's cli-engine's assumed sensible default, not something the user asked for, so hiding and truncation still apply to it the same as to a view's full declared order.
+
+### Testing a view
+
+Human rendering happens automatically: a command handler returns data, middleware builds the `Envelope`, and the engine picks JSON/human/TOON based on `--output`. A command module never calls a renderer itself in production code.
+
+To check that a `TableColumn` list renders sensibly against fixture data — column order, alignment, truncation, nested tables — without running the whole CLI (auth, args, a live handler) or hand-building an `Envelope`, use `preview_human_view(data, columns)`:
+
+```rust
+use cli_engine::{TableColumn, preview_human_view};
+use serde_json::json;
+
+let columns = vec![
+    TableColumn::new("name", "Name"),
+    TableColumn::new("status", "Status"),
+];
+let rendered = preview_human_view(
+    json!([{ "name": "alpha", "status": "active" }]),
+    &columns,
+);
+assert!(rendered.starts_with("NAME"));
+assert!(rendered.contains("alpha"));
+```
+
+`preview_human_view` renders exactly as a default view would — no `--fields` simulation, normal width-based hiding/truncation — since that's how a view's own columns behave on their own. It's deliberately the only column-aware renderer cli-engine exposes publicly: the lower-level renderers it delegates to are free to keep changing shape as rendering behavior evolves (as happened when `essential` and explicit-`--fields` support were added) without that becoming a breaking change for every command module's tests.
 
 ## Guides
 

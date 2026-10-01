@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
+use serde::Serialize;
 use serde_json::Value;
 
 use super::Envelope;
@@ -310,38 +311,36 @@ pub fn global_human_view_registry_snapshot() -> HumanViewRegistry {
 
 /// Renders an envelope using generic human output.
 ///
-/// There's no field-selection concept at this entry point, so a no-view
-/// array/object falls back to alphabetical key order — use
-/// [`render_human_with_registry_selected`] when a `--fields`/`default_fields`
-/// value is available, so its order can drive column order too.
+/// There's no field-selection or `TableColumn` concept at this entry point,
+/// so an array/object falls back to alphabetical key order — use
+/// [`preview_human_view`] instead to test a view's own column order and
+/// width-fitting behavior against fixture data.
 #[must_use]
 pub fn render_human(envelope: &Envelope) -> String {
     render_human_with_view(envelope, None, "", false)
 }
 
-/// Renders an envelope using a human view registry.
-#[must_use]
-pub fn render_human_with_registry(envelope: &Envelope, registry: &HumanViewRegistry) -> String {
-    let system = envelope
-        .metadata
-        .as_ref()
-        .map(|metadata| metadata.system.as_str())
-        .unwrap_or_default();
-    render_human_with_registry_for_schema(envelope, registry, system)
-}
-
-/// Renders an envelope using registry entries for a specific schema id.
+/// Renders `data` through `columns` the way the engine's default human view
+/// would, without constructing an [`Envelope`] or running the CLI — the
+/// right-sized tool for a command module's own tests to check a
+/// [`TableColumn`] list renders sensibly (column order, alignment,
+/// truncation, nested tables) against fixture data.
 ///
-/// Shows every column of the registered view. Use
-/// [`render_human_with_registry_selected`] to narrow the columns to a field
-/// selection.
+/// This is intentionally the *only* entry point into column-aware human
+/// rendering exposed outside the crate: the lower-level renderers it
+/// delegates to are free to keep changing shape as rendering behavior
+/// evolves (as happened when `essential`/explicit-`--fields` support was
+/// added) without that becoming a breaking change for every command
+/// module's tests. It always renders as a default view would — no
+/// `--fields` selection, normal width-based hiding/truncation — since
+/// that's how a view's own columns render on their own; there's no next-
+/// steps footer or pagination summary either, since there's no `Envelope`
+/// carrying that data. Use [`render_human`] instead to test next-step/fix/
+/// error formatting at the envelope level.
 #[must_use]
-pub fn render_human_with_registry_for_schema(
-    envelope: &Envelope,
-    registry: &HumanViewRegistry,
-    schema_id: &str,
-) -> String {
-    render_human_with_registry_selected(envelope, registry, schema_id, "", false)
+pub fn preview_human_view(data: impl Serialize, columns: &[TableColumn]) -> String {
+    let envelope = Envelope::success(data, "");
+    render_human_with_view(&envelope, Some(columns), "", false)
 }
 
 /// Renders an envelope using a registered view, narrowed to `fields`.
@@ -356,8 +355,9 @@ pub fn render_human_with_registry_for_schema(
 /// it disables width-based column hiding *and* truncation entirely for the
 /// selected columns, since the user named exactly what they want to see; the
 /// row overflows the terminal rather than losing or shortening a column.
+/// `NO_TRUNCATE_MAX_WIDTH` still caps a pathologically long value either way.
 #[must_use]
-pub fn render_human_with_registry_selected(
+pub(crate) fn render_human_with_registry_selected(
     envelope: &Envelope,
     registry: &HumanViewRegistry,
     schema_id: &str,
@@ -412,8 +412,13 @@ fn select_columns(columns: &[TableColumn], fields: &str) -> Vec<TableColumn> {
 /// `columns` is `None`, to give the dynamically-derived, no-view column
 /// catalog the same field selection and order a view would have gotten. Pass
 /// `""` when no field-selection value is available.
+///
+/// `fields_explicit` carries the same meaning as in
+/// [`render_human_with_registry_selected`]: pass `true` only when `fields`
+/// came from a user-typed `--fields` flag, to disable width-based hiding and
+/// truncation for these columns.
 #[must_use]
-pub fn render_human_with_view(
+pub(crate) fn render_human_with_view(
     envelope: &Envelope,
     columns: Option<&[TableColumn]>,
     fields: &str,

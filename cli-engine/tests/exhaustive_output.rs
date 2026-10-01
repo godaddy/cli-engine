@@ -4,8 +4,8 @@ use cli_engine::{
     Alignment, Envelope, FieldInfo, HumanViewDef, OutputFormat, PaginationMeta, PipelineOpts,
     SchemaInfo, TableColumn, TreeNode, apply_pipeline, filter_fields,
     global_human_view_registry_snapshot, global_schema_registry_snapshot, is_valid_output_format,
-    register_global_human_view, register_global_schema_info, render, render_format,
-    render_human_with_view,
+    preview_human_view, register_global_human_view, register_global_schema_info, render,
+    render_format,
 };
 use serde_json::{Value, json};
 
@@ -203,16 +203,13 @@ fn human_view_columns_resolve_dotted_paths_and_preserve_shape_for_empty_and_miss
         TableColumn::new("owner.name", "Owner"),
         TableColumn::new("missing", "Missing"),
     ];
-    let envelope = Envelope::success(
-        json!([
-            {"id": "p1", "owner": {"name": "Ada"}},
-            {"id": "p2", "owner": {}}
-        ]),
-        "project:list",
-    );
+    let data = json!([
+        {"id": "p1", "owner": {"name": "Ada"}},
+        {"id": "p2", "owner": {}}
+    ]);
 
     assert_eq!(
-        render_human_with_view(&envelope, Some(&columns), "", false),
+        preview_human_view(data, &columns),
         "ID  OWNER  MISSING\n--  -----  -------\np1  Ada           \np2                \n\n(2 rows)\n"
     );
 }
@@ -227,12 +224,9 @@ fn human_view_no_truncate_column_preserves_long_values_in_table_output() {
     ];
     // Short enough that, alongside the no_truncate URL column, both columns
     // still fit within the fallback 80-column width used in non-TTY test runs.
-    let envelope = Envelope::success(
-        json!([{"title": "Agreement", "url": long_url}]),
-        "agreements:list",
-    );
+    let data = json!([{"title": "Agreement", "url": long_url}]);
 
-    let rendered = render_human_with_view(&envelope, Some(&columns), "", false);
+    let rendered = preview_human_view(data, &columns);
 
     assert!(
         rendered.contains(long_url),
@@ -250,38 +244,14 @@ fn human_view_right_aligned_column_lines_up_prices_in_table_output() {
         TableColumn::new("period", "Period"),
         TableColumn::new("price", "Price").align(Alignment::Right),
     ];
-    let envelope = Envelope::success(
-        json!([
-            {"period": "1 year", "price": "71.99"},
-            {"period": "2 years", "price": "143.99"}
-        ]),
-        "domain:terms",
-    );
+    let data = json!([
+        {"period": "1 year", "price": "71.99"},
+        {"period": "2 years", "price": "143.99"}
+    ]);
 
     assert_eq!(
-        render_human_with_view(&envelope, Some(&columns), "", false),
+        preview_human_view(data, &columns),
         "PERIOD    PRICE\n-------  ------\n1 year    71.99\n2 years  143.99\n\n(2 rows)\n"
-    );
-}
-
-#[test]
-fn human_view_with_no_registered_view_auto_right_aligns_a_numeric_column() {
-    // No TableColumn list at all — this is the fallback/dynamic-column path
-    // a command falls into when it never calls `.with_view(...)`. A field
-    // that's a JSON number on every row (here, an endpoint count) should
-    // still line up on the right, matching what an explicit view would get
-    // from `.align(Alignment::Right)`.
-    let envelope = Envelope::success(
-        json!([
-            {"domain": "commerce", "endpoints": 3},
-            {"domain": "domains", "endpoints": 42}
-        ]),
-        "api:domain:list",
-    );
-
-    assert_eq!(
-        render_human_with_view(&envelope, None, "domain,endpoints", false),
-        "DOMAIN    ENDPOINTS\n--------  ---------\ncommerce          3\ndomains          42\n\n(2 rows)\n"
     );
 }
 

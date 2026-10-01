@@ -24,14 +24,13 @@ pub use envelope::{
 };
 pub(crate) use fields::project_fields;
 pub use fields::{FieldTree, filter_fields, parse_fields};
-pub(crate) use human::terminal_width;
 pub use human::{
     Alignment, HumanViewDef, HumanViewFn, HumanViewRegistry, HumanViewRenderer, TableColumn,
     global_human_view_registry_snapshot, lookup_global_human_view_columns,
-    lookup_global_human_view_func, register_global_human_view, register_global_human_view_func,
-    render_human, render_human_with_registry, render_human_with_registry_for_schema,
-    render_human_with_registry_selected, render_human_with_view,
+    lookup_global_human_view_func, preview_human_view, register_global_human_view,
+    register_global_human_view_func, render_human,
 };
+pub(crate) use human::{render_human_with_registry_selected, terminal_width};
 pub use json::render_json;
 pub(crate) use pipeline::unknown_fields_message;
 pub use pipeline::{PipelineOpts, apply_pipeline};
