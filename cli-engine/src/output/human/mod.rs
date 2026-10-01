@@ -39,21 +39,12 @@ pub enum Alignment {
 ///
 /// Column order is a priority order, most important first: table rendering
 /// keeps this order on screen, and when the terminal is too narrow to show
-/// every column, the lowest-priority (trailing) columns are hidden first. Put
-/// the column a reader most needs — usually an id or name — first.
+/// every column, the lowest-priority (trailing) non-essential columns are
+/// hidden first — see [`essential`](TableColumn::essential) for a way to
+/// exempt a column from hiding entirely. Put the column a reader most
+/// needs — usually an id or name — first.
 ///
-/// This declared order is only the *fallback* — whenever a `--fields`/
-/// `default_fields` selection is given, its order wins instead (see
-/// [`crate::output::render_human_with_registry_selected`]), for both display
-/// and hide-priority. Declared order only governs output when no selection is
-/// given at all.
-///
-/// Construct with [`TableColumn::new`], then chain builder methods like
-/// [`no_truncate`](TableColumn::no_truncate)/[`nested`](TableColumn::nested)
-/// — never as a struct literal. No known consumer constructs `TableColumn`
-/// via struct literal, so marking it `#[non_exhaustive]` carries no real
-/// breaking impact today; going forward it means the engine can add fields
-/// (as it did for `nested`) without that becoming a breaking release either.
+/// Construct with [`TableColumn::new`], then modify with builder methods.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct TableColumn {
@@ -71,6 +62,10 @@ pub struct TableColumn {
     /// values). Use this for values that are useless when cut short, such as
     /// URLs.
     pub no_truncate: bool,
+    /// When true, this column is never hidden *or* shrunk to fit the
+    /// terminal width, even if there isn't room for it — see
+    /// [`TableColumn::essential`].
+    pub essential: bool,
     /// When set, and the resolved value is list-of-objects or object shaped,
     /// this column renders as an indented child table or child property bag
     /// instead of a one-line dump — see [`TableColumn::nested`]. `None` (the
@@ -89,6 +84,7 @@ impl TableColumn {
             field: field.into(),
             header: header.into(),
             no_truncate: false,
+            essential: false,
             nested: None,
             align: Alignment::Left,
         }
@@ -99,6 +95,19 @@ impl TableColumn {
     #[must_use]
     pub fn no_truncate(mut self, value: bool) -> Self {
         self.no_truncate = value;
+        self
+    }
+
+    /// Marks this column as never hidden *or* shrunk to fit the terminal
+    /// width, even when the terminal is too narrow for it alongside the
+    /// other surviving columns (still capped at `NO_TRUNCATE_MAX_WIDTH` to
+    /// bound pathologically long values). Use this for a column a view is
+    /// useless without. If every remaining column is essential and they still
+    /// don't fit together, the row overflows the terminal rather than losing or
+    /// shortening any of them.
+    #[must_use]
+    pub fn essential(mut self, value: bool) -> Self {
+        self.essential = value;
         self
     }
 
@@ -307,7 +316,7 @@ pub fn global_human_view_registry_snapshot() -> HumanViewRegistry {
 /// value is available, so its order can drive column order too.
 #[must_use]
 pub fn render_human(envelope: &Envelope) -> String {
-    render_human_with_view(envelope, None, "")
+    render_human_with_view(envelope, None, "", false)
 }
 
 /// Renders an envelope using a human view registry.
@@ -332,7 +341,7 @@ pub fn render_human_with_registry_for_schema(
     registry: &HumanViewRegistry,
     schema_id: &str,
 ) -> String {
-    render_human_with_registry_selected(envelope, registry, schema_id, "")
+    render_human_with_registry_selected(envelope, registry, schema_id, "", false)
 }
 
 /// Renders an envelope using a registered view, narrowed to `fields`.
@@ -341,12 +350,19 @@ pub fn render_human_with_registry_for_schema(
 /// string, `all`, or `*` keeps every column; otherwise only the view columns
 /// whose `field` is listed are shown. A custom view renderer receives the full
 /// data and ignores `fields`.
+///
+/// `fields_explicit` should be `true` only when `fields` came from a user-
+/// typed `--fields` flag rather than a command's `default_fields` fallback —
+/// it disables width-based column hiding *and* truncation entirely for the
+/// selected columns, since the user named exactly what they want to see; the
+/// row overflows the terminal rather than losing or shortening a column.
 #[must_use]
 pub fn render_human_with_registry_selected(
     envelope: &Envelope,
     registry: &HumanViewRegistry,
     schema_id: &str,
     fields: &str,
+    fields_explicit: bool,
 ) -> String {
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
@@ -361,9 +377,9 @@ pub fn render_human_with_registry_selected(
     match registry.columns(schema_id) {
         Some(columns) => {
             let selected = select_columns(columns, fields);
-            render_human_with_view(envelope, Some(&selected), fields)
+            render_human_with_view(envelope, Some(&selected), fields, fields_explicit)
         }
-        None => render_human_with_view(envelope, None, fields),
+        None => render_human_with_view(envelope, None, fields, fields_explicit),
     }
 }
 
@@ -401,6 +417,7 @@ pub fn render_human_with_view(
     envelope: &Envelope,
     columns: Option<&[TableColumn]>,
     fields: &str,
+    fields_explicit: bool,
 ) -> String {
     // Errors render on their own; success output gets the data body plus, when
     // present, a "Next steps:" footer built from the envelope's next_actions
@@ -423,6 +440,7 @@ pub fn render_human_with_view(
             fields,
             available_width,
             envelope.pagination.as_ref(),
+            fields_explicit,
         ),
     };
     // Footers are appended in place: the common no-footer path leaves `body`

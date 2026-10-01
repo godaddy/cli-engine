@@ -16,7 +16,7 @@ fn custom_human_output_appends_next_steps_footer() {
             .with_param("cart-id", NextActionParam::value("cart-1")),
         ]);
 
-    let out = render_human_with_registry_selected(&envelope, &registry, "shopping-cart", "");
+    let out = render_human_with_registry_selected(&envelope, &registry, "shopping-cart", "", false);
 
     assert!(out.starts_with("Cart: ready\n"), "{out}");
     assert!(out.contains("\nNext steps:\n"), "{out}");
