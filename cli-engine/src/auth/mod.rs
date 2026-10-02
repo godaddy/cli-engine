@@ -85,11 +85,14 @@ impl<'req> CredentialRequest<'req> {
     }
 }
 
-#[async_trait]
 /// Named auth provider used by middleware and transport injectors.
 ///
 /// Implementations own their credential cache strategy. The framework only
 /// routes calls and passes command context (`env`, colon command path, and tier).
+// async_trait's expansion attaches a bare `#[must_use]` to each generated
+// method, duplicating the one already implied by `Result`.
+#[allow(clippy::double_must_use)]
+#[async_trait]
 pub trait AuthProvider: Send + Sync + std::fmt::Debug {
     /// Stable provider registration name, for example `primary` or `oauth`.
     fn name(&self) -> &str;

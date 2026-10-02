@@ -14,8 +14,11 @@ use crate::{AuthProvider, CliCoreError, Result};
 pub type TokenFunc =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String>> + Send>> + Send + Sync>;
 
-#[async_trait::async_trait]
 /// Mutates an outbound request with authentication material.
+// async_trait's expansion attaches a bare `#[must_use]` to each generated
+// method, duplicating the one already implied by `Result`.
+#[allow(clippy::double_must_use)]
+#[async_trait::async_trait]
 pub trait AuthInjector: Send + Sync + std::fmt::Debug {
     /// Adds auth headers or cookies to `request`.
     async fn inject(&self, request: &mut reqwest::Request) -> Result<()>;

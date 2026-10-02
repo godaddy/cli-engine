@@ -380,7 +380,6 @@ fn identity_key(credential: &Credential) -> &str {
     }
 }
 
-#[async_trait]
 /// Authorization hook called before business logic.
 ///
 /// The authorizer receives a [`CredentialResolver`] rather than an
@@ -388,6 +387,10 @@ fn identity_key(credential: &Credential) -> &str {
 /// does not need identity never triggers a credential/auth flow. Call
 /// [`CredentialResolver::try_resolve`] only when a decision actually depends on
 /// the credential.
+// async_trait's expansion attaches a bare `#[must_use]` to each generated
+// method, duplicating the one already implied by `Result`.
+#[allow(clippy::double_must_use)]
+#[async_trait]
 pub trait Authorizer: Send + Sync + std::fmt::Debug {
     /// Verifies whether `command_path` may run with the provided args, reason, and tier.
     async fn authorize(
@@ -400,8 +403,11 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
     ) -> Result<()>;
 }
 
-#[async_trait]
 /// Audit hook called for success, error, denied, auth-error, and dry-run outcomes.
+// async_trait's expansion attaches a bare `#[must_use]` to each generated
+// method, duplicating the one already implied by `Result`.
+#[allow(clippy::double_must_use)]
+#[async_trait]
 pub trait Auditor: Send + Sync + std::fmt::Debug {
     /// Appends an audit record.
     async fn append(
@@ -414,8 +420,11 @@ pub trait Auditor: Send + Sync + std::fmt::Debug {
     ) -> Result<()>;
 }
 
-#[async_trait]
 /// Activity hook for structured command lifecycle events.
+// async_trait's expansion attaches a bare `#[must_use]` to each generated
+// method, duplicating the one already implied by `Result`.
+#[allow(clippy::double_must_use)]
+#[async_trait]
 pub trait ActivityEmitter: Send + Sync + std::fmt::Debug {
     /// Emits one completed command event.
     async fn emit(&self, event: ActivityEvent) -> Result<()>;

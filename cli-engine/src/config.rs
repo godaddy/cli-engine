@@ -32,7 +32,7 @@
 //!   [`crate::flags::resolve_default_output_format`].
 //!
 //! where `${PREFIX}` is the app id sanitized by
-//! [`app_id_env_prefix`](crate::flags::app_id_env_prefix).
+//! [`crate::flags::app_id_env_prefix`].
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
