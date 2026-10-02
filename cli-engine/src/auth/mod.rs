@@ -86,6 +86,12 @@ impl<'req> CredentialRequest<'req> {
 }
 
 #[async_trait]
+// `async_trait` wraps each method's return type in a boxed `Future` carrying
+// a bare `#[must_use]` (no reason) — clippy's `double_must_use` then flags it
+// as redundant on top of the already-`#[must_use]` `Result`/`Option` methods
+// return. The macro's generated code isn't ours to annotate, so silence it
+// here instead.
+#[allow(clippy::double_must_use)]
 /// Named auth provider used by middleware and transport injectors.
 ///
 /// Implementations own their credential cache strategy. The framework only

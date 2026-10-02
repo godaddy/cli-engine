@@ -381,6 +381,11 @@ fn identity_key(credential: &Credential) -> &str {
 }
 
 #[async_trait]
+// See the matching `#[allow]` on `AuthProvider` in `auth/mod.rs` for why:
+// `async_trait`'s generated boxed-`Future` wrapper carries a bare
+// `#[must_use]` that clippy's `double_must_use` flags as redundant on top of
+// the already-`#[must_use]` types these methods return.
+#[allow(clippy::double_must_use)]
 /// Authorization hook called before business logic.
 ///
 /// The authorizer receives a [`CredentialResolver`] rather than an
@@ -401,6 +406,8 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
 }
 
 #[async_trait]
+// See the matching `#[allow]` on `AuthProvider` in `auth/mod.rs` for why.
+#[allow(clippy::double_must_use)]
 /// Audit hook called for success, error, denied, auth-error, and dry-run outcomes.
 pub trait Auditor: Send + Sync + std::fmt::Debug {
     /// Appends an audit record.
@@ -415,6 +422,8 @@ pub trait Auditor: Send + Sync + std::fmt::Debug {
 }
 
 #[async_trait]
+// See the matching `#[allow]` on `AuthProvider` in `auth/mod.rs` for why.
+#[allow(clippy::double_must_use)]
 /// Activity hook for structured command lifecycle events.
 pub trait ActivityEmitter: Send + Sync + std::fmt::Debug {
     /// Emits one completed command event.

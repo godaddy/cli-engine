@@ -60,6 +60,11 @@ impl<'key> CredentialKey<'key> {
 /// them, so it stays independent of any provider's token shape. Callers own
 /// (de)serialization and any validity/expiry checks.
 #[async_trait]
+// See the matching `#[allow]` on `AuthProvider` in `auth/mod.rs` for why:
+// `async_trait`'s generated boxed-`Future` wrapper carries a bare
+// `#[must_use]` that clippy's `double_must_use` flags as redundant on top of
+// the already-`#[must_use]` types these methods return.
+#[allow(clippy::double_must_use)]
 pub trait CredentialStorage: Send + Sync + std::fmt::Debug {
     /// Loads the stored blob for `key`, or `None` when absent or unreadable.
     ///
