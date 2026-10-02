@@ -49,7 +49,7 @@ jobs:
       - name: Open pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 #v8.1.1
         with:
-          token: ${{ secrets.RUST_TOOLCHAIN_BUMP_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.AUTOMATED_PRS_TOKEN || secrets.GITHUB_TOKEN }}
           commit-message: "chore(rust): bump pinned toolchain to ${{ steps.latest.outputs.version }}"
           title: "chore(rust): bump pinned toolchain to ${{ steps.latest.outputs.version }}"
           body: |
