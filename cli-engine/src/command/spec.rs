@@ -115,13 +115,30 @@ pub struct CommandSpec {
     /// ancestor chain happens when a [`Cli`](crate::Cli) mounts the enclosing
     /// module or group.
     pub feature_flag: Option<FeatureFlag>,
-    /// This command's opt-in pagination policy, if any.
+    /// This command's opt-in offset-pagination policy, if any.
     ///
-    /// `None` (the default) means the command does not paginate: `--limit`/
-    /// `--offset` are not registered for it, so they neither show up in its
-    /// `--help` nor parse on its command line. Set with
+    /// `None` (the default) means this command doesn't register `--offset`
+    /// (and doesn't register `--limit` for the offset-pagination reading of
+    /// it) — but that alone doesn't mean the command has no `--limit` at
+    /// all: [`cursor`](CommandSpec::cursor) registers its own `--limit`
+    /// alongside `--continue`. A command has at most one of `pagination`/
+    /// `cursor` set (mutually exclusive, enforced at registration), so
+    /// exactly one of the two config docs describes any given `--limit`
+    /// that shows up in `--help`. Set with
     /// [`with_pagination`](CommandSpec::with_pagination).
     pub pagination: Option<PaginationConfig>,
+    /// This command's opt-in cursor-pagination policy, if any.
+    ///
+    /// `None` (the default) means this command doesn't register `--continue`
+    /// (and doesn't register `--limit` for the cursor-pagination reading of
+    /// it) — but that alone doesn't mean the command has no `--limit` at
+    /// all: [`pagination`](CommandSpec::pagination) registers its own
+    /// `--limit` alongside `--offset`. Same mutual-exclusivity note as
+    /// `pagination`. Set with [`with_cursor`](CommandSpec::with_cursor) for
+    /// a command backed by a server-maintained, forward-only cursor API,
+    /// where client-side offset slicing would cost O(N²) requests to page
+    /// through.
+    pub cursor: Option<CursorConfig>,
 }
 
 /// Opt-in pagination policy for a single command, set with
@@ -129,21 +146,22 @@ pub struct CommandSpec {
 ///
 /// Registering this is what makes `--limit`/`--offset` exist for a command at
 /// all — without it, the engine does not register those flags, so they are
-/// absent from `--help` and rejected as unknown arguments if passed. Construct
-/// it with `..Default::default()`, as in the example below, so a future
-/// engine release can add fields without breaking existing callers.
+/// absent from `--help` and rejected as unknown arguments if passed.
+///
+/// `#[non_exhaustive]`: construct via [`new`](PaginationConfig::new) — never as
+/// a struct literal, bare or with `..Default::default()` spread, since
+/// `#[non_exhaustive]` forbids struct-literal syntax entirely for a caller
+/// outside this crate — so a future engine release can add fields without
+/// breaking existing callers.
 ///
 /// ```
 /// use cli_engine::PaginationConfig;
 ///
-/// let pagination = PaginationConfig {
-///     default_limit: 20,
-///     max_limit: 100,
-///     ..Default::default()
-/// };
+/// let pagination = PaginationConfig::new(20, 100);
 /// assert_eq!(pagination.default_limit, 20);
 /// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PaginationConfig {
     /// Page size applied when the user passes neither `--limit` nor
     /// `--offset`. `0` (the default) means unlimited — the same "no
@@ -152,6 +170,65 @@ pub struct PaginationConfig {
     /// Upper bound a user can request with an explicit `--limit`. `0` (the
     /// default) means uncapped. Does not affect `default_limit` itself.
     pub max_limit: i64,
+}
+
+impl PaginationConfig {
+    /// Creates a pagination config with the given `default_limit` and `max_limit`.
+    #[must_use]
+    pub fn new(default_limit: i64, max_limit: i64) -> Self {
+        Self {
+            default_limit,
+            max_limit,
+        }
+    }
+}
+
+/// Opt-in cursor-pagination policy for a single command, set with
+/// [`CommandSpec::with_cursor`].
+///
+/// Registering this is what makes `--limit`/`--continue` exist for a command
+/// at all — without it, the engine does not register those flags, so they are
+/// absent from `--help` and rejected as unknown arguments if passed.
+///
+/// Unlike [`PaginationConfig`], `default_limit` must be greater than zero:
+/// there is no "unlimited" sentinel here, since `--limit` is a per-request
+/// page size sent to a backend, not a bound on an already-in-memory
+/// collection. Deliberately does not derive `Default` — unlike
+/// `PaginationConfig`, where `0` is itself a valid ("unlimited")
+/// `default_limit`, there is no valid all-zero `CursorConfig`, so both
+/// fields must always be given explicitly.
+///
+/// `#[non_exhaustive]`: construct via [`new`](CursorConfig::new) — never as a
+/// struct literal, since `#[non_exhaustive]` forbids struct-literal syntax
+/// entirely for a caller outside this crate — so a future engine release can
+/// add fields without breaking existing callers.
+///
+/// ```
+/// use cli_engine::CursorConfig;
+///
+/// let cursor = CursorConfig::new(25, 500);
+/// assert_eq!(cursor.default_limit, 25);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CursorConfig {
+    /// Page size sent to the backend when the user passes no `--limit`. Must
+    /// be greater than zero.
+    pub default_limit: i64,
+    /// Upper bound a user can request with an explicit `--limit`. `0` (the
+    /// default) means uncapped. Does not affect `default_limit` itself.
+    pub max_limit: i64,
+}
+
+impl CursorConfig {
+    /// Creates a cursor config with the given `default_limit` and `max_limit`.
+    #[must_use]
+    pub fn new(default_limit: i64, max_limit: i64) -> Self {
+        Self {
+            default_limit,
+            max_limit,
+        }
+    }
 }
 
 impl CommandSpec {
@@ -345,6 +422,43 @@ impl CommandSpec {
             config.max_limit
         );
         self.pagination = Some(config);
+        self
+    }
+
+    /// Opts this command into cursor-paginated list output.
+    ///
+    /// Registers `--limit`/`--continue` for this command only — a command
+    /// that never calls this does not get those flags at all, in `--help` or
+    /// on the command line. Prefer this over
+    /// [`with_pagination`](CommandSpec::with_pagination) when the backend API
+    /// is itself cursor-based (an opaque resume token, or a fixed page size
+    /// with no arbitrary-offset support): offset-based slicing against such
+    /// an API costs O(N²) requests to read N items, since every page fetch
+    /// starts over from the beginning. See [`CursorConfig`].
+    ///
+    /// Unlike offset pagination, the framework cannot compute `--continue`'s
+    /// next value itself — only the handler, which called the backend, knows
+    /// it. A cursor-aware handler reads the parsed `--limit`/`--continue` via
+    /// [`CommandContext::middleware`](crate::CommandContext)'s
+    /// `cursor_limit`/`continue_token` fields, and reports what it learned
+    /// back via
+    /// [`CommandResult::with_cursor`](crate::CommandResult::with_cursor).
+    #[must_use]
+    pub fn with_cursor(mut self, config: CursorConfig) -> Self {
+        debug_assert!(
+            config.default_limit > 0,
+            "command {:?} has a cursor default_limit ({}) that is not greater than zero",
+            self.name,
+            config.default_limit
+        );
+        debug_assert!(
+            config.max_limit == 0 || config.default_limit <= config.max_limit,
+            "command {:?} has a cursor default_limit ({}) greater than its max_limit ({})",
+            self.name,
+            config.default_limit,
+            config.max_limit
+        );
+        self.cursor = Some(config);
         self
     }
 

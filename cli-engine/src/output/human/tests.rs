@@ -114,7 +114,7 @@ fn no_truncate_column_keeps_long_values_intact() {
         TableColumn::new("title", "Title"),
     ];
 
-    let (out, notes) = render_array_with_columns(&items, &columns, 80, None);
+    let (out, notes) = render_array_with_columns(&items, &columns, 80, None, None);
 
     assert!(
         out.contains(long_url),
@@ -137,7 +137,7 @@ fn no_truncate_column_still_caps_pathologically_long_values() {
     let items = vec![json!({ "url": huge_value })];
     let columns = vec![TableColumn::new("url", "URL").no_truncate(true)];
 
-    let (out, _notes) = render_array_with_columns(&items, &columns, 80, None);
+    let (out, _notes) = render_array_with_columns(&items, &columns, 80, None, None);
 
     assert!(
         out.contains("..."),
@@ -160,7 +160,7 @@ fn right_aligned_column_pads_header_and_cells_on_the_left() {
         TableColumn::new("price", "Price").align(Alignment::Right),
     ];
 
-    let (out, _notes) = render_array_with_columns(&items, &columns, 80, None);
+    let (out, _notes) = render_array_with_columns(&items, &columns, 80, None, None);
     let mut lines = out.lines();
     let header_line = lines.next().expect("header line");
     let row_lines: Vec<&str> = lines.skip(1).take(2).collect();
@@ -179,7 +179,7 @@ fn column_alignment_defaults_to_left() {
     let items = vec![json!({ "name": "a" }), json!({ "name": "bb" })];
     let columns = vec![TableColumn::new("name", "Name")];
 
-    let (out, _notes) = render_array_with_columns(&items, &columns, 80, None);
+    let (out, _notes) = render_array_with_columns(&items, &columns, 80, None, None);
     let mut lines = out.lines();
     let header_line = lines.next().expect("header line");
 
@@ -197,7 +197,7 @@ fn column_width_never_shrinks_below_a_long_header() {
 
     // Deliberately far narrower than the header: the header must still
     // render in full even though the row ends up wider than the terminal.
-    let (out, _notes) = render_array_with_columns(&items, &columns, 10, None);
+    let (out, _notes) = render_array_with_columns(&items, &columns, 10, None, None);
     let header_line = out.lines().next().expect("header line");
     let separator_line = out.lines().nth(1).expect("separator line");
 
@@ -222,7 +222,7 @@ fn wide_terminal_shows_full_values_without_truncation() {
         TableColumn::new("description", "Description"),
     ];
 
-    let (out, notes) = render_array_with_columns(&items, &columns, 200, None);
+    let (out, notes) = render_array_with_columns(&items, &columns, 200, None, None);
 
     assert!(
         !notes.truncated,
@@ -243,7 +243,7 @@ fn narrow_terminal_truncates_and_reports_it() {
     let items = vec![json!({ "description": description })];
     let columns = vec![TableColumn::new("description", "Description")];
 
-    let (out, notes) = render_array_with_columns(&items, &columns, 20, None);
+    let (out, notes) = render_array_with_columns(&items, &columns, 20, None, None);
 
     assert!(
         notes.truncated,
@@ -269,7 +269,7 @@ fn narrow_terminal_hides_columns_before_truncating_any_of_the_survivors() {
         TableColumn::new("c", "C"),
     ];
 
-    let (out, notes) = render_array_with_columns(&items, &columns, 10, None);
+    let (out, notes) = render_array_with_columns(&items, &columns, 10, None, None);
 
     assert!(
         !notes.truncated,
@@ -298,7 +298,7 @@ fn overflow_hides_lowest_priority_columns_first() {
         TableColumn::new("created_at", "Created At"),
     ];
 
-    let (out, notes) = render_array_with_columns(&items, &columns, 10, None);
+    let (out, notes) = render_array_with_columns(&items, &columns, 10, None, None);
 
     assert_eq!(
         notes.hidden_columns,
@@ -425,7 +425,7 @@ fn no_view_array_rendering_right_aligns_a_column_that_is_numeric_on_every_row() 
         json!({ "name": "bigger", "count": 42 }),
     ];
 
-    let (out, _notes) = render_array(&items, "name,count", 80, None);
+    let (out, _notes) = render_array(&items, "name,count", 80, None, None);
     let mut lines = out.lines();
     let header_line = lines.next().expect("header line");
     let row_lines: Vec<&str> = lines.skip(1).take(2).collect();
@@ -443,7 +443,7 @@ fn no_view_array_rendering_keeps_a_mixed_type_column_left_aligned() {
     // matching how right-aligning it would look ragged next to text.
     let items = vec![json!({ "code": 1 }), json!({ "code": "default" })];
 
-    let (out, _notes) = render_array(&items, "", 80, None);
+    let (out, _notes) = render_array(&items, "", 80, None, None);
     let header_line = out.lines().next().expect("header line");
 
     assert!(header_line.starts_with("CODE"), "{header_line}");
@@ -455,7 +455,7 @@ fn no_view_array_rendering_keeps_an_all_null_column_left_aligned() {
     // signal to right-align on.
     let items = vec![json!({ "note": null }), json!({ "note": null })];
 
-    let (out, _notes) = render_array(&items, "", 80, None);
+    let (out, _notes) = render_array(&items, "", 80, None, None);
     let header_line = out.lines().next().expect("header line");
 
     assert!(header_line.starts_with("NOTE"), "{header_line}");
@@ -554,7 +554,7 @@ fn overflow_hiding_accounts_for_no_truncate_columns_true_width() {
 
     // Exactly enough room for the URL alone (40 chars), not enough for
     // the URL plus even a 1-char trailing column and its gutter (43).
-    let (out, notes) = render_array_with_columns(&items, &columns, 42, None);
+    let (out, notes) = render_array_with_columns(&items, &columns, 42, None, None);
 
     assert_eq!(
         notes.hidden_columns,
@@ -574,7 +574,7 @@ fn render_array_with_columns_handles_no_columns_gracefully() {
     // build a table from, so this must report "no results" rather than
     // a blank header/rows table.
     let items = vec![json!({ "a": "1" })];
-    let (out, notes) = render_array_with_columns(&items, &[], 80, None);
+    let (out, notes) = render_array_with_columns(&items, &[], 80, None, None);
 
     assert_eq!(out, "(no results)\n");
     assert!(!notes.truncated, "{out}");
@@ -602,7 +602,7 @@ fn no_view_array_of_empty_objects_reports_no_results() {
     // keys to derive columns from — same "no columns" case as above,
     // reached through the no-view path instead.
     let items = vec![json!({}), json!({})];
-    let (out, notes) = render_array(&items, "", 80, None);
+    let (out, notes) = render_array(&items, "", 80, None, None);
 
     assert_eq!(out, "(no results)\n");
     assert!(notes.hidden_columns.is_empty(), "{out}");

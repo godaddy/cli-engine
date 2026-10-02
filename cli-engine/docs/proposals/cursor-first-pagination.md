@@ -84,10 +84,7 @@ However, there is an important caveat. With Slicing- or Paging-based APIs that w
 ### `CommandSpec::with_cursor`
 
 ```rust
-CommandSpec::new("list", "List things").with_cursor(CursorConfig {
-    default_limit: 25,
-    max_limit: 500,
-})
+CommandSpec::new("list", "List things").with_cursor(CursorConfig::new(25, 500))
 ```
 
 Registers `--limit`/`--continue` the same way `with_pagination` registers
@@ -95,9 +92,9 @@ Registers `--limit`/`--continue` the same way `with_pagination` registers
 
 ### Envelope changes
 
-Today's `PaginationMeta { total, offset, limit, count, has_more }` assumes both `total` and `offset` are always known — true for a client-side slice, not guaranteed for a real cursor API that may never report a true count. The `.with_cursor` counterpart needs `total`/`offset` to become optional (present when an adapter can supply them, absent for a pure opaque cursor) and add `continue_from: Option<String>`.
+Today's `PaginationMeta { total, offset, limit, count, has_more }` assumes both `total` and `offset` are always known — true for a client-side slice, not guaranteed for a real cursor API that may never report a true count. `offset` itself has no cursor counterpart at all — there is no "skip N" concept for an opaque, forward-only token. The shipped `.with_cursor` counterpart is `CursorMeta { limit, count, total: Option<i64>, remaining: Option<i64>, continue_from: Option<String>, has_more, self_sufficient_limit }`: `total`/`remaining` are optional (present only when an adapter's backend reports them), and `self_sufficient_limit` records whether the handler's `continue_from` token already carries its own effective page size — see [concepts.md](../concepts.md#cursor-pagination) for the full contract.
 
-Human output changes correspondingly when a total is unknown: "Showing 25 items so far — run with `--continue <token>` for more" instead of "Showing 25 of 143 rows, offset 0, limit 25". When a total *is* available (some cursor backends do report one, and every client-side-slice command still knows its own total), the existing "N of M" phrasing still applies.
+Human output changes correspondingly when a total is unknown: "N rows so far; use --limit L --continue <token> for more" instead of "Showing 25 of 143 rows, offset 0, limit 25" (the `--limit` clause is omitted exactly when `self_sufficient_limit` is set). When a total *is* available (some cursor backends do report one, and every client-side-slice command still knows its own total), the existing "N of M" phrasing still applies.
 
 `next_actions` needs no new mechanism — it already replays every flag the user passed and appends an updated pagination flag; for a `.with_cursor` command it appends `--continue <token>`.
 

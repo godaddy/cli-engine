@@ -133,9 +133,9 @@ pub use cli::{
 };
 pub use command::{
     CommandContext, CommandFuture, CommandHandler, CommandResult, CommandResultMetadata,
-    CommandSpec, GroupSpec, PaginationConfig, RuntimeCommandSpec, RuntimeGroupSpec, StreamSender,
-    StreamingCommandFuture, StreamingCommandHandler, command_args_from_matches,
-    command_path_from_matches, command_path_from_parts, leaf_matches,
+    CommandSpec, CursorConfig, CursorContinuation, GroupSpec, PaginationConfig, RuntimeCommandSpec,
+    RuntimeGroupSpec, StreamSender, StreamingCommandFuture, StreamingCommandHandler,
+    command_args_from_matches, command_path_from_matches, command_path_from_parts, leaf_matches,
 };
 pub use config::{
     ConfigFile, CredentialStore, CredentialsConfig, EngineConfig, ParseCredentialStoreError,
@@ -164,18 +164,18 @@ pub use middleware::{
 };
 pub use module::{CommandModule, Module, ModuleContext, ModuleRegister, build_module_group};
 pub use output::{
-    Alignment, Envelope, ErrorEnvelope, FieldInfo, HumanViewDef, HumanViewFn, HumanViewRegistry,
-    HumanViewRenderer, Metadata, NextAction, NextActionParam, OutputField, OutputFormat,
-    OutputSchema, PaginationMeta, PipelineOpts, RendererFactory, SchemaInfo, SchemaRegistry,
-    TableColumn, apply_pipeline, build_detailed_error_envelope, build_error_envelope, fields_for,
-    fields_from_json_schema, filter_fields, format_help_section, get_global_schema_by_path,
-    global_human_view_registry_snapshot, global_schema_registry_snapshot, is_valid_output_format,
-    json_schema_for, json_schema_info, lookup_global_human_view_columns,
-    lookup_global_human_view_func, parse_fields, register_global_human_view,
-    register_global_human_view_func, register_global_json_schema, register_global_schema,
-    register_global_schema_fields, register_global_schema_info, render, render_data,
-    render_data_format, render_detailed_error, render_detailed_error_format, render_error,
-    render_error_format, render_format, render_human, render_human_with_registry,
+    Alignment, CursorMeta, Envelope, ErrorEnvelope, FieldInfo, HumanViewDef, HumanViewFn,
+    HumanViewRegistry, HumanViewRenderer, Metadata, NextAction, NextActionParam, OutputField,
+    OutputFormat, OutputSchema, PaginationMeta, PipelineOpts, RendererFactory, SchemaInfo,
+    SchemaRegistry, TableColumn, apply_pipeline, build_detailed_error_envelope,
+    build_error_envelope, fields_for, fields_from_json_schema, filter_fields, format_help_section,
+    get_global_schema_by_path, global_human_view_registry_snapshot,
+    global_schema_registry_snapshot, is_valid_output_format, json_schema_for, json_schema_info,
+    lookup_global_human_view_columns, lookup_global_human_view_func, parse_fields,
+    register_global_human_view, register_global_human_view_func, register_global_json_schema,
+    register_global_schema, register_global_schema_fields, register_global_schema_info, render,
+    render_data, render_data_format, render_detailed_error, render_detailed_error_format,
+    render_error, render_error_format, render_format, render_human, render_human_with_registry,
     render_human_with_registry_for_schema, render_human_with_registry_selected,
     render_human_with_view, render_json, render_toon, write_render,
 };

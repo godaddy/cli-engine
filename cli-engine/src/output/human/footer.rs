@@ -1,7 +1,8 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use super::RenderNotes;
-use crate::output::{NextAction, NextActionParam, PaginationMeta};
+use crate::cli::quote_pagination_value;
+use crate::output::{CursorMeta, NextAction, NextActionParam, PaginationMeta};
 
 /// Appends footer hints for truncated cells and/or hidden columns to `out`
 /// (a no-op when neither happened). Mirrors `append_next_actions`: writes
@@ -44,6 +45,100 @@ pub(super) fn append_render_notes(out: &mut String, notes: &RenderNotes) {
     }
 }
 
+/// Where a pagination/cursor summary clause is being rendered. The two
+/// contexts always describe the same underlying facts for the same case —
+/// only the wording differs, between a compact parenthetical merged into a
+/// table's row-count footer and a full standalone sentence for output that
+/// didn't render as a table. [`pagination_summary_text`]/
+/// [`cursor_summary_text`] hold both wordings for every case side by side in
+/// one place, so [`super::body::render_table`]'s footer and
+/// [`append_pagination_summary`]/[`append_cursor_summary`] can't drift apart
+/// from each other the way two independent `format!` call sites could.
+#[derive(Clone, Copy)]
+pub(super) enum SummaryStyle {
+    /// Merged into a table's row-count footer, e.g. `N of M rows`.
+    TableFooter,
+    /// A standalone sentence, e.g. `Showing N of M`.
+    Standalone,
+}
+
+/// Builds the offset-pagination summary clause for `count` shown items,
+/// worded for `style`. `count` takes anything `Display`s so callers can pass
+/// either a `usize` row count (`render_table`) or an `i64` shown count
+/// (`append_pagination_summary`) without a cast.
+pub(super) fn pagination_summary_text(
+    style: SummaryStyle,
+    count: impl std::fmt::Display,
+    pagination: &PaginationMeta,
+) -> String {
+    match style {
+        SummaryStyle::TableFooter => format!(
+            "{count} of {} rows, offset {}, limit {}",
+            pagination.total, pagination.offset, pagination.limit
+        ),
+        SummaryStyle::Standalone => format!(
+            "Showing {count} of {} (offset {}, limit {})",
+            pagination.total, pagination.offset, pagination.limit
+        ),
+    }
+}
+
+/// Builds the cursor-pagination summary clause for `count` shown items,
+/// worded for `style`. Unlike offset pagination, a `total` is not
+/// guaranteed — a pure opaque cursor may never report one — so this falls
+/// back to a "so far" phrasing naming the resume token, or a bare count when
+/// the backend reported nothing at all.
+pub(super) fn cursor_summary_text(
+    style: SummaryStyle,
+    count: impl std::fmt::Display,
+    cursor: &CursorMeta,
+) -> String {
+    match (style, cursor.total, cursor.remaining, &cursor.continue_from) {
+        (SummaryStyle::TableFooter, Some(total), _, _) => format!("{count} of {total} rows"),
+        (SummaryStyle::TableFooter, None, Some(remaining), _) => {
+            format!("{count} rows, {remaining} remaining")
+        }
+        (SummaryStyle::TableFooter, None, None, Some(token)) => {
+            format!(
+                "{count} rows so far; use {} for more",
+                resume_hint(cursor, token)
+            )
+        }
+        (SummaryStyle::TableFooter, None, None, None) => format!("{count} rows"),
+        (SummaryStyle::Standalone, Some(total), _, _) => format!("Showing {count} of {total}"),
+        (SummaryStyle::Standalone, None, Some(remaining), _) => {
+            format!("Showing {count} ({remaining} remaining)")
+        }
+        (SummaryStyle::Standalone, None, None, Some(token)) => {
+            format!(
+                "Showing {count} items so far; use {} for more",
+                resume_hint(cursor, token)
+            )
+        }
+        (SummaryStyle::Standalone, None, None, None) => format!("Showing {count}"),
+    }
+}
+
+/// Builds the `--limit N --continue <token>`/`--continue <token>` fragment
+/// for a cursor "so far" hint, matching exactly what the engine appends to
+/// `next_actions` for the same response (`middleware::run::render_envelope`):
+/// `--limit` is included unless `cursor.self_sufficient_limit` says the
+/// token alone already carries the effective page size. Copy-pasting this
+/// hint must produce the same command the machine-readable `next_actions`
+/// entry already suggests — including `--limit` when the token doesn't
+/// need it would print a fabricated size, but omitting it when the token
+/// truly doesn't carry one could resume at a different page size (or, if
+/// the handler's effective limit exceeds this command's own `max_limit`,
+/// print a `--limit` the parser would reject outright).
+fn resume_hint(cursor: &CursorMeta, token: &str) -> String {
+    let token = quote_pagination_value(token);
+    if cursor.self_sufficient_limit {
+        format!("--continue {token}")
+    } else {
+        format!("--limit {} --continue {token}", cursor.limit)
+    }
+}
+
 /// Appends a one-line pagination summary to `out` (a no-op when the response
 /// wasn't paginated). Unlike `next_actions`, this always shows the underlying
 /// facts even on the last page, where there's no follow-up command to
@@ -76,12 +171,47 @@ pub(super) fn append_pagination_summary(
     };
     match shown {
         Some(count) => out.push_str(&format!(
-            "\nShowing {count} of {} (offset {}, limit {})\n",
-            pagination.total, pagination.offset, pagination.limit
+            "\n{}\n",
+            pagination_summary_text(SummaryStyle::Standalone, count, pagination)
         )),
         None => out.push_str(&format!(
             "\n(pagination: {} total, offset {}, limit {})\n",
             pagination.total, pagination.offset, pagination.limit
+        )),
+    }
+}
+
+/// Appends a one-line cursor-pagination summary to `out` (a no-op when the
+/// response wasn't cursor-paginated). The cursor counterpart of
+/// [`append_pagination_summary`] — same fallback role (only fires when
+/// `render_table`'s footer didn't already merge these facts), same `shown`
+/// semantics (the actual post-`--expr` rendered count, not the possibly-stale
+/// `cursor.count`) and the same `None` handling: `--expr` reshaping the data
+/// into something that's no longer an array (e.g. `length(@)`) must not
+/// print a "Showing N ..." claim built from the now-stale pre-`--expr`
+/// `cursor.count` — falling back to `cursor.count` here (rather than a
+/// neutral line, as `append_pagination_summary` does) would do exactly
+/// that.
+pub(super) fn append_cursor_summary(
+    out: &mut String,
+    cursor: Option<&CursorMeta>,
+    shown: Option<i64>,
+) {
+    let Some(cursor) = cursor else {
+        return;
+    };
+    match shown {
+        Some(count) => out.push_str(&format!(
+            "\n{}\n",
+            cursor_summary_text(SummaryStyle::Standalone, count, cursor)
+        )),
+        None => out.push_str(&format!(
+            "\n(cursor: limit {}{})\n",
+            cursor.limit,
+            cursor
+                .total
+                .map(|total| format!(", {total} total"))
+                .unwrap_or_default()
         )),
     }
 }

@@ -283,7 +283,12 @@ fn is_safe_unquoted(value: &str) -> bool {
         && !value.contains('\\')
         && !value.contains(',')
         && !value.contains(['[', ']', '{', '}'])
-        && !value.contains(['\n', '\r', '\t'])
+        // A response field can be backend-controlled (e.g. a cursor
+        // continuation token) rather than authored by this crate — any
+        // control character, not just the three with a named escape below,
+        // forces the quoted path so `escape_string` gets a chance to
+        // neutralize it instead of it reaching the terminal raw.
+        && !value.chars().any(|ch| ch.is_control())
         && !value.starts_with('-')
 }
 
@@ -304,12 +309,26 @@ fn is_valid_unquoted_key(key: &str) -> bool {
 }
 
 fn escape_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            // Any other control character (e.g. ESC, the start of most ANSI
+            // escape sequences) — not just the three above with a named
+            // escape — gets a `\uXXXX` escape rather than passing through
+            // raw to a terminal rendering this output. Every other escape
+            // here is JSON-style, so this must be too (`\xHH` is not valid
+            // JSON/TOON string syntax and would itself make the output
+            // unparseable, defeating machine-readable TOON).
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 fn push_line(lines: &mut Vec<String>, depth: usize, line: String) {

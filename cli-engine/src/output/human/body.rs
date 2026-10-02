@@ -3,12 +3,13 @@ use serde_json::Value;
 use super::columns::{
     column_is_all_numeric, columns_fitting_width, dynamic_columns, fit_column_widths,
 };
+use super::footer::{SummaryStyle, cursor_summary_text, pagination_summary_text};
 use super::value_format::{
     format_plain_value, format_value, indent_block, is_nestable, resolve_field_parent,
     resolve_field_path, resolve_nested_pagination, truncate,
 };
 use super::{Alignment, RenderNotes, TableColumn};
-use crate::output::PaginationMeta;
+use crate::output::{CursorMeta, PaginationMeta};
 
 /// Upper bound on a `no_truncate` column's width, even though it otherwise
 /// skips the normal 40-char cap. Prevents a pathologically long field value
@@ -36,11 +37,12 @@ pub(super) fn render_data_body(
     fields: &str,
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    cursor: Option<&CursorMeta>,
 ) -> (String, RenderNotes) {
     if let Some(columns) = columns {
         return match data {
             Value::Array(items) => {
-                render_array_with_columns(items, columns, available_width, pagination)
+                render_array_with_columns(items, columns, available_width, pagination, cursor)
             }
             Value::Object(map) => render_object_with_columns(map, columns, available_width),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
@@ -49,7 +51,7 @@ pub(super) fn render_data_body(
         };
     }
     match data {
-        Value::Array(items) => render_array(items, fields, available_width, pagination),
+        Value::Array(items) => render_array(items, fields, available_width, pagination, cursor),
         Value::Object(map) => {
             let columns = dynamic_columns(fields, || map.keys().cloned().collect());
             render_object_with_columns(map, &columns, available_width)
@@ -66,6 +68,7 @@ pub(crate) fn render_array_with_columns(
     columns: &[TableColumn],
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    cursor: Option<&CursorMeta>,
 ) -> (String, RenderNotes) {
     if items.is_empty() || columns.is_empty() {
         // Empty columns happens when every item is `{}` (the no-view
@@ -160,6 +163,7 @@ pub(crate) fn render_array_with_columns(
             .collect::<Vec<_>>(),
         &rows,
         pagination,
+        cursor,
     );
     (
         table,
@@ -167,7 +171,7 @@ pub(crate) fn render_array_with_columns(
             truncated,
             hidden_columns,
             nested_narrowing: false,
-            pagination_shown: pagination.is_some(),
+            pagination_shown: pagination.is_some() || cursor.is_some(),
         },
     )
 }
@@ -204,6 +208,7 @@ pub(crate) fn render_object_with_columns(
                     nested_columns,
                     child_width,
                     nested_pagination.as_ref(),
+                    None,
                 );
                 out.push_str(&indent_block(&block, NESTED_INDENT));
                 if child_notes.truncated
@@ -234,6 +239,7 @@ pub(crate) fn render_array(
     fields: &str,
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    cursor: Option<&CursorMeta>,
 ) -> (String, RenderNotes) {
     if items.is_empty() {
         return ("(no results)\n".to_owned(), RenderNotes::default());
@@ -254,7 +260,7 @@ pub(crate) fn render_array(
             }
         })
         .collect();
-    render_array_with_columns(items, &columns, available_width, pagination)
+    render_array_with_columns(items, &columns, available_width, pagination, cursor)
 }
 
 fn render_array_lines(items: &[Value]) -> String {
@@ -281,6 +287,7 @@ fn render_table(
     alignments: &[Alignment],
     rows: &[Vec<String>],
     pagination: Option<&PaginationMeta>,
+    cursor: Option<&CursorMeta>,
 ) -> String {
     let mut out = String::new();
     for (index, header) in headers.iter().enumerate() {
@@ -314,22 +321,25 @@ fn render_table(
         }
         out.push('\n');
     }
-    // Merge the pagination facts into this footer rather than letting
-    // `append_pagination_summary` print a second, redundant line right below
-    // it — both would otherwise state the same shown/total count. The shown
-    // count comes from `rows.len()`, not `pagination.count`: a later
-    // pipeline step (`--expr`) can still reshape `envelope.data` after
-    // pagination ran, so `rows.len()` is what's actually rendered above,
-    // while `total`/`offset`/`limit` stay pagination's own facts.
-    match pagination {
-        Some(pagination) => out.push_str(&format!(
-            "\n({} of {} rows, offset {}, limit {})\n",
-            rows.len(),
-            pagination.total,
-            pagination.offset,
-            pagination.limit
+    // Merge the pagination/cursor facts into this footer rather than letting
+    // `append_pagination_summary`/`append_cursor_summary` print a second,
+    // redundant line right below it — both would otherwise state the same
+    // shown/total count. The shown count comes from `rows.len()`, not
+    // `pagination.count`: a later pipeline step (`--expr`) can still reshape
+    // `envelope.data` after pagination ran, so `rows.len()` is what's
+    // actually rendered above, while `total`/`offset`/`limit` stay
+    // pagination's own facts. `pagination` and `cursor` are mutually
+    // exclusive per command, so at most one arm below ever fires.
+    match (pagination, cursor) {
+        (Some(pagination), _) => out.push_str(&format!(
+            "\n({})\n",
+            pagination_summary_text(SummaryStyle::TableFooter, rows.len(), pagination)
         )),
-        None => out.push_str(&format!("\n({} rows)\n", rows.len())),
+        (None, Some(cursor)) => out.push_str(&format!(
+            "\n({})\n",
+            cursor_summary_text(SummaryStyle::TableFooter, rows.len(), cursor)
+        )),
+        (None, None) => out.push_str(&format!("\n({} rows)\n", rows.len())),
     }
     out
 }
@@ -344,10 +354,11 @@ fn render_nested_value(
     nested_columns: &[TableColumn],
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    cursor: Option<&CursorMeta>,
 ) -> (String, RenderNotes) {
     match value {
         Value::Array(items) => {
-            render_array_with_columns(items, nested_columns, available_width, pagination)
+            render_array_with_columns(items, nested_columns, available_width, pagination, cursor)
         }
         Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
         other => (format!("{}\n", format_value(other)), RenderNotes::default()),

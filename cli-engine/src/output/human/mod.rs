@@ -15,7 +15,9 @@ mod tests;
 mod value_format;
 
 use body::render_data_body;
-use footer::{append_next_actions, append_pagination_summary, append_render_notes};
+use footer::{
+    append_cursor_summary, append_next_actions, append_pagination_summary, append_render_notes,
+};
 
 pub(crate) use columns::terminal_width;
 
@@ -423,6 +425,7 @@ pub fn render_human_with_view(
             fields,
             available_width,
             envelope.pagination.as_ref(),
+            envelope.cursor.as_ref(),
         ),
     };
     // Footers are appended in place: the common no-footer path leaves `body`
@@ -441,6 +444,7 @@ pub fn render_human_with_view(
             .and_then(Value::as_array)
             .and_then(|items| i64::try_from(items.len()).ok());
         append_pagination_summary(&mut body, envelope.pagination.as_ref(), shown);
+        append_cursor_summary(&mut body, envelope.cursor.as_ref(), shown);
     }
     append_next_actions(&mut body, &envelope.next_actions);
     body
@@ -466,9 +470,10 @@ pub(crate) struct RenderNotes {
     /// as a fix when this is set, even though `hidden_columns`/`truncated`
     /// are otherwise reported identically either way.
     pub(crate) nested_narrowing: bool,
-    /// Whether the table footer already merged in the pagination summary
-    /// (`render_table`'s `(N of M rows, offset O, limit L)` line) — so
-    /// [`render_human_with_view`] doesn't also append the standalone
-    /// `append_pagination_summary` line and duplicate the same facts.
+    /// Whether the table footer already merged in the pagination or cursor
+    /// summary (`render_table`'s `(N of M rows, offset O, limit L)` line, or
+    /// its cursor-flavored counterpart) — so [`render_human_with_view`]
+    /// doesn't also append the standalone `append_pagination_summary`/
+    /// `append_cursor_summary` line and duplicate the same facts.
     pub(crate) pagination_shown: bool,
 }

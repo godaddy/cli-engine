@@ -459,7 +459,13 @@ pub struct ActivityEvent {
 /// Middleware is intentionally a plain, cloneable struct so tests and command
 /// handlers can inspect what will be used for a run. Application setup usually
 /// mutates it through `CliConfig` hooks or `ModuleContext`.
+///
+/// `#[non_exhaustive]`: construct via [`Middleware::default`]/[`new`](Middleware::new),
+/// then mutate individual fields, so the engine can add fields (as it did
+/// for cursor pagination) without breaking an exhaustive external struct
+/// literal.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Middleware {
     /// Optional authorization provider.
     pub authz: Option<Arc<dyn Authorizer>>,
@@ -495,6 +501,16 @@ pub struct Middleware {
     pub limit: i64,
     /// Client-side page offset.
     pub offset: i64,
+    /// Parsed `--limit` for a [`with_cursor`](crate::CommandSpec::with_cursor)
+    /// command. Unlike `limit`/`offset`, the engine never slices with this
+    /// itself — a cursor-aware handler reads it back via
+    /// [`CommandContext::middleware`](crate::command::CommandContext::middleware)
+    /// to drive its own backend call.
+    pub cursor_limit: i64,
+    /// Parsed `--continue` for a
+    /// [`with_cursor`](crate::CommandSpec::with_cursor) command. `None` means
+    /// the user passed no `--continue`, i.e. start from the beginning.
+    pub continue_token: Option<String>,
     /// User reason passed to authorization and audit.
     pub reason: String,
     /// Whether schema rendering was requested.
@@ -551,7 +567,17 @@ pub struct MiddlewareOutput {
 }
 
 /// Inputs for one middleware-managed command execution.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `#[non_exhaustive]`: construct via [`MiddlewareRequest::new`], then chain
+/// `with_*` methods for anything beyond the commonly-required fields — never
+/// as a struct literal (`#[non_exhaustive]` forbids that entirely for a
+/// caller outside this crate, even with `..Default::default()`) — so the
+/// engine can add fields (as it did for cursor pagination) without breaking
+/// external callers. This is the failure mode this exact struct hit once
+/// already, when `cursor_command` was added with no such escape hatch
+/// available.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct MiddlewareRequest<'request> {
     /// Per-command metadata used by authentication, authorization, dry-run, audit, and activity.
     pub meta: CommandMeta,
@@ -589,6 +615,85 @@ pub struct MiddlewareRequest<'request> {
     /// directly (e.g. [`Middleware::run_no_auth`]) instead of through
     /// [`Cli`](crate::Cli), which is what computes this.
     pub pagination_command: Option<String>,
+    /// The invoked command replayed as `--flag value` text with
+    /// `--limit`/`--continue` omitted.
+    ///
+    /// `Some` only for a command that opted into `with_cursor`; the engine
+    /// appends `--limit`/`--continue` for the next page and surfaces it as a
+    /// `next_actions` entry when the handler reported more data via
+    /// [`CommandResult::with_cursor`](crate::CommandResult::with_cursor).
+    /// Mutually exclusive with `pagination_command` — a command registers
+    /// one pagination style, not both.
+    pub cursor_command: Option<String>,
+}
+
+impl<'request> MiddlewareRequest<'request> {
+    /// Builds a request from the fields every caller needs to set, with
+    /// everything else defaulted (`auth: AuthRequirement::Required`,
+    /// `view_id`/`pagination_command`/`cursor_command`: `None`, `raw_output:
+    /// false`). Chain the `with_*` methods below for anything else.
+    #[must_use]
+    pub fn new(
+        meta: CommandMeta,
+        command_path: &'request str,
+        system: &'request str,
+        user_args: ValueMap,
+        args: ValueMap,
+        default_fields: &'request str,
+    ) -> Self {
+        Self {
+            meta,
+            command_path,
+            system,
+            user_args,
+            args,
+            default_fields,
+            ..Self::default()
+        }
+    }
+
+    /// Sets the authentication requirement enforced for this command.
+    #[must_use]
+    pub fn with_auth(mut self, auth: AuthRequirement) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// Sets the human view id this command declared.
+    #[must_use]
+    pub fn with_view_id(mut self, view_id: &'request str) -> Self {
+        self.view_id = Some(view_id);
+        self
+    }
+
+    /// Sets whether a successful string result renders verbatim.
+    #[must_use]
+    pub fn with_raw_output(mut self, raw_output: bool) -> Self {
+        self.raw_output = raw_output;
+        self
+    }
+
+    /// Sets the replayable command text for offset pagination's `next_actions`.
+    ///
+    /// Clears `cursor_command` — a command replays as one pagination style or
+    /// the other, never both; setting one via its builder is how a caller
+    /// signals the other no longer applies.
+    #[must_use]
+    pub fn with_pagination_command(mut self, pagination_command: impl Into<String>) -> Self {
+        self.pagination_command = Some(pagination_command.into());
+        self.cursor_command = None;
+        self
+    }
+
+    /// Sets the replayable command text for cursor pagination's `next_actions`.
+    ///
+    /// Clears `pagination_command` — see [`with_pagination_command`](Self::with_pagination_command).
+    #[must_use]
+    pub fn with_cursor_command(mut self, cursor_command: impl Into<String>) -> Self {
+        self.cursor_command = Some(cursor_command.into());
+        self.pagination_command = None;
+        self
+    }
 }
 
 /// Convenience helper for building a JSON object map.

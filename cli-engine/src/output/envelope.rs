@@ -22,6 +22,12 @@ pub struct Envelope {
     /// caller relies on it to know whether more data exists at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pagination: Option<PaginationMeta>,
+    /// Cursor-pagination facts, present whenever a command that opted into
+    /// [`with_cursor`](crate::CommandSpec::with_cursor) returned array data.
+    /// Mutually exclusive with [`pagination`](Envelope::pagination): a
+    /// command registers one style or the other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<CursorMeta>,
     /// Optional execution metadata, controlled by `--verbose`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Metadata>,
@@ -168,6 +174,50 @@ pub struct PaginationMeta {
     pub has_more: bool,
 }
 
+/// Cursor-pagination metadata.
+///
+/// `count` is computed by the engine (the returned array's length). `limit`
+/// is normally the requested `--limit`, but a handler can override it via
+/// [`CursorContinuation::with_limit`](crate::CursorContinuation::with_limit)
+/// to report the effective page size it actually resumed with — e.g. one
+/// decoded from `continue_from` itself rather than the parsed flag. `total`,
+/// `remaining`, and `continue_from` come from the handler's
+/// [`CursorContinuation`](crate::CursorContinuation), since only it talked to
+/// the opaque backend cursor. `total`/`remaining` are `None` when the backend
+/// never reports them — a cursor API is not guaranteed to know its own total.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CursorMeta {
+    /// Effective page size — the parsed `--limit`, unless overridden by
+    /// [`CursorContinuation::with_limit`](crate::CursorContinuation::with_limit).
+    pub limit: i64,
+    /// Item count in this response.
+    pub count: i64,
+    /// Total item count, when the backend reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
+    /// Remaining item count, when the backend reports one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<i64>,
+    /// Opaque token for the next page. `None` means iteration has reached
+    /// its end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<String>,
+    /// Whether more data is available (`continue_from.is_some()`).
+    pub has_more: bool,
+    /// Whether `continue_from` alone is sufficient to resume at `limit` —
+    /// `true` only when `has_more` *and* the handler called
+    /// [`CursorContinuation::with_limit`](crate::CursorContinuation::with_limit),
+    /// so a replay command can omit `--limit`. `with_limit` on its own isn't
+    /// enough: calling it on a completed
+    /// [`CursorContinuation::done`](crate::CursorContinuation::done) (no
+    /// `continue_from` at all) would otherwise claim a nonexistent token is
+    /// self-sufficient. `false` for a plain
+    /// [`CursorContinuation::more`](crate::CursorContinuation::more) token
+    /// with no `with_limit` call, where `limit` is just the parsed `--limit`
+    /// and resuming with a different one could change page size.
+    pub self_sufficient_limit: bool,
+}
+
 /// Structured error payload in an [`Envelope`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ErrorEnvelope {
@@ -194,6 +244,7 @@ impl Envelope {
         Self {
             data,
             pagination: None,
+            cursor: None,
             metadata: Some(Metadata::new(system)),
             error: None,
             warnings: Vec::new(),
@@ -214,6 +265,7 @@ impl Envelope {
         Self {
             data: None,
             pagination: None,
+            cursor: None,
             metadata: Some(Metadata::new(system.clone())),
             error: Some(ErrorEnvelope {
                 code: code.into(),
@@ -241,6 +293,7 @@ impl Envelope {
         Self {
             data: None,
             pagination: None,
+            cursor: None,
             metadata: Some(Metadata {
                 request_id: request_id.clone(),
                 ..Metadata::new(system.clone())
@@ -390,6 +443,7 @@ pub fn build_error_envelope(err: &(dyn std::error::Error + 'static), system: &st
         return Envelope {
             data: None,
             pagination: None,
+            cursor: None,
             metadata: Some(Metadata {
                 request_id: request_id.clone(),
                 ..Metadata::new(sys.clone())
@@ -521,6 +575,7 @@ pub fn build_detailed_error_envelope(err: &dyn DetailedError, system: &str) -> E
     Envelope {
         data: None,
         pagination: None,
+        cursor: None,
         metadata: Some(Metadata {
             request_id: request_id.clone(),
             ..Metadata::new(sys.clone())
