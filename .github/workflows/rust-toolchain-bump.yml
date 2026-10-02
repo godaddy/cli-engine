@@ -40,9 +40,16 @@ jobs:
 
       # No-op (and no PR) when rust-toolchain.toml already has this version,
       # since there's nothing left for create-pull-request to commit.
+      #
+      # GitHub does not trigger `pull_request`/`push` workflow runs for
+      # branches/PRs created with the default GITHUB_TOKEN (anti-recursion
+      # protection), so the resulting PR would never run ci.yml unless a PAT
+      # or GitHub App token is supplied here instead. Falls back to
+      # GITHUB_TOKEN (today's no-auto-CI behavior) until that secret exists.
       - name: Open pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 #v8.1.1
         with:
+          token: ${{ secrets.RUST_TOOLCHAIN_BUMP_TOKEN || secrets.GITHUB_TOKEN }}
           commit-message: "chore(rust): bump pinned toolchain to ${{ steps.latest.outputs.version }}"
           title: "chore(rust): bump pinned toolchain to ${{ steps.latest.outputs.version }}"
           body: |

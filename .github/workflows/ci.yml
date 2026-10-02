@@ -23,7 +23,7 @@ jobs:
 
       # Doing a check here instead of using paths in our trigger conditions
       # so that branch protection rules which require our Rust jobs aren't
-      # unsatisified
+      # unsatisfied
       - name: Filter
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d #v4.0.3
@@ -40,7 +40,13 @@ jobs:
   rust:
     name: Rust
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    # `always()` overrides the implicit skip-on-upstream-failure default, so
+    # a `changes` failure (e.g. paths-filter erroring) can't silently skip
+    # the one check branch protection requires — it fails safe into running
+    # Rust CI rather than trusting an output that was never produced.
+    if: |
+      always() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
