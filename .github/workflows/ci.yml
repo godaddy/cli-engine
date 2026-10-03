@@ -7,8 +7,46 @@ on:
       - main
 
 jobs:
+  changes:
+    name: Detect Rust changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          # Avoids unnecessary Rust jobs running on `push` events; paths-filter
+          # needs the prior commit so it can do a proper diff, else it sees all
+          # files as new
+          fetch-depth: 2
+
+      # Doing a check here instead of using paths in our trigger conditions
+      # so that branch protection rules which require our Rust jobs aren't
+      # unsatisfied
+      - name: Filter
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d #v4.0.3
+        with:
+          filters: |
+            rust:
+              - "cli-engine/**"
+              - "cli-engine-macros/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "rust-toolchain.toml"
+              - ".github/workflows/ci.yml"
+
   rust:
     name: Rust
+    needs: changes
+    # `always()` overrides the implicit skip-on-upstream-failure default, so
+    # a `changes` failure (e.g. paths-filter erroring) can't silently skip
+    # the one check branch protection requires — it fails safe into running
+    # Rust CI rather than trusting an output that was never produced.
+    if: |
+      always() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

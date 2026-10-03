@@ -1,0 +1,66 @@
+name: Bump Rust Toolchain
+
+on:
+  schedule:
+    - cron: "13 7 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bump:
+    name: Check for a newer stable Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+
+      # Explicit `toolchain: stable` bypasses rust-toolchain.toml so this
+      # always installs the current real latest, not our pinned version.
+      - name: Install latest stable Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 #v1.16.1
+        with:
+          toolchain: stable
+
+      - name: Record latest stable version
+        id: latest
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Update pinned toolchain
+        run: |
+          sed \
+            -i \
+            -E "s/^channel = \".*\"/channel = \"${{ steps.latest.outputs.version }}\"/" \
+            rust-toolchain.toml
+
+      # No-op (and no PR) when rust-toolchain.toml already has this version,
+      # since there's nothing left for create-pull-request to commit.
+      #
+      # GitHub does not trigger `pull_request`/`push` workflow runs for
+      # branches/PRs created with the default GITHUB_TOKEN (anti-recursion
+      # protection), so the resulting PR would never run ci.yml unless a PAT
+      # or GitHub App token is supplied here instead. Falls back to
+      # GITHUB_TOKEN (today's no-auto-CI behavior) until that secret exists.
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 #v8.1.1
+        with:
+          token: ${{ secrets.AUTOMATED_PRS_TOKEN || secrets.GITHUB_TOKEN }}
+          commit-message: "chore(rust): bump pinned toolchain to ${{ steps.latest.outputs.version }}"
+          title: "chore(rust): bump pinned toolchain to ${{ steps.latest.outputs.version }}"
+          body: |
+            Weekly check found a newer stable Rust release.
+
+            `rust-toolchain.toml` is now pinned to `${{ steps.latest.outputs.version }}`. The
+            normal CI checks run on this PR like any other — if the new toolchain introduces
+            clippy/rustdoc/test failures, push fixes to this branch before merging so the bump
+            and its fixes land together.
+          branch: chore/bump-rust-toolchain
+          delete-branch: true
+          labels: |
+            rust
+            dependencies

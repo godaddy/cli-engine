@@ -59,6 +59,9 @@ impl<'key> CredentialKey<'key> {
 /// Values are opaque strings (typically JSON); the backend never interprets
 /// them, so it stays independent of any provider's token shape. Callers own
 /// (de)serialization and any validity/expiry checks.
+// async_trait's expansion attaches a bare `#[must_use]` to each generated
+// method, duplicating the one already implied by `Option`/`Result`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait CredentialStorage: Send + Sync + std::fmt::Debug {
     /// Loads the stored blob for `key`, or `None` when absent or unreadable.
