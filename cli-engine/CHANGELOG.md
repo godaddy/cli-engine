@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.5...cli-engine-v0.9.6) (2026-10-03)
+
+
+### Bug Fixes
+
+* **ci:** unblock Rust CI on newer clippy/rustdoc lints and pin the toolchain ([#122](https://github.com/godaddy/cli-engine/issues/122)) ([6fe18d7](https://github.com/godaddy/cli-engine/commit/6fe18d77db3e5c1ad04a25af6d311827aac69467))
+
+
+### Documentation
+
+* propose cursor-first pagination (--limit/--continue) ([#114](https://github.com/godaddy/cli-engine/issues/114)) ([d67f9d0](https://github.com/godaddy/cli-engine/commit/d67f9d0ea6f96afc2e0547c42048bcffc0ae1f5f))
+
 ## [0.9.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.4...cli-engine-v0.9.5) (2026-09-11)
 
 
