@@ -38,6 +38,17 @@ pub(super) fn random_state() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Generates a random OIDC nonce for the authorization request.
+///
+/// Sent as the `nonce` authorization parameter and checked (see
+/// `verify_id_token_nonce` in `super`) against the returned id_token's own
+/// `nonce` claim, binding that token to *this* authorization request rather
+/// than one replayed or substituted from elsewhere.
+pub(super) fn random_nonce() -> String {
+    let bytes: [u8; 16] = rand::rng().random();
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
 /// Waits for the OAuth callback on the given listener, validates state and path.
 ///
 /// Accepts connections in a loop so that stray connections (port scanners,
