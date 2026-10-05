@@ -567,6 +567,7 @@ impl Middleware {
                 &self.human_views,
                 view_id,
                 effective_fields,
+                self.fields_explicit,
             )
         } else {
             crate::output::render(output_format, &prepared)?

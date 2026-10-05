@@ -36,12 +36,17 @@ pub(super) fn render_data_body(
     fields: &str,
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    fields_explicit: bool,
 ) -> (String, RenderNotes) {
     if let Some(columns) = columns {
         return match data {
-            Value::Array(items) => {
-                render_array_with_columns(items, columns, available_width, pagination)
-            }
+            Value::Array(items) => render_array_with_columns(
+                items,
+                columns,
+                available_width,
+                pagination,
+                fields_explicit,
+            ),
             Value::Object(map) => render_object_with_columns(map, columns, available_width),
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 (format!("{}\n", format_value(data)), RenderNotes::default())
@@ -49,7 +54,9 @@ pub(super) fn render_data_body(
         };
     }
     match data {
-        Value::Array(items) => render_array(items, fields, available_width, pagination),
+        Value::Array(items) => {
+            render_array(items, fields, available_width, pagination, fields_explicit)
+        }
         Value::Object(map) => {
             let columns = dynamic_columns(fields, || map.keys().cloned().collect());
             render_object_with_columns(map, &columns, available_width)
@@ -66,6 +73,7 @@ pub(crate) fn render_array_with_columns(
     columns: &[TableColumn],
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    fields_explicit: bool,
 ) -> (String, RenderNotes) {
     if items.is_empty() || columns.is_empty() {
         // Empty columns happens when every item is `{}` (the no-view
@@ -79,13 +87,30 @@ pub(crate) fn render_array_with_columns(
         return (render_array_lines(items), RenderNotes::default());
     }
     // Natural widths (and rows) are computed for every original column
-    // before deciding what to hide: a `no_truncate` column never shrinks
-    // below its natural width, so the hiding decision has to know that real
-    // requirement — using just its header length here could keep a
-    // low-priority trailing column that would never have fit anyway,
-    // producing an overflow that hiding it would have avoided.
+    // before deciding what to hide: a protected column (see `protected_all`
+    // below) never shrinks below its natural width, so the hiding decision
+    // has to know that real requirement — using just its header length here
+    // could keep a low-priority trailing column that would never have fit
+    // anyway, producing an overflow that hiding it would have avoided.
     let header_lens: Vec<usize> = columns.iter().map(|column| column.header.len()).collect();
-    let no_truncate_all: Vec<bool> = columns.iter().map(|column| column.no_truncate).collect();
+    // An explicit `--fields` selection means the user asked for exactly
+    // these columns, so none of them should be dropped *or* truncated for
+    // width — it's no longer the engine's problem if they don't all fit.
+    // Treating the whole set as essential gets both for free: essential
+    // columns are never dropped (below) and, as of `protected_all`, never
+    // truncated either.
+    let essential_all: Vec<bool> = if fields_explicit {
+        vec![true; columns.len()]
+    } else {
+        columns.iter().map(|column| column.essential).collect()
+    };
+    // Essential and `no_truncate` columns both never shrink below their
+    // natural width — essential additionally exempts a column from being
+    // *hidden* (via `essential_all` above), while `no_truncate` only exempts
+    // it from shrinking.
+    let protected_all: Vec<bool> = (0..columns.len())
+        .map(|index| columns[index].no_truncate || essential_all[index])
+        .collect();
     let mut natural = header_lens.clone();
     let rows: Vec<Vec<String>> = items
         .iter()
@@ -98,7 +123,7 @@ pub(crate) fn render_array_with_columns(
                         .as_object()
                         .and_then(|map| resolve_field_path(map, &column.field))
                         .map_or_else(String::new, format_value);
-                    let cap = if column.no_truncate {
+                    let cap = if protected_all[index] {
                         NO_TRUNCATE_MAX_WIDTH
                     } else {
                         usize::MAX
@@ -112,40 +137,59 @@ pub(crate) fn render_array_with_columns(
 
     let min_widths: Vec<usize> = (0..columns.len())
         .map(|index| {
-            if no_truncate_all[index] {
+            if protected_all[index] {
                 natural[index]
             } else {
                 header_lens[index]
             }
         })
         .collect();
-    let mut kept = columns_fitting_width(&min_widths, available_width);
+    let mut kept = columns_fitting_width(&min_widths, &essential_all, available_width);
 
     // Hiding a column is preferred over truncating a cell: if the survivors
     // still don't fit their natural width, keep dropping the lowest-priority
-    // one and re-fitting, until either everyone remaining fits in full or
-    // only one column is left (which always stays, however it fits).
+    // droppable (non-essential) one and re-fitting, until either everyone
+    // remaining fits in full, only one column is left (which always stays,
+    // however it fits), or every survivor is essential and nothing more can
+    // be dropped. The last case can't actually still be truncated — once
+    // every survivor is essential, every survivor is also protected (see
+    // `protected_all`), so `fit_column_widths` has nothing left to shrink —
+    // but the fallback stays as a defensive floor against that invariant
+    // breaking rather than looping forever.
     let (fitted, truncated) = loop {
-        let (fitted, truncated) = fit_column_widths(
-            &header_lens[..kept],
-            &natural[..kept],
-            &no_truncate_all[..kept],
-            available_width,
-        );
-        if !truncated || kept <= 1 {
+        let sub_headers: Vec<usize> = kept.iter().map(|&index| header_lens[index]).collect();
+        let sub_natural: Vec<usize> = kept.iter().map(|&index| natural[index]).collect();
+        let sub_protected: Vec<bool> = kept.iter().map(|&index| protected_all[index]).collect();
+        let (fitted, truncated) =
+            fit_column_widths(&sub_headers, &sub_natural, &sub_protected, available_width);
+        if !truncated || kept.len() <= 1 {
             break (fitted, truncated);
         }
-        kept -= 1;
+        match kept.iter().rposition(|&index| !essential_all[index]) {
+            Some(position) => {
+                kept.remove(position);
+            }
+            None => break (fitted, truncated),
+        }
     };
 
-    let hidden_columns = columns[kept..]
-        .iter()
-        .map(|column| column.header.clone())
+    let hidden_columns = (0..columns.len())
+        .filter(|index| !kept.contains(index))
+        .map(|index| columns[index].header.clone())
         .collect::<Vec<_>>();
-    let columns = &columns[..kept];
+    let columns: Vec<TableColumn> = kept.iter().map(|&index| columns[index].clone()).collect();
+    // Each row is already owned here, so move the kept cells out instead of
+    // cloning them — a large response's row data would otherwise be
+    // temporarily duplicated in full just to narrow down to `kept`.
     let rows: Vec<Vec<String>> = rows
         .into_iter()
-        .map(|row| row.into_iter().take(kept).collect())
+        .map(|row| {
+            row.into_iter()
+                .enumerate()
+                .filter(|(index, _)| kept.contains(index))
+                .map(|(_, value)| value)
+                .collect()
+        })
         .collect();
 
     let table = render_table(
@@ -234,6 +278,7 @@ pub(crate) fn render_array(
     fields: &str,
     available_width: usize,
     pagination: Option<&PaginationMeta>,
+    fields_explicit: bool,
 ) -> (String, RenderNotes) {
     if items.is_empty() {
         return ("(no results)\n".to_owned(), RenderNotes::default());
@@ -254,7 +299,13 @@ pub(crate) fn render_array(
             }
         })
         .collect();
-    render_array_with_columns(items, &columns, available_width, pagination)
+    render_array_with_columns(
+        items,
+        &columns,
+        available_width,
+        pagination,
+        fields_explicit,
+    )
 }
 
 fn render_array_lines(items: &[Value]) -> String {
@@ -346,8 +397,12 @@ fn render_nested_value(
     pagination: Option<&PaginationMeta>,
 ) -> (String, RenderNotes) {
     match value {
+        // A nested block's columns are authored by the view, never by a
+        // top-level `--fields` selection (which only reaches top-level
+        // declared columns), so width-based dropping here always honors
+        // each column's `essential` flag rather than being disabled wholesale.
         Value::Array(items) => {
-            render_array_with_columns(items, nested_columns, available_width, pagination)
+            render_array_with_columns(items, nested_columns, available_width, pagination, false)
         }
         Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
         other => (format!("{}\n", format_value(other)), RenderNotes::default()),

@@ -28,9 +28,8 @@ use cli_engine::{
     derive_value_flags, extract_command_path, extract_output_format, format_help_section,
     guide::guide_content,
     has_true_schema_flag,
-    output::render_human_with_view,
     output::{Envelope, OutputFormat, PipelineOpts, apply_pipeline, filter_fields, render},
-    register_global_flags, register_global_human_view, register_global_schema,
+    preview_human_view, register_global_flags, register_global_human_view, register_global_schema,
     register_reason_flag, render_tree_human,
     search::{SearchDocument, SearchIndex, tokenize},
     transport::{
@@ -9433,16 +9432,13 @@ fn human_renderer_mixed_object_scalar_array_falls_back_to_lines() {
 #[test]
 fn human_renderer_column_mixed_object_scalar_array_falls_back_to_lines() {
     let columns = vec![TableColumn::new("name", "Name")];
-    let envelope = Envelope::success(
-        json!([
-            {"name": "alpha"},
-            true
-        ]),
-        "things-api",
-    );
+    let data = json!([
+        {"name": "alpha"},
+        true
+    ]);
 
     assert_eq!(
-        render_human_with_view(&envelope, Some(&columns), ""),
+        preview_human_view(data, &columns),
         "{\"name\":\"alpha\"}\ntrue\n"
     );
 }
@@ -9457,15 +9453,15 @@ fn human_view_registry_renders_registered_columns_for_lists() {
             TableColumn::new("enabled", "Enabled"),
         ],
     });
-    let envelope = Envelope::success(
-        json!([
-            {"name": "alpha", "enabled": true, "ignored": "x"},
-            {"name": "beta", "enabled": false, "ignored": "y"}
-        ]),
-        "things",
-    );
+    let data = json!([
+        {"name": "alpha", "enabled": true, "ignored": "x"},
+        {"name": "beta", "enabled": false, "ignored": "y"}
+    ]);
 
-    let rendered = render_human_with_view(&envelope, registry.columns("things"), "");
+    let rendered = preview_human_view(
+        data,
+        registry.columns("things").expect("registered columns"),
+    );
 
     assert_eq!(
         rendered,
@@ -9479,34 +9475,17 @@ fn human_view_registry_renders_registered_columns_for_objects() {
         TableColumn::new("name", "Name"),
         TableColumn::new("missing", "Missing"),
     ];
-    let envelope = Envelope::success(json!({"name": "alpha", "ignored": "x"}), "things");
+    let data = json!({"name": "alpha", "ignored": "x"});
 
-    let rendered = render_human_with_view(&envelope, Some(&columns), "");
+    let rendered = preview_human_view(data, &columns);
 
     assert_eq!(rendered, "Name: alpha\nMissing: \n");
 }
 
-#[test]
-fn human_view_registry_custom_renderer_wins_over_columns_preserves_legacy_view_func() {
-    let mut registry = HumanViewRegistry::new();
-    registry.register(HumanViewDef {
-        schema_id: "things".to_owned(),
-        columns: vec![TableColumn::new("name", "Name")],
-    });
-    registry.register_func("things", |data| {
-        format!(
-            "custom:{}\n",
-            data.get("name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-        )
-    });
-    let envelope = Envelope::success(json!({"name": "alpha"}), "things");
-
-    let rendered = cli_engine::render_human_with_registry(&envelope, &registry);
-
-    assert_eq!(rendered, "custom:alpha\n");
-}
+// Moved to `cli-engine/src/output/human/tests/registry.rs` as
+// `human_view_registry_custom_renderer_wins_over_columns` — it exercises
+// `render_human_with_registry_selected`, which is crate-internal now that
+// `preview_human_view` is the public surface for view-rendering tests.
 
 #[test]
 fn global_human_view_func_registration_can_be_looked_up_and_rendered() {
