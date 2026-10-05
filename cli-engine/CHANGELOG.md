@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.5...cli-engine-v0.10.0) (2026-10-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **output:** `render_human_with_view` and `render_human_with_registry_selected` are now crate-internal (no longer exported from the crate root or `output`); `render_human_with_registry` and `render_human_with_registry_for_schema` are removed entirely. Any consumer calling these directly (expected mainly in command-module tests) should switch to the new `preview_human_view(data, columns)`.
+
+### Features
+
+* **output:** mandatory/essential columns and explicit --fields opt-out ([#120](https://github.com/godaddy/cli-engine/issues/120)) ([4ff2418](https://github.com/godaddy/cli-engine/commit/4ff241885f8a0aea9313574910a07fe6527410f7))
+
+
+### Bug Fixes
+
+* **ci:** unblock Rust CI on newer clippy/rustdoc lints and pin the toolchain ([#122](https://github.com/godaddy/cli-engine/issues/122)) ([6fe18d7](https://github.com/godaddy/cli-engine/commit/6fe18d77db3e5c1ad04a25af6d311827aac69467))
+
+
+### Documentation
+
+* propose cursor-first pagination (--limit/--continue) ([#114](https://github.com/godaddy/cli-engine/issues/114)) ([d67f9d0](https://github.com/godaddy/cli-engine/commit/d67f9d0ea6f96afc2e0547c42048bcffc0ae1f5f))
+
 ## [0.9.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.4...cli-engine-v0.9.5) (2026-09-11)
 
 
