@@ -1,0 +1,730 @@
+//! End-to-end coverage for opt-in cursor pagination
+//! (`CommandSpec::with_cursor`), driven through `Cli::run` the way a real
+//! consumer binary would.
+//!
+//! `--limit`/`--continue` are deliberately not framework-global: a command
+//! only gets them — in `--help` and on its command line — by declaring a
+//! `CursorConfig`. Unlike offset pagination (`tests/pagination.rs`), the
+//! engine never slices or measures a cursor itself: these tests drive a fake
+//! in-memory "backend" through the handler, which reads back the parsed
+//! `--limit`/`--continue` off `ctx.middleware` and reports what it learned
+//! via `CommandResult::with_cursor`.
+
+use clap::Arg;
+use cli_engine::{
+    Cli, CliConfig, CommandResult, CommandSpec, CursorConfig, CursorContinuation,
+    RuntimeCommandSpec,
+};
+use serde_json::json;
+
+fn items() -> Vec<serde_json::Value> {
+    vec![
+        json!({"name": "alpha"}),
+        json!({"name": "beta"}),
+        json!({"name": "gamma"}),
+        json!({"name": "delta"}),
+    ]
+}
+
+/// A fake cursor-backed handler: `--continue` is the next start index
+/// (as a string), `--limit` is the page size. Reports a fresh continuation
+/// token whenever more items remain, mirroring how a real handler would
+/// resume an opaque backend cursor.
+fn cli_with_cursor_list_command(spec: CommandSpec) -> Cli {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(spec, async |ctx| {
+        let all = items();
+        let start = ctx
+            .middleware
+            .continue_token
+            .as_deref()
+            .and_then(|token| token.parse::<usize>().ok())
+            .unwrap_or(0);
+        let limit = usize::try_from(ctx.middleware.cursor_limit).unwrap_or(0);
+        let end = start.saturating_add(limit).min(all.len());
+        let page = all.get(start..end).unwrap_or_default().to_vec();
+        let mut result = CommandResult::new(json!(page));
+        if end < all.len() {
+            result = result.with_cursor(CursorContinuation::more(end.to_string()));
+        }
+        Ok(result)
+    }));
+    cli
+}
+
+#[tokio::test]
+async fn limit_and_continue_are_unknown_arguments_for_a_command_that_did_not_opt_in() {
+    let cli = cli_with_cursor_list_command(CommandSpec::new("list", "List things").no_auth(true));
+
+    let output = cli.run(["my-cli", "list", "--limit", "1"]).await;
+    assert_eq!(
+        output.exit_code, 2,
+        "unopted command should reject --limit as unknown: {}",
+        output.rendered
+    );
+
+    let output = cli.run(["my-cli", "list", "--continue", "1"]).await;
+    assert_eq!(
+        output.exit_code, 2,
+        "unopted command should reject --continue as unknown: {}",
+        output.rendered
+    );
+
+    let help = cli.run(["my-cli", "list", "--help"]).await;
+    assert!(
+        !help.rendered.contains("--limit") && !help.rendered.contains("--continue"),
+        "unopted command's --help should not mention cursor flags: {}",
+        help.rendered
+    );
+}
+
+#[tokio::test]
+async fn opted_in_command_documents_limit_and_continue_in_help() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 3)),
+    );
+
+    let help = cli.run(["my-cli", "list", "--help"]).await;
+    assert!(help.rendered.contains("--limit"), "{}", help.rendered);
+    assert!(help.rendered.contains("--continue"), "{}", help.rendered);
+}
+
+#[tokio::test]
+async fn default_limit_applies_when_neither_flag_is_passed() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["data"],
+        json!([{"name": "alpha"}, {"name": "beta"}])
+    );
+    // total/remaining are absent — this fake backend never reports them.
+    assert_eq!(
+        rendered["cursor"],
+        json!({
+            "limit": 2,
+            "count": 2,
+            "continue_from": "2",
+            "has_more": true,
+            "self_sufficient_limit": false
+        })
+    );
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "my-cli list --limit 2 --continue 2"
+    );
+    assert!(rendered.get("metadata").is_none(), "{}", output.rendered);
+}
+
+#[tokio::test]
+async fn explicit_limit_and_continue_fetch_the_requested_page() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--continue",
+            "1",
+            "--limit",
+            "2",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["data"],
+        json!([{"name": "beta"}, {"name": "gamma"}])
+    );
+    assert_eq!(rendered["cursor"]["continue_from"], "3");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "my-cli list --limit 2 --continue 3"
+    );
+}
+
+#[tokio::test]
+async fn last_page_has_no_next_action_and_has_more_is_false() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--continue",
+            "2",
+            "--limit",
+            "2",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["cursor"]["has_more"], false);
+    assert!(rendered["cursor"].get("continue_from").is_none());
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "no next page exists: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn with_total_and_remaining_surface_on_the_envelope() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(
+                CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}])).with_cursor(
+                    CursorContinuation::more("tok-2")
+                        .with_total(4)
+                        .with_remaining(2),
+                ),
+            )
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["cursor"],
+        json!({
+            "limit": 2,
+            "count": 2,
+            "total": 4,
+            "remaining": 2,
+            "continue_from": "tok-2",
+            "has_more": true,
+            "self_sufficient_limit": false
+        })
+    );
+}
+
+/// Cursor metadata is for array data (mirrors offset pagination's identical
+/// `let Value::Array(items) = data else { return Ok(None) }` guard in
+/// `apply_pipeline`'s `apply_pagination`): a handler that calls
+/// `with_cursor` but returns a non-array result gets no `cursor` field at
+/// all, rather than a bogus page (`count: 0`, but still `has_more`/a
+/// `next_actions` entry) over data that was never actually paginated.
+#[tokio::test]
+async fn cursor_metadata_is_absent_when_the_handler_result_is_not_an_array() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!({"name": "alpha"}))
+                .with_cursor(CursorContinuation::more("tok-2")))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "{}",
+        output.rendered
+    );
+}
+
+/// The inverse direction from the non-array test above: the handler's raw
+/// result was never an array, but `--expr` happens to synthesize one
+/// (`[@]`, wrapping the object in a single-element list) — this must still
+/// produce no cursor metadata, since there was never a real backend page to
+/// describe, regardless of what shape `--expr` leaves the *displayed* data
+/// in.
+#[tokio::test]
+async fn cursor_metadata_is_absent_when_expr_synthesizes_an_array_from_a_non_array_result() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!({"name": "alpha"}))
+                .with_cursor(CursorContinuation::more("tok-2")))
+        },
+    ));
+
+    let output = cli
+        .run(["my-cli", "list", "--expr", "[@]", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!([{"name": "alpha"}]));
+    assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "{}",
+        output.rendered
+    );
+}
+
+/// Same guard, reached via `--expr` reshaping an originally-array result into
+/// a scalar rather than the handler returning a non-array result directly —
+/// `apply_pipeline`'s `--expr` step runs after the cursor block would
+/// otherwise see the data, so this exercises the same code path a real
+/// `length(@)` query would.
+#[tokio::test]
+async fn cursor_metadata_is_absent_after_expr_reshapes_data_to_a_scalar() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--expr", "length(@)", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!(2));
+    assert!(rendered.get("cursor").is_none(), "{}", output.rendered);
+}
+
+/// `cursor.count` must describe the page the handler's backend call
+/// actually returned, not whatever `--expr` reshapes it into for display —
+/// unlike the scalar case above, an `--expr` that filters but keeps the
+/// result an array doesn't trip the "not an array" guard, so this exercises
+/// the count itself rather than cursor metadata's presence.
+#[tokio::test]
+async fn cursor_count_reflects_the_raw_page_size_not_the_expr_filtered_display_count() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--expr",
+            "[?name=='alpha']",
+            "--output",
+            "json",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["data"], json!([{"name": "alpha"}]));
+    assert_eq!(
+        rendered["cursor"]["count"], 2,
+        "count must reflect the real 2-item page, not the 1 item --expr left displayed: {}",
+        output.rendered
+    );
+}
+
+/// A handler that derives its own effective page size from the `--continue`
+/// token (e.g. to let a caller resume with `--continue` alone, without
+/// repeating `--limit`) reports that via `CursorContinuation::with_limit`.
+/// The envelope's `cursor.limit` reflects that effective size, not the
+/// parsed `--limit` this particular invocation happened to carry — and the
+/// suggested next-page command omits `--limit` entirely, since `with_limit`
+/// also signals that the token is self-sufficient about size.
+#[tokio::test]
+async fn with_limit_overrides_the_envelope_and_omits_limit_from_the_next_action() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(25, 0)),
+        async |_ctx| {
+            Ok(
+                CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}]))
+                    .with_cursor(CursorContinuation::more("tok-2").with_limit(2)),
+            )
+        },
+    ));
+
+    // No --limit passed at all — the parsed value defaults to 25, but the
+    // handler says it actually applied 2 (inherited from a prior token).
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["cursor"]["limit"], json!(2));
+    assert_eq!(rendered["cursor"]["self_sufficient_limit"], json!(true));
+    let next_actions = rendered["next_actions"].as_array().expect("next_actions");
+    // `with_limit` means the token is self-sufficient about page size, so
+    // the replay omits `--limit` entirely rather than repeating a value
+    // the token already carries (and that would be wrong here anyway —
+    // the parsed 25, not the effective 2).
+    assert_eq!(
+        next_actions[0]["command"], "my-cli list --continue tok-2",
+        "next-page command should omit --limit, not repeat the parsed default (25): {}",
+        output.rendered
+    );
+}
+
+/// `with_limit` only means anything relative to a token to resume with —
+/// calling it on `CursorContinuation::done()` (a handler misuse: there's no
+/// `continue_from` for the reported limit to describe) must not claim
+/// `self_sufficient_limit`, since there's no token for it to be
+/// self-sufficient *about*.
+#[tokio::test]
+async fn self_sufficient_limit_is_false_on_a_completed_page_even_if_with_limit_was_called() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!([{"name": "alpha"}]))
+                .with_cursor(CursorContinuation::done().with_limit(2)))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(rendered["cursor"]["has_more"], false);
+    assert_eq!(rendered["cursor"]["self_sufficient_limit"], json!(false));
+    assert!(
+        rendered.get("next_actions").is_none(),
+        "{}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn max_limit_rejects_an_explicit_limit_above_the_cap_but_allows_the_cap_itself() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(1, 3)),
+    );
+
+    let output = cli.run(["my-cli", "list", "--limit", "4"]).await;
+    assert_eq!(
+        output.exit_code, 2,
+        "--limit above max_limit should be a usage error: {}",
+        output.rendered
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--limit", "3", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+}
+
+#[tokio::test]
+async fn zero_and_negative_limit_are_rejected_at_parse_time() {
+    // Unlike offset pagination, a cursor's `--limit` has no "0/negative means
+    // unlimited" reading — it's a per-request page size sent to a backend,
+    // not a bound on data the framework already holds.
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(1, 0)),
+    );
+
+    let output = cli.run(["my-cli", "list", "--limit", "0"]).await;
+    assert_eq!(
+        output.exit_code, 2,
+        "--limit 0 should be a usage error: {}",
+        output.rendered
+    );
+
+    let output = cli.run(["my-cli", "list", "--limit", "-1"]).await;
+    assert_eq!(
+        output.exit_code, 2,
+        "negative --limit should be a usage error: {}",
+        output.rendered
+    );
+}
+
+/// A command author setting `default_limit` to `0` (or negative) can never
+/// satisfy an unset `--limit` with a valid page size; caught at registration
+/// time as a development-time safety net, same idiom as
+/// `with_pagination`'s `default_limit > max_limit` debug_assert.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "greater than zero"))]
+fn with_cursor_panics_when_default_limit_is_not_positive() {
+    let _unused = CommandSpec::new("list", "List things").with_cursor(CursorConfig::new(0, 5));
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "greater than its max_limit")
+)]
+fn with_cursor_panics_when_default_limit_exceeds_max_limit() {
+    let _unused = CommandSpec::new("list", "List things").with_cursor(CursorConfig::new(10, 5));
+}
+
+/// A command picks one pagination style, not both; caught at registration
+/// time (inside `Cli::add_command`'s clap-tree build), not left as a silent
+/// "cursor wins" or "offset wins" resolution.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    should_panic(expected = "picks one pagination style")
+)]
+fn with_pagination_and_with_cursor_together_panics_on_registration() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("bad", "Bad")
+            .no_auth(true)
+            .with_pagination(cli_engine::PaginationConfig::default())
+            .with_cursor(CursorConfig::new(1, 0)),
+        async |_ctx| Ok(CommandResult::new(json!([]))),
+    ));
+}
+
+/// Same footgun as `raw_output_paired_with_pagination_panics_on_registration`
+/// in `tests/foundation.rs`, for the cursor flavor: a single verbatim string
+/// has no pages either.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "mutually exclusive"))]
+fn raw_output_paired_with_cursor_panics_on_registration() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("bad", "Bad")
+            .no_auth(true)
+            .raw_output(true)
+            .with_cursor(CursorConfig::new(1, 0)),
+        async |_ctx| Ok(CommandResult::new(json!("text"))),
+    ));
+}
+
+#[tokio::test]
+async fn next_page_action_replays_other_flags_the_user_passed() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_arg(Arg::new("status").long("status"))
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run(["my-cli", "list", "--status", "active", "--output", "json"])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "my-cli list --status active --limit 2 --continue 2"
+    );
+}
+
+#[tokio::test]
+async fn next_page_action_quotes_a_continuation_token_with_shell_metacharacters() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "json"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let rendered: serde_json::Value = serde_json::from_str(&output.rendered).expect("valid json");
+    assert_eq!(
+        rendered["next_actions"][0]["command"],
+        "my-cli list --limit 2 --continue \"a b;c\""
+    );
+}
+
+#[tokio::test]
+async fn human_output_shows_so_far_summary_when_total_is_unknown() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("(2 rows so far; use --limit 2 --continue 2 for more)"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        output.rendered.contains("Next steps:"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        output
+            .rendered
+            .contains("my-cli list --limit 2 --continue 2"),
+        "{}",
+        output.rendered
+    );
+}
+
+/// The table-footer "so far" line interpolates the resume token directly
+/// into a sentence, separately from the `next_actions` command (which
+/// already quotes it) — a token containing shell metacharacters needs the
+/// same quoting here too, or the printed instruction is unusable/unsafe to
+/// copy-paste.
+#[tokio::test]
+async fn human_output_so_far_summary_quotes_a_continuation_token_with_shell_metacharacters() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!(items())).with_cursor(CursorContinuation::more("a b;c")))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("so far; use --limit 2 --continue \"a b;c\" for more"),
+        "{}",
+        output.rendered
+    );
+}
+
+/// The "so far" hint must agree with the generated `next_actions` command:
+/// when the handler called `with_limit`, the token alone is self-sufficient
+/// about page size, so `next_actions` omits `--limit` — and this hint must
+/// omit it too, or copy-pasting it would suggest a `--limit` that could
+/// differ from (or exceed the command's own cap for) the effective size the
+/// token actually carries.
+#[tokio::test]
+async fn human_output_so_far_summary_omits_limit_when_the_token_is_self_sufficient() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(25, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!(items()))
+                .with_cursor(CursorContinuation::more("tok-2").with_limit(2)))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("so far; use --continue tok-2 for more"),
+        "{}",
+        output.rendered
+    );
+    assert!(
+        !output.rendered.contains("--limit"),
+        "self-sufficient token must not suggest a --limit: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn human_output_shows_total_when_known() {
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(
+                CommandResult::new(json!([{"name": "alpha"}, {"name": "beta"}]))
+                    .with_cursor(CursorContinuation::more("2").with_total(4)),
+            )
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output.rendered.contains("(2 of 4 rows)"),
+        "{}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn human_output_on_last_page_shows_summary_but_no_next_steps() {
+    let cli = cli_with_cursor_list_command(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+    );
+
+    let output = cli
+        .run([
+            "my-cli",
+            "list",
+            "--continue",
+            "2",
+            "--limit",
+            "2",
+            "--output",
+            "human",
+        ])
+        .await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(output.rendered.contains("(2 rows)"), "{}", output.rendered);
+    assert!(
+        !output.rendered.contains("Next steps:"),
+        "no next page exists: {}",
+        output.rendered
+    );
+}
+
+#[tokio::test]
+async fn human_standalone_summary_for_a_non_table_cursor_response() {
+    // Mirrors `tests/pagination.rs`'s `human_standalone_summary_...` for the
+    // cursor flavor: a bare array of scalars renders via `render_array_lines`,
+    // not `render_table`, so the standalone `append_cursor_summary` line is
+    // the one that must fire, not the merged table footer.
+    let mut cli = Cli::new(CliConfig::new("my-cli", "Dev tooling", "my-cli"));
+    cli.add_command(RuntimeCommandSpec::new_with_context(
+        CommandSpec::new("list", "List things")
+            .no_auth(true)
+            .with_cursor(CursorConfig::new(2, 0)),
+        async |_ctx| {
+            Ok(CommandResult::new(json!(["alpha", "beta"]))
+                .with_cursor(CursorContinuation::more("2")))
+        },
+    ));
+
+    let output = cli.run(["my-cli", "list", "--output", "human"]).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    assert!(
+        output
+            .rendered
+            .contains("Showing 2 items so far; use --limit 2 --continue 2 for more"),
+        "{}",
+        output.rendered
+    );
+}
