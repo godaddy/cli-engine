@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.0...cli-engine-v0.10.1) (2026-10-08)
+
+
+### Features
+
+* add cursor-first pagination (--limit/--continue) ([#118](https://github.com/godaddy/cli-engine/issues/118)) ([c8af52c](https://github.com/godaddy/cli-engine/commit/c8af52c5086b7b9484c61d5ddc1b02c4e3bdcda6))
+* **auth:** capture id_token, add OIDC nonce, support ephemeral redirect ports ([#119](https://github.com/godaddy/cli-engine/issues/119)) ([84dd2cf](https://github.com/godaddy/cli-engine/commit/84dd2cf86ab95c81bc91a8220288933b98262107))
+
 ## [0.10.0](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.9.5...cli-engine-v0.10.0) (2026-10-05)
 
 
