@@ -72,21 +72,38 @@ use crate::{
 };
 
 mod callback_server;
+#[cfg(test)]
+mod redirect_tests;
 mod scopes;
 #[cfg(test)]
 mod tests;
 
 use callback_server::{
-    emit_auth_complete_message, emit_browser_login_prompt, pkce_challenge, random_state,
-    wait_for_callback,
+    emit_auth_complete_message, emit_browser_login_prompt, pkce_challenge, random_nonce,
+    random_state, wait_for_callback,
 };
 pub use scopes::ScopeHierarchy;
 use scopes::{
     StepUp, decode_jwt_claims, ensure_granted, extract_identity, granted_scopes,
-    parse_token_response, plan_step_up, union_scopes,
+    parse_token_response, plan_step_up, union_scopes, verify_id_token_nonce,
 };
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
+
+/// How the local callback listener's port is chosen. Private: callers select
+/// a variant through [`PkceAuthProvider::with_redirect_port`]/
+/// [`PkceAuthProvider::with_ephemeral_redirect_port`], not by naming this
+/// type directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectPort {
+    /// Bind exactly this port; `TcpListener::bind` fails if it's taken.
+    Fixed(u16),
+    /// Bind port `0` and let the OS assign a free loopback port (RFC 8252
+    /// §7.3 loopback interface redirection). Opt-in — see
+    /// [`PkceAuthProvider::with_ephemeral_redirect_port`].
+    Ephemeral,
+}
+
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
 /// Default timeout applied to OAuth token-endpoint requests (exchange/refresh)
 /// so a stalled token server cannot hang the CLI indefinitely.
@@ -111,6 +128,19 @@ struct StoredToken {
     #[serde(default)]
     #[zeroize(skip)]
     scopes: Vec<String>,
+    /// OIDC ID token, present when `openid` is among the granted scopes. Many
+    /// IdPs (GoDaddy's included) leave profile claims (`email`/`name`/etc.) off
+    /// the access token even when `openid`/`profile` are granted — those claims
+    /// live here instead. [`PkceAuthProvider::build_credential`] merges this
+    /// token's claims over the access token's (winning on overlap) when
+    /// deriving `Credential.identity`/`sub`.
+    ///
+    /// `#[serde(default)]` keeps tokens cached before this field was added
+    /// loadable (they decode with `None`, falling back to the access token's
+    /// own claims exactly as before). Not `#[zeroize(skip)]`: like
+    /// `access_token`/`refresh_token`, it can carry sensitive claims.
+    #[serde(default)]
+    id_token: Option<String>,
 }
 
 impl std::fmt::Debug for StoredToken {
@@ -121,6 +151,14 @@ impl std::fmt::Debug for StoredToken {
             .field(
                 "refresh_token",
                 if self.refresh_token.is_some() {
+                    &"Some([redacted])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "id_token",
+                if self.id_token.is_some() {
                     &"Some([redacted])"
                 } else {
                     &"None"
@@ -170,7 +208,7 @@ pub struct PkceAuthProvider {
     /// [`PkceAuthProvider::new`]. Looked up by the `env` passed to
     /// [`AuthProvider::get_credential`].
     environments: Option<Arc<crate::environments::Environments>>,
-    redirect_port: u16,
+    redirect_port: RedirectPort,
     redirect_uri: Option<String>,
     /// Timeout applied to token-endpoint requests (exchange and refresh).
     token_timeout: Duration,
@@ -198,6 +236,9 @@ pub struct PkceAuthProvider {
     /// Scope implication relationships from [`PkceAuthProvider::with_scope_hierarchy`].
     /// Empty by default, which preserves exact-string scope matching.
     scope_hierarchy: ScopeHierarchy,
+    /// Whether an id_token with no `nonce` claim at all is rejected outright.
+    /// `false` by default — see [`PkceAuthProvider::with_required_nonce`].
+    require_nonce: bool,
 }
 
 /// Default prioritized claim names for deriving a human-readable identity.
@@ -227,7 +268,7 @@ impl PkceAuthProvider {
             client_id: client_id.into(),
             scopes: scopes.iter().map(|s| s.as_ref().to_owned()).collect(),
             environments: None,
-            redirect_port: REDIRECT_PORT_DEFAULT,
+            redirect_port: RedirectPort::Fixed(REDIRECT_PORT_DEFAULT),
             redirect_uri: None,
             token_timeout: TOKEN_REQUEST_TIMEOUT_DEFAULT,
             client: reqwest::Client::new(),
@@ -241,6 +282,7 @@ impl PkceAuthProvider {
                 .collect(),
             cache: Arc::new(RwLock::new(HashMap::new())),
             scope_hierarchy: ScopeHierarchy::new(),
+            require_nonce: false,
         }
     }
 
@@ -301,9 +343,26 @@ impl PkceAuthProvider {
     }
 
     /// Sets the local redirect server port (default: 7443).
+    ///
+    /// `port == 0` behaves identically to
+    /// [`with_ephemeral_redirect_port`](Self::with_ephemeral_redirect_port) —
+    /// both bind and then read back whatever port the OS actually assigned —
+    /// so this is a documented equivalence, not an accident to guard against.
     #[must_use]
     pub fn with_redirect_port(mut self, port: u16) -> Self {
-        self.redirect_port = port;
+        self.redirect_port = RedirectPort::Fixed(port);
+        self
+    }
+
+    /// Requests an OS-assigned ("ephemeral") loopback port instead of a
+    /// fixed one (RFC 8252 §7.3 loopback interface redirection).
+    ///
+    /// Ignored when [`with_redirect_uri`](Self::with_redirect_uri) is also
+    /// set — an explicit full-URI override always wins, exactly as it
+    /// already does over [`with_redirect_port`](Self::with_redirect_port).
+    #[must_use]
+    pub fn with_ephemeral_redirect_port(mut self) -> Self {
+        self.redirect_port = RedirectPort::Ephemeral;
         self
     }
 
@@ -324,6 +383,11 @@ impl PkceAuthProvider {
     /// this when the OAuth client is allowlisted with a different URI, such as
     /// `http://localhost:{port}/callback`. The local listener always binds to
     /// `127.0.0.1` regardless of what is set here.
+    ///
+    /// The port in the final redirect URI is always whatever the local
+    /// listener actually bound to, even if the URI given here names a
+    /// specific port (or `0`) — only the port gets replaced after binding;
+    /// the scheme/host/path given here are preserved verbatim.
     #[must_use]
     pub fn with_redirect_uri(mut self, uri: impl Into<String>) -> Self {
         self.redirect_uri = Some(uri.into());
@@ -415,17 +479,35 @@ impl PkceAuthProvider {
         self
     }
 
+    /// Rejects a returned id_token that has no `nonce` claim at all, instead
+    /// of the default of waving it through.
+    ///
+    /// Off by default: not every IdP echoes `nonce` back on the id_token, and
+    /// without confirming this one does, turning it on risks a hard failure
+    /// on every login rather than closing a real gap. Turn this on once
+    /// you've confirmed the IdP you're talking to reliably includes it — an
+    /// actual nonce *mismatch* is always rejected regardless of this setting;
+    /// this only controls what happens when the claim is absent entirely.
+    #[must_use]
+    pub fn with_required_nonce(mut self) -> Self {
+        self.require_nonce = true;
+        self
+    }
+
     /// Builds a [`Credential`] from a stored token, deriving `identity` and `sub`
     /// from the access-token JWT claims when present.
     fn build_credential(&self, env: &str, token: &StoredToken) -> Credential {
-        let claims = decode_jwt_claims(&token.access_token);
-        let identity = claims
-            .as_ref()
-            .map(|claims| extract_identity(claims, &self.identity_claims))
-            .unwrap_or_default();
+        // The id_token (see `StoredToken::id_token`) is the OIDC-standard home
+        // for profile claims; merge it over the access token's claims, letting
+        // its values win on a shared key, so `identity`/`sub` reflect whichever
+        // token actually carries them.
+        let mut claims = decode_jwt_claims(&token.access_token).unwrap_or_default();
+        if let Some(id_claims) = token.id_token.as_deref().and_then(decode_jwt_claims) {
+            claims.extend(id_claims);
+        }
+        let identity = extract_identity(&claims, &self.identity_claims);
         let sub = claims
-            .as_ref()
-            .and_then(|claims| claims.get("sub"))
+            .get("sub")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
@@ -503,25 +585,90 @@ impl PkceAuthProvider {
         Ok(self.effective_oauth(env)?.scopes)
     }
 
-    fn effective_redirect_uri(&self) -> String {
-        self.redirect_uri
-            .clone()
-            .unwrap_or_else(|| format!("http://127.0.0.1:{}/callback", self.redirect_port))
+    /// Decides the redirect-URI template and the port to request from
+    /// `TcpListener::bind`, without touching a socket.
+    ///
+    /// Precedence, highest first: an explicit
+    /// [`with_redirect_uri`](Self::with_redirect_uri) override, then
+    /// [`with_redirect_port`](Self::with_redirect_port)/
+    /// [`with_ephemeral_redirect_port`](Self::with_ephemeral_redirect_port).
+    /// The returned port is `0` for [`RedirectPort::Ephemeral`] — this
+    /// function alone cannot know the real port; only binding and reading it
+    /// back (see [`bind_callback_listener`](Self::bind_callback_listener))
+    /// can.
+    fn redirect_url_template(&self) -> Result<(url::Url, u16)> {
+        if let Some(uri) = &self.redirect_uri {
+            let parsed = url::Url::parse(uri)
+                .map_err(|e| CliCoreError::message(format!("invalid redirect URI '{uri}': {e}")))?;
+            let port = parsed
+                .port()
+                .or_else(|| parsed.port_or_known_default())
+                .ok_or_else(|| {
+                    CliCoreError::message(format!("redirect URI '{uri}' has no port"))
+                })?;
+            return Ok((parsed, port));
+        }
+        let requested_port = match self.redirect_port {
+            RedirectPort::Fixed(port) => port,
+            RedirectPort::Ephemeral => 0,
+        };
+        let url = url::Url::parse(&format!("http://127.0.0.1:{requested_port}/callback"))
+            .map_err(|e| CliCoreError::message(format!("invalid default redirect URI: {e}")))?;
+        Ok((url, requested_port))
     }
 
-    /// Parses the effective redirect URI and returns `(bind_port, callback_path)`.
-    fn parse_redirect_uri(&self) -> Result<(u16, String)> {
-        let uri_str = self.effective_redirect_uri();
-        let parsed = url::Url::parse(&uri_str)
-            .map_err(|e| CliCoreError::message(format!("invalid redirect URI '{uri_str}': {e}")))?;
-        let port = parsed
-            .port()
-            .or_else(|| parsed.port_or_known_default())
-            .ok_or_else(|| {
-                CliCoreError::message(format!("redirect URI '{uri_str}' has no port"))
-            })?;
-        let path = parsed.path().to_owned();
-        Ok((port, path))
+    /// Binds the local callback listener and returns it together with the
+    /// exact redirect URI that must be sent both at authorization and at
+    /// token exchange (RFC 6749 §4.1.3 requires the same value at both
+    /// steps) and the path to match the incoming callback request against.
+    ///
+    /// The bound listener's actual port — read back via
+    /// `TcpListener::local_addr` — always becomes the URI's port. For a
+    /// [`RedirectPort::Fixed`] port, or an explicit non-zero port in
+    /// [`with_redirect_uri`](Self::with_redirect_uri), this is just an echo
+    /// of the port that was requested (bind already fails if that port is
+    /// taken, so it can't differ). For [`RedirectPort::Ephemeral`] — or a
+    /// `with_redirect_uri` that itself names port `0` — it's the only way to
+    /// learn the port at all.
+    ///
+    /// Whenever the bound port matches what was requested, an explicit
+    /// [`with_redirect_uri`](Self::with_redirect_uri) override is returned
+    /// **verbatim**, byte-for-byte, rather than re-serialized from the parsed
+    /// `Url` — re-serializing can silently rewrite it (an empty path becomes
+    /// `/`, an explicit port matching the scheme's default gets dropped),
+    /// and OAuth servers commonly match `redirect_uri` exactly, so a rewrite
+    /// the caller never asked for can turn a previously-working
+    /// configuration into an `invalid_grant`/`invalid_request` failure.
+    fn bind_callback_listener(&self) -> Result<(TcpListener, String, String)> {
+        let (redirect_url, requested_port) = self.redirect_url_template()?;
+
+        let listener =
+            TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], requested_port)))
+                .map_err(|err| {
+                    CliCoreError::message(format!(
+                        "failed to bind callback server on port {requested_port}: {err}"
+                    ))
+                })?;
+        let actual_port = listener
+            .local_addr()
+            .map_err(|err| {
+                CliCoreError::message(format!("failed to read bound callback port: {err}"))
+            })?
+            .port();
+
+        if let Some(uri) = &self.redirect_uri
+            && actual_port == requested_port
+        {
+            let callback_path = redirect_url.path().to_owned();
+            return Ok((listener, uri.clone(), callback_path));
+        }
+
+        let mut redirect_url = redirect_url;
+        redirect_url.set_port(Some(actual_port)).map_err(|()| {
+            CliCoreError::message(format!("redirect URI '{redirect_url}' cannot carry a port"))
+        })?;
+        let callback_path = redirect_url.path().to_owned();
+        Ok((listener, redirect_url.to_string(), callback_path))
     }
 
     /// Builds the storage key for this provider and `env`.
@@ -620,6 +767,9 @@ impl PkceAuthProvider {
                 if refreshed.refresh_token.is_none() {
                     refreshed.refresh_token = Some(refresh_token.to_owned());
                 }
+                if refreshed.id_token.is_none() {
+                    refreshed.id_token = token.id_token.clone();
+                }
                 self.save_stored(env, &refreshed).await?;
                 self.store_cached_token(env, refreshed.clone()).await;
                 return Ok(Some(refreshed));
@@ -646,10 +796,11 @@ impl PkceAuthProvider {
     async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
+        let nonce = random_nonce();
         // Resolve the OAuth config once for this whole flow (authorize + exchange).
         let oauth = self.effective_oauth(env)?;
-        let redirect_uri = self.effective_redirect_uri();
         let scope = scopes.join(" ");
+        let (listener, redirect_uri, callback_path) = self.bind_callback_listener()?;
 
         let auth_params = [
             ("response_type", "code"),
@@ -657,31 +808,24 @@ impl PkceAuthProvider {
             ("redirect_uri", &redirect_uri),
             ("scope", &scope),
             ("state", &state),
+            ("nonce", &nonce),
             ("code_challenge", &code_challenge),
             ("code_challenge_method", "S256"),
         ];
         let url = url::Url::parse_with_params(&oauth.auth_url, &auth_params)
             .map_err(|err| CliCoreError::message(format!("invalid auth URL: {err}")))?;
 
-        let (bind_port, callback_path) = self.parse_redirect_uri()?;
-
-        // Start the local callback server before opening the browser so the
-        // redirect lands as soon as the user approves.
-        let listener = TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], bind_port)))
-            .map_err(|err| {
-            CliCoreError::message(format!(
-                "failed to bind callback server on port {bind_port}: {err}"
-            ))
-        })?;
-
         emit_browser_login_prompt(&url);
-        drop(open::that(url.as_str()));
+        if let Err(err) = open::that(url.as_str()) {
+            tracing::debug!(error = %err, "failed to auto-open the browser for authentication");
+        }
 
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
         let token = self
-            .exchange_code_for_token(&oauth, &code, &code_verifier, scopes)
+            .exchange_code_for_token(&oauth, &code, &code_verifier, &redirect_uri, scopes)
             .await?;
+        verify_id_token_nonce(&token, &nonce, self.require_nonce)?;
         emit_auth_complete_message();
         Ok(token)
     }
@@ -710,14 +854,13 @@ impl PkceAuthProvider {
         oauth: &OAuthSection,
         code: &str,
         code_verifier: &str,
+        redirect_uri: &str,
         requested_scopes: &[String],
     ) -> Result<StoredToken> {
-        let redirect_uri = self.effective_redirect_uri();
-
         let params = [
             ("grant_type", "authorization_code"),
             ("client_id", &oauth.client_id),
-            ("redirect_uri", &redirect_uri),
+            ("redirect_uri", redirect_uri),
             ("code", code),
             ("code_verifier", code_verifier),
         ];
@@ -839,4 +982,16 @@ impl AuthProvider for PkceAuthProvider {
         let cache = self.cache.read().await;
         Ok(cache.keys().cloned().collect())
     }
+}
+
+/// Shared fixture for both `tests` and `redirect_tests` submodules.
+#[cfg(test)]
+pub(super) fn test_provider() -> PkceAuthProvider {
+    PkceAuthProvider::new(
+        "test",
+        "https://example.com/auth",
+        "https://example.com/token",
+        "client-id",
+        &["openid"],
+    )
 }

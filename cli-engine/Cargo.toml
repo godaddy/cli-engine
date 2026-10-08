@@ -18,8 +18,9 @@ async-trait = "0.1.89"
 base64 = "0.22.1"
 bytes = "1.11"
 cli-engine-macros = { version = "0.2.0", path = "../cli-engine-macros" }
+jsonwebtoken = { version = "11", optional = true, default-features = false }
 keyring = { version = "3.6.1", optional = true, default-features = false }
-open = { version = "5.3.2", optional = true }
+open = { version = "5.4.1", optional = true }
 rand = { version = "0.9", optional = true }
 sha2 = { version = "0.10.9", optional = true }
 url = { version = "2.5.4", optional = true }
@@ -52,7 +53,7 @@ keyring = { version = "3.6.1", optional = true, default-features = false, featur
 keyring = { version = "3.6.1", optional = true, default-features = false, features = ["windows-native"] }
 
 [features]
-pkce-auth = ["dep:keyring", "dep:open", "dep:rand", "dep:sha2", "dep:url", "dep:zeroize"]
+pkce-auth = ["dep:jsonwebtoken", "dep:keyring", "dep:open", "dep:rand", "dep:sha2", "dep:url", "dep:zeroize"]
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
