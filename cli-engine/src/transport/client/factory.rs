@@ -95,18 +95,39 @@ mod tests {
     use super::*;
     use crate::transport::client::{RestoreDefaultUserAgent, UA_TEST_LOCK};
 
-    /// Serves one request on loopback and returns the raw request head.
+    /// Serves one request on loopback and returns the request head (the bytes
+    /// up to the blank line that ends the headers).
+    ///
+    /// TCP may deliver the head across several reads, so this reads until the
+    /// terminator arrives. It then drains any request body still in flight
+    /// before closing, so the client never sees a reset mid-write.
     fn serve_once() -> (String, std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let url = format!("http://{}/", listener.local_addr().expect("local addr"));
         let handle = std::thread::spawn(move || {
+            const HEAD_END: &[u8] = b"\r\n\r\n";
             let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut received = Vec::new();
             let mut buf = [0_u8; 4096];
-            let read = stream.read(&mut buf).expect("read request");
+            let head_len = loop {
+                if let Some(at) = received.windows(HEAD_END.len()).position(|w| w == HEAD_END) {
+                    break at;
+                }
+                let read = stream.read(&mut buf).expect("read request head");
+                assert!(read > 0, "connection closed before the request head ended");
+                received.extend_from_slice(&buf[..read]);
+            };
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
                 .expect("write response");
-            String::from_utf8_lossy(&buf[..read]).into_owned()
+            stream
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("set drain timeout");
+            while matches!(stream.read(&mut buf), Ok(read) if read > 0) {}
+            String::from_utf8_lossy(&received[..head_len]).into_owned()
         });
         (url, handle)
     }
