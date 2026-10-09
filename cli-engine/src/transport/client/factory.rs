@@ -259,6 +259,26 @@ mod tests {
         assert!(head.contains("x-extra: 1"), "{head}");
     }
 
+    /// Replacing the user-agent invalidates the published pair, so it must not
+    /// leave a previous execution's attribution headers behind.
+    #[test]
+    fn setting_the_user_agent_clears_previously_published_headers() {
+        let _guard = UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreDefaultUserAgent;
+        super::super::set_client_identity(
+            "cli-a/1".to_owned(),
+            [("x-client-session".to_owned(), "a-session-hash".to_owned())].into(),
+        );
+
+        super::super::set_default_user_agent("cli-b/2");
+
+        let (user_agent, headers) = client_identity_snapshot();
+        assert_eq!(user_agent, "cli-b/2");
+        assert!(headers.is_empty(), "stale headers survived: {headers:?}");
+    }
+
     /// A `user-agent` entry among the published headers must not replace the
     /// identity user-agent on clients from the factory.
     #[tokio::test]

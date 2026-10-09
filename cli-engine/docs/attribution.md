@@ -12,7 +12,7 @@ It is off by default. A CLI opts in with `CliConfig::with_client_attribution`.
 | `User-Agent` | `agent/<slug>` (for example `agent/claude-code`) | A known AI harness is detected |
 | `x-client-session` (name configurable) | 16 hex characters: a salted SHA-256 prefix of the harness session id | The harness exposes a session id, and the user has not opted out |
 
-`<mode>` is the first that applies: `agent` (a harness marker is present), `ci` (the `CI` variable is set to anything other than `0`, `false`, `no`, or `off`), `interactive` (stdin and stderr are terminals), or `script` (none of the above).
+`<mode>` is the first that applies: `agent` (a harness marker is present), `ci` (the `CI` variable is set to a non-blank value other than `0`, `false`, `no`, or `off`, compared case-insensitively), `interactive` (stdin and stderr are terminals), or `script` (none of the above).
 
 An example, from a Claude Code session: `User-Agent: gddy/1.4.0 mode/agent agent/claude-code` and `x-gddy-session: 3f9a0c51d27be8a4`.
 

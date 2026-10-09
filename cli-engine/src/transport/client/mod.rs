@@ -44,9 +44,16 @@ fn client_identity() -> &'static RwLock<ClientIdentity> {
 /// outbound token traffic that reads this default — the PKCE provider's
 /// token/refresh requests and the client-credentials injector. A per-client
 /// user-agent still overrides it for that client.
+///
+/// This replaces the whole process-wide outbound identity: it also drops any
+/// headers published by client attribution, so the new user-agent is never
+/// paired with a previous execution's session header.
 pub fn set_default_user_agent(user_agent: impl Into<String>) {
     if let Ok(mut current) = client_identity().write() {
         current.user_agent = user_agent.into();
+        // The headers belong to the identity this replaces; keeping them would
+        // pair the new user-agent with a previous execution's session hash.
+        current.headers.clear();
     }
 }
 
