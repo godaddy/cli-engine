@@ -87,8 +87,7 @@ where
     E: Write,
     Shutdown: Future<Output = ()>,
 {
-    cli.install_default_user_agent();
-    let output = run_until_signal(cli.run(args), shutdown).await;
+    let output = run_until_signal(run_with_depth(cli, args, 0, true), shutdown).await;
     if output.exit_code == 130
         && output.rendered == "command interrupted\n"
         && let Some(on_shutdown) = &cli.on_shutdown
@@ -105,7 +104,17 @@ where
 
 /// Runs the CLI like [`Cli::run`](super::Cli::run), threading the `argv0` dispatch recursion
 /// `depth` so a chain of personality hand-offs is bounded by [`MAX_ARGV0_DEPTH`](super::argv0::MAX_ARGV0_DEPTH).
-pub(super) async fn run_with_depth<I, S>(cli: &Cli, args: I, depth: usize) -> CliRunOutput
+/// `publish_identity` installs the outbound identity process-wide once it is
+/// known which CLI will actually run (after argv0 resolution), so a personality
+/// hand-off publishes the personality's identity. Only the `execute*`
+/// entrypoints set it: plain [`Cli::run`](super::Cli::run) must not mutate
+/// process globals, since tests call it concurrently.
+pub(super) async fn run_with_depth<I, S>(
+    cli: &Cli,
+    args: I,
+    depth: usize,
+    publish_identity: bool,
+) -> CliRunOutput
 where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
@@ -118,10 +127,14 @@ where
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let text_args = match super::argv0::resolve_argv0(cli, text_args, depth).await {
+    let text_args = match super::argv0::resolve_argv0(cli, text_args, depth, publish_identity).await
+    {
         Argv0Outcome::Handled(output) => return output,
         Argv0Outcome::Proceed(args) => args,
     };
+    if publish_identity {
+        cli.install_client_identity();
+    }
     let mut clap_args = normalize_optional_global_flags_before_command(&cli.root, &text_args);
     if has_root_version_flag(&text_args, &cli.root, &cli.config.name) {
         return finish_run(
@@ -413,7 +426,8 @@ where
                     &bool_flags,
                     &value_flags,
                 );
-                return Box::pin(run_with_depth(cli, augmented, depth + 1)).await;
+                // Same CLI, identity already published above.
+                return Box::pin(run_with_depth(cli, augmented, depth + 1, false)).await;
             }
             return finish_run(
                 cli,

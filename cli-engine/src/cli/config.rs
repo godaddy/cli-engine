@@ -134,6 +134,9 @@ pub struct CliConfig {
     /// the engine derives `name/version` from this config. See
     /// [`CliConfig::user_agent_string`].
     pub user_agent: Option<String>,
+    /// Opt-in client attribution (user-agent tokens and a hashed session
+    /// header). See [`CliConfig::with_client_attribution`].
+    pub attribution: Option<crate::transport::AttributionConfig>,
     /// Extra HTTP header names to redact in `--debug transport` output, on top
     /// of the built-in sensitive set (`authorization`, `proxy-authorization`,
     /// `cookie`, `set-cookie`, `x-api-key`). Set CLI-specific secret-bearing
@@ -386,6 +389,24 @@ impl CliConfig {
     #[must_use]
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Opts this CLI into client attribution.
+    ///
+    /// On execution the engine appends `mode/<agent|ci|interactive|script>`
+    /// (and `agent/<slug>` for a detected AI harness) to the outbound
+    /// User-Agent, and, when the harness exposes a session id, sends a salted
+    /// hash of it in a correlation header. Nothing is sent to any endpoint the
+    /// CLI was not already calling. The identity is captured when each client is
+    /// created, so create clients inside command handlers, not during module
+    /// registration. See `docs/attribution.md`.
+    #[must_use]
+    pub fn with_client_attribution(
+        mut self,
+        attribution: crate::transport::AttributionConfig,
+    ) -> Self {
+        self.attribution = Some(attribution);
         self
     }
 

@@ -783,6 +783,10 @@ The transport module provides a `reqwest`-based HTTP client with:
 Auth injectors include bearer token, provider bearer, cookie, basic auth, API key, client
 credentials, and no-op injectors.
 
+Code that needs a plain `reqwest::Client` (progenitor-generated clients, hand-rolled streaming or multipart uploads) builds it from `transport::reqwest_client_builder()` instead of `reqwest::Client::builder()`. The builder comes preconfigured with the process-wide user-agent and default headers, a connect timeout, and an idle read timeout, so outbound policy is defined once in the engine. Callers layer their own settings on top.
+
+A CLI can opt into client attribution (user-agent tokens for the kind of caller, and a hashed harness session id) with `CliConfig::with_client_attribution`. See [attribution.md](attribution.md) for exactly what is sent, how to opt out, and the limits of detection.
+
 ### HTTP debug logging
 
 The global `--debug` flag drives transport diagnostics through the `transport` component. Bare `--debug` enables every component; to select one, use the `=` form so the value is not mistaken for the command: `--debug=transport`, or `--debug='*,-transport'` to keep everything else but silence HTTP. (As an optional-value global flag, `--debug` only attaches a space-separated value when it appears after the leaf command; before the command, write `--debug=transport`.) `flags::debug_component_enabled` parses the comma-separated pattern.

@@ -465,7 +465,7 @@ impl HttpClient {
             .header(header::IF_MATCH, etag)
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
-        self.inject_auth(&mut request).await?;
+        self.prepare_request(&mut request).await?;
         self.log_request(&request);
         self.base
             .execute(request)
@@ -497,18 +497,15 @@ impl HttpClient {
         form: reqwest::multipart::Form,
     ) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let mut builder = self
+        let builder = self
             .base
             .post(url)
             .header(header::USER_AGENT, self.user_agent.clone())
             .multipart(form);
-        for (key, value) in &self.default_headers {
-            builder = builder.header(key, value);
-        }
         let mut request = builder
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
-        self.inject_auth(&mut request).await?;
+        self.prepare_request(&mut request).await?;
         self.log_request(&request);
         self.base
             .execute(request)
@@ -547,13 +544,10 @@ impl HttpClient {
         if !content_type.is_empty() {
             builder = builder.header(header::CONTENT_TYPE, content_type);
         }
-        for (key, value) in &self.default_headers {
-            builder = builder.header(key, value);
-        }
         let mut request = builder
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
-        self.inject_auth(&mut request).await?;
+        self.prepare_request(&mut request).await?;
         self.log_request(&request);
         self.base
             .execute(request)
@@ -591,17 +585,14 @@ impl HttpClient {
 
     async fn send_get_raw_once(&self, path: &str) -> Result<reqwest::Response> {
         let url = format!("{}{}", self.base_url, path);
-        let mut builder = self
+        let builder = self
             .base
             .get(url)
             .header(header::USER_AGENT, self.user_agent.clone());
-        for (key, value) in &self.default_headers {
-            builder = builder.header(key, value);
-        }
         let mut request = builder
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
-        self.inject_auth(&mut request).await?;
+        self.prepare_request(&mut request).await?;
         self.log_request(&request);
         self.base
             .execute(request)
@@ -618,7 +609,7 @@ impl HttpClient {
             .build_request(Method::POST, path, body)?
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
-        self.inject_auth(&mut request).await?;
+        self.prepare_request(&mut request).await?;
         self.log_request(&request);
         self.base
             .execute(request)
@@ -711,7 +702,7 @@ impl HttpClient {
             .build_request(method.clone(), path, body)?
             .build()
             .map_err(|err| CliCoreError::message(format!("transport: create request: {err}")))?;
-        self.inject_auth(&mut request).await?;
+        self.prepare_request(&mut request).await?;
         let method_text = method.as_str().to_owned();
         self.log_request(&request);
         self.base
@@ -737,9 +728,6 @@ impl HttpClient {
             builder = builder
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(body);
-        }
-        for (key, value) in &self.default_headers {
-            builder = builder.header(key, value);
         }
         Ok(builder)
     }
@@ -847,11 +835,49 @@ impl HttpClient {
         Ok((status, body))
     }
 
-    async fn inject_auth(&self, request: &mut reqwest::Request) -> Result<()> {
+    /// Finalizes a built request: applies default headers, then injects auth.
+    ///
+    /// The client's own defaults replace a same-named header the request set
+    /// by default (for example `Content-Type`), once. Process-wide defaults
+    /// rank lowest: they only fill in headers still absent, so they can never
+    /// duplicate or override anything. Applying both here, on the built
+    /// request, rather than appending on the builder, is what prevents
+    /// duplicate header lines and keeps the defaults visible in the
+    /// `--debug transport` trace.
+    async fn prepare_request(&self, request: &mut reqwest::Request) -> Result<()> {
+        self.apply_default_headers(request)?;
         self.auth
             .inject(request)
             .await
             .map_err(|err| CliCoreError::message(format!("transport: auth inject: {err}")))
+    }
+
+    fn apply_default_headers(&self, request: &mut reqwest::Request) -> Result<()> {
+        let parse = |name: &str, value: &str| -> Result<_> {
+            let invalid = |err: &dyn std::fmt::Display| {
+                CliCoreError::message(format!("transport: invalid default header {name:?}: {err}"))
+            };
+            Ok((
+                header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| invalid(&e))?,
+                header::HeaderValue::from_str(value).map_err(|e| invalid(&e))?,
+            ))
+        };
+        for (name, value) in &self.default_headers {
+            let (name, value) = parse(name, value)?;
+            // A multipart `Content-Type` carries the boundary the server needs
+            // to parse the body; replacing it would make the upload unreadable.
+            if name == header::CONTENT_TYPE && has_multipart_content_type(request) {
+                continue;
+            }
+            request.headers_mut().insert(name, value);
+        }
+        for (name, value) in &self.process_headers {
+            let (name, value) = parse(name, value)?;
+            if !request.headers().contains_key(&name) {
+                request.headers_mut().insert(name, value);
+            }
+        }
+        Ok(())
     }
 
     async fn decode_json_response<T: Default + DeserializeOwned>(
@@ -933,4 +959,19 @@ impl HttpClient {
             }
         }
     }
+}
+
+/// Whether the request's `Content-Type` is a multipart type (its generated
+/// value carries the part boundary).
+fn has_multipart_content_type(request: &reqwest::Request) -> bool {
+    request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("multipart/")
+        })
 }
