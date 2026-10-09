@@ -414,8 +414,7 @@ impl Cli {
     fn install_client_identity(&self) {
         let (user_agent, headers) =
             self.client_identity(&Signals::from_process(&self.config.app_id));
-        crate::transport::set_default_user_agent(user_agent);
-        crate::transport::set_default_headers(headers);
+        crate::transport::client::set_client_identity(user_agent, headers);
     }
 
     /// Computes the outbound User-Agent and default headers for `signals`:
@@ -579,11 +578,17 @@ impl Cli {
     ///
     /// Same `--env`/tree-pruning caveat as [`Cli::execute_from`]: see
     /// [`CliConfig::with_startup_args`].
+    ///
+    /// Unlike the `execute*` entrypoints, this does not publish the process-wide
+    /// outbound identity (user-agent, default headers, client attribution), so
+    /// merely running a `Cli` never mutates global state. Use an `execute*`
+    /// entrypoint, or `transport::set_default_user_agent`, when outbound
+    /// requests must carry the configured identity.
     pub async fn run<I, S>(&self, args: I) -> CliRunOutput
     where
         I: IntoIterator<Item = S>,
         S: Into<std::ffi::OsString> + Clone,
     {
-        run::run_with_depth(self, args, 0).await
+        run::run_with_depth(self, args, 0, false).await
     }
 }

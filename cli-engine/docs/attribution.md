@@ -47,6 +47,6 @@ let config = CliConfig::new("my-cli", "Team CLI", "my-cli")
     );
 ```
 
-The engine resolves attribution once per execution, before any command runs, and publishes it process-wide. It is applied to every `HttpClient` and to every client built from `transport::reqwest_client_builder()` (the entry point for generated or hand-rolled `reqwest` clients). The user-agent tokens also reach the engine's own OAuth token requests; the session header does not.
+The engine resolves attribution once per execution, before any command runs, and publishes it process-wide. Publishing happens in the `execute*` entrypoints, after argv0 resolution, so an argv0 personality publishes its own identity and not the dispatcher's. `Cli::run` deliberately does not publish (so running a `Cli` in tests never mutates process-wide state); a harness that drives `Cli::run` and needs outbound requests to carry the identity must publish it itself. The user-agent and default headers are published and read together, so a client never sees one without the other. It is applied to every `HttpClient` and to every client built from `transport::reqwest_client_builder()` (the entry point for generated or hand-rolled `reqwest` clients). The user-agent tokens also reach the engine's own OAuth token requests; the session header does not.
 
 Because the headers are process-wide defaults, they are sent to whatever host those clients call. Build clients that talk to third-party hosts from a plain `reqwest::Client` if the session header should not reach them.

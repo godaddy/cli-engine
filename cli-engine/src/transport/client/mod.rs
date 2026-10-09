@@ -69,10 +69,50 @@ pub fn default_user_agent() -> String {
 /// A client's own headers (including auth) win over these on a name clash.
 /// Unlike the user-agent, these are not applied to the engine's OAuth token
 /// requests.
+///
+/// An entry whose name or value is not a valid HTTP header is dropped here
+/// (and its name logged), so every consumer of the defaults sees only headers
+/// that can actually be sent.
 pub fn set_default_headers(headers: BTreeMap<String, String>) {
+    let headers = valid_headers(headers);
     if let Ok(mut current) = client_identity().write() {
         current.headers = headers;
     }
+}
+
+/// Replaces the user-agent and default headers under one lock acquisition, so
+/// a concurrent reader never observes one app's user-agent with another app's
+/// headers.
+pub(crate) fn set_client_identity(user_agent: String, headers: BTreeMap<String, String>) {
+    let headers = valid_headers(headers);
+    if let Ok(mut current) = client_identity().write() {
+        current.user_agent = user_agent;
+        current.headers = headers;
+    }
+}
+
+/// Reads the user-agent and default headers under one lock acquisition. Client
+/// constructors use this so the pair they apply is always self-consistent.
+pub(crate) fn client_identity_snapshot() -> (String, BTreeMap<String, String>) {
+    client_identity().read().map_or_else(
+        |_| (BUILTIN_DEFAULT_USER_AGENT.to_owned(), BTreeMap::new()),
+        |identity| (identity.user_agent.clone(), identity.headers.clone()),
+    )
+}
+
+/// Keeps only entries that are valid HTTP header names with valid values.
+fn valid_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .into_iter()
+        .filter(|(name, value)| {
+            let valid = header::HeaderName::from_bytes(name.as_bytes()).is_ok()
+                && header::HeaderValue::from_str(value).is_ok();
+            if !valid {
+                tracing::warn!(header = %name, "ignoring invalid default header");
+            }
+            valid
+        })
+        .collect()
 }
 
 /// Returns the process-wide default headers set via [`set_default_headers`].
@@ -273,6 +313,8 @@ pub struct HttpClientBuilder {
     base_url: String,
     auth: Arc<dyn AuthInjector>,
     user_agent: String,
+    /// Process-wide default headers captured with `user_agent` in one snapshot.
+    process_headers: BTreeMap<String, String>,
     default_headers: BTreeMap<String, String>,
     logger: Arc<dyn TransportLogger>,
 }
@@ -281,10 +323,12 @@ impl HttpClientBuilder {
     /// Creates a builder with a base URL and auth injector.
     #[must_use]
     pub fn new(base_url: impl Into<String>, auth: Arc<dyn AuthInjector>) -> Self {
+        let (user_agent, process_headers) = client_identity_snapshot();
         Self {
             base_url: base_url.into(),
             auth,
-            user_agent: default_user_agent(),
+            user_agent,
+            process_headers,
             default_headers: BTreeMap::new(),
             logger: default_transport_logger(),
         }
@@ -337,7 +381,7 @@ impl HttpClientBuilder {
             base_url: self.base_url,
             auth: self.auth,
             user_agent: self.user_agent,
-            default_headers: merged_default_headers(self.default_headers),
+            default_headers: merged_default_headers(self.process_headers, self.default_headers),
             logger: self.logger,
         }
     }
@@ -345,10 +389,12 @@ impl HttpClientBuilder {
 
 /// Layers the client's own headers over the process-wide defaults so a
 /// per-client header wins on a name clash.
-fn merged_default_headers(own: BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut headers = default_headers();
-    headers.extend(own);
-    headers
+fn merged_default_headers(
+    mut process: BTreeMap<String, String>,
+    own: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    process.extend(own);
+    process
 }
 
 /// Converts a `reqwest` header map into owned name/value pairs for logging.

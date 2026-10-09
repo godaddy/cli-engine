@@ -155,6 +155,7 @@ struct RestoreDefaultUserAgent;
 impl Drop for RestoreDefaultUserAgent {
     fn drop(&mut self) {
         transport::set_default_user_agent("cli/dev");
+        transport::set_default_headers(Default::default());
     }
 }
 
@@ -6154,6 +6155,46 @@ async fn http_client_no_content_returns_default_result_preserves_legacy_skips_de
         .expect("204 should not try to decode a response body");
 
     assert_eq!(value, Thing::default());
+}
+
+/// A personality hand-off runs an independent `Cli` with its own config; the
+/// outbound identity published for the process must be that CLI's, not the
+/// dispatcher's.
+#[tokio::test]
+async fn execute_from_publishes_the_personality_identity_not_the_dispatchers() {
+    let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore = RestoreDefaultUserAgent;
+    let cli = Cli::new(
+        CliConfig::new("outer", "Outer", "outer")
+            .with_build(cli_engine::BuildInfo::new("1.0.0"))
+            .with_argv0_personality("inner", || {
+                CliConfig::new("inner", "Inner", "inner")
+                    .with_build(cli_engine::BuildInfo::new("9.9.9"))
+            }),
+    );
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+
+    cli.execute_from(["inner", "--version"], &mut stdout, &mut stderr)
+        .await
+        .expect("personality run completes");
+
+    assert_eq!(transport::default_user_agent(), "inner/9.9.9");
+}
+
+/// `Cli::run` never mutates process-wide state (tests call it concurrently);
+/// only the `execute*` entrypoints publish the outbound identity.
+#[tokio::test]
+async fn run_does_not_publish_the_process_identity() {
+    let _guard = USER_AGENT_TEST_LOCK.lock().await;
+    let _restore = RestoreDefaultUserAgent;
+    transport::set_default_user_agent("sentinel/1");
+    let cli = Cli::new(
+        CliConfig::new("outer", "Outer", "outer").with_build(cli_engine::BuildInfo::new("1.0.0")),
+    );
+
+    cli.run(["outer", "--version"]).await;
+
+    assert_eq!(transport::default_user_agent(), "sentinel/1");
 }
 
 #[tokio::test]

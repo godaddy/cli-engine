@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use super::{default_headers, default_user_agent};
+use super::client_identity_snapshot;
 
 /// Connect timeout applied to every client from [`reqwest_client_builder`].
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -40,17 +40,19 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// top (default headers, redirect policy, a per-client user-agent override).
 /// Later settings win.
 pub fn reqwest_client_builder() -> reqwest::ClientBuilder {
+    let (user_agent, headers) = client_identity_snapshot();
     reqwest::Client::builder()
-        .user_agent(default_user_agent())
-        .default_headers(process_default_header_map())
+        .user_agent(user_agent)
+        .default_headers(header_map(&headers))
         .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
         .read_timeout(DEFAULT_READ_TIMEOUT)
 }
 
-/// The process-wide default headers as a `HeaderMap`, skipping any entry that
-/// is not a valid header name or value rather than failing client construction.
-fn process_default_header_map() -> reqwest::header::HeaderMap {
-    default_headers()
+/// Converts default headers to a `HeaderMap`. Published defaults are already
+/// validated; an entry that still fails to convert is skipped rather than
+/// failing client construction.
+fn header_map(headers: &std::collections::BTreeMap<String, String>) -> reqwest::header::HeaderMap {
+    headers
         .iter()
         .filter_map(|(name, value)| {
             Some((
@@ -202,6 +204,97 @@ mod tests {
         assert!(head.contains("x-client-session: client"), "{head}");
         assert!(!head.contains("x-client-session: process"), "{head}");
         assert!(head.contains("x-process-only: 1"), "{head}");
+    }
+
+    /// The user-agent and default headers are published and read as a pair, so
+    /// a concurrent reader can never see one publish's user-agent with
+    /// another's headers.
+    #[test]
+    fn identity_pair_is_never_torn_across_concurrent_publishes() {
+        let _guard = UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreDefaultUserAgent;
+        let writers: Vec<_> = (0..4)
+            .map(|id| {
+                std::thread::spawn(move || {
+                    for _ in 0..2_000 {
+                        let tag = format!("app-{id}");
+                        super::super::set_client_identity(
+                            tag.clone(),
+                            std::collections::BTreeMap::from([("x-app".to_owned(), tag)]),
+                        );
+                    }
+                })
+            })
+            .collect();
+        let reader = std::thread::spawn(|| {
+            for _ in 0..20_000 {
+                let (user_agent, headers) = client_identity_snapshot();
+                if let Some(app) = headers.get("x-app") {
+                    assert_eq!(&user_agent, app, "torn identity: {user_agent} / {app}");
+                }
+            }
+        });
+
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        reader.join().expect("reader saw only consistent pairs");
+    }
+
+    #[test]
+    fn set_default_headers_drops_invalid_entries_at_publish_time() {
+        let _guard = UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreDefaultUserAgent;
+
+        super::super::set_default_headers(
+            [
+                ("not a header", "x"),
+                ("x-bad-value", "line\nbreak"),
+                ("x-ok", "1"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect(),
+        );
+
+        let kept = super::super::default_headers();
+        assert_eq!(kept.keys().collect::<Vec<_>>(), vec!["x-ok"]);
+    }
+
+    /// An invalid process default must not make `HttpClient` requests fail at
+    /// request-construction time.
+    #[tokio::test]
+    async fn http_client_requests_survive_an_invalid_process_default_header() {
+        let (url, server) = serve_once();
+        let client = {
+            let _guard = UA_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _restore = RestoreDefaultUserAgent;
+            super::super::set_default_headers(
+                [("not a header", "x"), ("x-ok", "1")]
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+            );
+            crate::transport::HttpClientBuilder::new(
+                url.trim_end_matches('/'),
+                std::sync::Arc::new(crate::transport::NoopInjector),
+            )
+            .build()
+        };
+
+        client
+            .get_bytes("/")
+            .await
+            .expect("request is built despite the invalid default");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert!(head.contains("x-ok: 1"), "{head}");
     }
 
     #[tokio::test]
