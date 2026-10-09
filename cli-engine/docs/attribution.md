@@ -32,7 +32,7 @@ Run any command with `--debug=transport` to print each outbound request's header
 
 ## How detection works, and its limits
 
-Detection reads environment variables that AI harnesses publish to the processes they launch, using the [`is-ai-agent`](https://github.com/sdairs/is-ai-agent) crate. It is cooperative and heuristic. A match does not prove a model issued this particular command (a human can run commands in a terminal a harness opened), and no match does not prove a human did. Treat the result as attribution to a harness, not as proof of intent. Session ids have different scopes per harness (a conversation, a thread, a single run), so the hash correlates calls within one harness only.
+Detection reads environment variables that AI harnesses publish to the processes they launch, using the [`is-ai-agent`](https://github.com/sdairs/is-ai-agent) crate. It also checks whether a small fixed set of marker paths defined by that crate exists (currently only `/opt/.devin`, which identifies Devin). Those checks test existence only: no file contents are read and no directories are listed. It is cooperative and heuristic. A match does not prove a model issued this particular command (a human can run commands in a terminal a harness opened), and no match does not prove a human did. Treat the result as attribution to a harness, not as proof of intent. Session ids have different scopes per harness (a conversation, a thread, a single run), so the hash correlates calls within one harness only.
 
 ## Enabling it (CLI authors)
 

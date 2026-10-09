@@ -9,8 +9,11 @@
 //!   hash of it (never the raw id) so a service can group one session's calls.
 //!
 //! Detection is cooperative and heuristic: it reads environment markers that
-//! harnesses publish to their subprocesses. A match does not prove a model
-//! issued the command, and no match does not prove a human did.
+//! harnesses publish to their subprocesses, and checks whether a small fixed
+//! set of marker paths defined by the detector exists (currently only
+//! `/opt/.devin`). It only tests existence; it never reads file contents or
+//! lists directories. A match does not prove a model issued the command, and no
+//! match does not prove a human did.
 
 use std::{collections::BTreeMap, path::Path};
 
