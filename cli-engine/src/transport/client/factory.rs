@@ -25,9 +25,9 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// - `User-Agent` is the process-wide default (see
 ///   [`set_default_user_agent`](super::set_default_user_agent)), and the
-///   process-wide default headers (see
-///   [`set_default_headers`](super::set_default_headers)) are sent on every
-///   request, so attribution reaches every client built here. A later
+///   headers published by client attribution (see
+///   [`AttributionConfig`](crate::transport::AttributionConfig)) are sent on
+///   every request, so attribution reaches every client built here. A later
 ///   `.default_headers(..)` on the returned builder adds to them; on a name
 ///   clash the later value wins.
 /// - Both are captured when this function is called, as one snapshot. Call it
@@ -43,9 +43,12 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Later settings win.
 pub fn reqwest_client_builder() -> reqwest::ClientBuilder {
     let (user_agent, headers) = client_identity_snapshot();
+    // The user-agent goes last: `reqwest` stores it as a default header, so
+    // applying it after the header map keeps a `user-agent` entry in that map
+    // from replacing the identity, matching how `HttpClient` ranks them.
     timeout_policy_builder()
-        .user_agent(user_agent)
         .default_headers(header_map(&headers))
+        .user_agent(user_agent)
 }
 
 /// A builder carrying only the timeout policy, with no process identity.
@@ -254,6 +257,64 @@ mod tests {
         assert_eq!(head.matches("user-agent:").count(), 1, "{head}");
         assert!(head.contains("user-agent: real/1"), "{head}");
         assert!(head.contains("x-extra: 1"), "{head}");
+    }
+
+    /// A `user-agent` entry among the published headers must not replace the
+    /// identity user-agent on clients from the factory.
+    #[tokio::test]
+    async fn header_map_cannot_override_the_identity_user_agent() {
+        let client = {
+            let _guard = UA_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _restore = RestoreDefaultUserAgent;
+            super::super::set_client_identity(
+                "identity/1".to_owned(),
+                [("user-agent".to_owned(), "sneaky/0".to_owned())].into(),
+            );
+            reqwest_client_builder().build().expect("client builds")
+        };
+        let (url, server) = serve_once();
+
+        client.get(&url).send().await.expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert_eq!(head.matches("user-agent:").count(), 1, "{head}");
+        assert!(head.contains("user-agent: identity/1"), "{head}");
+    }
+
+    /// A client's own default `Content-Type` must not replace a multipart
+    /// request's generated `Content-Type`: that header carries the boundary
+    /// the server needs to parse the body.
+    #[tokio::test]
+    async fn own_default_content_type_does_not_strip_the_multipart_boundary() {
+        let upload = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(upload.path(), b"file-bytes").expect("write upload");
+        let (url, server) = serve_once();
+        let client = crate::transport::HttpClientBuilder::new(
+            url.trim_end_matches('/'),
+            std::sync::Arc::new(crate::transport::NoopInjector),
+        )
+        .default_headers(
+            [(
+                "Content-Type".to_owned(),
+                "application/vnd.test+json".to_owned(),
+            )]
+            .into(),
+        )
+        .build();
+
+        client
+            .post_multipart_without_response("/", "file", upload.path())
+            .await
+            .expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert_eq!(head.matches("content-type:").count(), 1, "{head}");
+        assert!(
+            head.contains("content-type: multipart/form-data; boundary="),
+            "{head}"
+        );
     }
 
     /// The client's own default `Content-Type` replaces the JSON one, exactly

@@ -155,7 +155,6 @@ struct RestoreDefaultUserAgent;
 impl Drop for RestoreDefaultUserAgent {
     fn drop(&mut self) {
         transport::set_default_user_agent("cli/dev");
-        transport::set_default_headers(Default::default());
     }
 }
 

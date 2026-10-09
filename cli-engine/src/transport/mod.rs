@@ -24,9 +24,8 @@ pub(crate) use attribution::{Attribution, Signals};
 pub use client::{
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, HttpClient, HttpClientBuilder,
     NoopTransportLogger, TransportLogEvent, TransportLogger, debug_log_reqwest_request,
-    debug_log_reqwest_response, default_headers, default_transport_logger, default_user_agent,
-    reqwest_client_builder, set_default_headers, set_default_transport_logger,
-    set_default_user_agent,
+    debug_log_reqwest_response, default_transport_logger, default_user_agent,
+    reqwest_client_builder, set_default_transport_logger, set_default_user_agent,
 };
 pub use debug_logger::StderrTransportLogger;
 pub use injector::{

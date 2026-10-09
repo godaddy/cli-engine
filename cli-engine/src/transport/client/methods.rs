@@ -864,6 +864,11 @@ impl HttpClient {
         };
         for (name, value) in &self.default_headers {
             let (name, value) = parse(name, value)?;
+            // A multipart `Content-Type` carries the boundary the server needs
+            // to parse the body; replacing it would make the upload unreadable.
+            if name == header::CONTENT_TYPE && has_multipart_content_type(request) {
+                continue;
+            }
             request.headers_mut().insert(name, value);
         }
         for (name, value) in &self.process_headers {
@@ -954,4 +959,19 @@ impl HttpClient {
             }
         }
     }
+}
+
+/// Whether the request's `Content-Type` is a multipart type (its generated
+/// value carries the part boundary).
+fn has_multipart_content_type(request: &reqwest::Request) -> bool {
+    request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("multipart/")
+        })
 }

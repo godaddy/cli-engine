@@ -63,17 +63,13 @@ pub fn default_user_agent() -> String {
     )
 }
 
-/// Sets the process-wide default headers sent on requests from
-/// [`reqwest_client_builder`] and [`HttpClientBuilder`].
+/// Test helper: replaces only the process-wide default headers.
 ///
-/// A client's own headers (including auth) win over these on a name clash.
-/// Unlike the user-agent, these are not applied to the engine's OAuth token
-/// requests.
-///
-/// An entry whose name or value is not a valid HTTP header is dropped here
-/// (and its name logged), so every consumer of the defaults sees only headers
-/// that can actually be sent.
-pub fn set_default_headers(headers: BTreeMap<String, String>) {
+/// Production code publishes headers together with the user-agent through
+/// [`set_client_identity`]; the engine's client attribution is the only
+/// producer, which is why this is not public API.
+#[cfg(test)]
+pub(crate) fn set_default_headers(headers: BTreeMap<String, String>) {
     let headers = valid_headers(headers);
     if let Ok(mut current) = client_identity().write() {
         current.headers = headers;
@@ -118,9 +114,9 @@ fn valid_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> 
         .collect()
 }
 
-/// Returns the process-wide default headers set via [`set_default_headers`].
-#[must_use]
-pub fn default_headers() -> BTreeMap<String, String> {
+/// Test helper: the process-wide default headers currently published.
+#[cfg(test)]
+pub(crate) fn default_headers() -> BTreeMap<String, String> {
     client_identity()
         .read()
         .map(|identity| identity.headers.clone())
