@@ -398,7 +398,9 @@ impl CliConfig {
     /// (and `agent/<slug>` for a detected AI harness) to the outbound
     /// User-Agent, and, when the harness exposes a session id, sends a salted
     /// hash of it in a correlation header. Nothing is sent to any endpoint the
-    /// CLI was not already calling. See `docs/attribution.md`.
+    /// CLI was not already calling. The identity is captured when each client is
+    /// created, so create clients inside command handlers, not during module
+    /// registration. See `docs/attribution.md`.
     #[must_use]
     pub fn with_client_attribution(
         mut self,

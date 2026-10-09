@@ -306,6 +306,10 @@ pub struct HttpClient {
     base_url: String,
     auth: Arc<dyn AuthInjector>,
     user_agent: String,
+    /// Process-wide defaults captured at builder creation; fill in headers a
+    /// request does not already carry.
+    process_headers: BTreeMap<String, String>,
+    /// The client's own defaults; replace a same-named request header.
     default_headers: BTreeMap<String, String>,
     logger: Arc<dyn TransportLogger>,
 }
@@ -324,6 +328,11 @@ pub struct HttpClientBuilder {
 
 impl HttpClientBuilder {
     /// Creates a builder with a base URL and auth injector.
+    ///
+    /// Captures the process-wide user-agent and default headers now, as one
+    /// snapshot. Create clients inside command handlers, which run after the
+    /// `execute*` entrypoints have published the CLI's identity, not during
+    /// module registration, which runs earlier.
     #[must_use]
     pub fn new(base_url: impl Into<String>, auth: Arc<dyn AuthInjector>) -> Self {
         let (user_agent, process_headers) = client_identity_snapshot();
@@ -351,6 +360,12 @@ impl HttpClientBuilder {
     }
 
     /// Sets headers sent on every request.
+    ///
+    /// A default replaces (never duplicates) a header the request sets by
+    /// default with the same name, for example `Content-Type`; this is how a
+    /// client opts into a vendor media type. Header names are case-insensitive.
+    /// An invalid name or value fails the request. Process-wide defaults rank
+    /// below these: they only fill in headers that are otherwise absent.
     #[must_use]
     pub fn default_headers(mut self, headers: BTreeMap<String, String>) -> Self {
         self.default_headers = headers;
@@ -384,25 +399,11 @@ impl HttpClientBuilder {
             base_url: self.base_url,
             auth: self.auth,
             user_agent: self.user_agent,
-            default_headers: merged_default_headers(self.process_headers, self.default_headers),
+            process_headers: self.process_headers,
+            default_headers: self.default_headers,
             logger: self.logger,
         }
     }
-}
-
-/// Layers the client's own headers over the process-wide defaults so a
-/// per-client header wins on a name clash. Header names are case-insensitive,
-/// so `X-Foo` in `own` replaces a default `x-foo` instead of being sent
-/// alongside it.
-fn merged_default_headers(
-    mut process: BTreeMap<String, String>,
-    own: BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    for (name, value) in own {
-        process.retain(|existing, _| !existing.eq_ignore_ascii_case(&name));
-        process.insert(name, value);
-    }
-    process
 }
 
 /// Converts a `reqwest` header map into owned name/value pairs for logging.

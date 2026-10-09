@@ -24,13 +24,15 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// outbound policy.
 ///
 /// - `User-Agent` is the process-wide default (see
-///   [`set_default_user_agent`](super::set_default_user_agent)), read when this
-///   function is called.
-/// - The process-wide default headers (see
+///   [`set_default_user_agent`](super::set_default_user_agent)), and the
+///   process-wide default headers (see
 ///   [`set_default_headers`](super::set_default_headers)) are sent on every
 ///   request, so attribution reaches every client built here. A later
 ///   `.default_headers(..)` on the returned builder adds to them; on a name
 ///   clash the later value wins.
+/// - Both are captured when this function is called, as one snapshot. Call it
+///   from a command handler (after the `execute*` entrypoints have published
+///   the identity), not during module registration, which runs earlier.
 /// - [`DEFAULT_CONNECT_TIMEOUT`] and [`DEFAULT_READ_TIMEOUT`] bound hangs.
 ///   There is deliberately no total-request timeout: callers that want one
 ///   (for example a short API call) set `.timeout(..)` on the returned builder,
@@ -213,6 +215,86 @@ mod tests {
         assert!(head.contains("x-client-session: client"), "{head}");
         assert!(!head.contains("x-client-session: process"), "{head}");
         assert!(head.contains("x-process-only: 1"), "{head}");
+    }
+
+    /// A default header never duplicates or overrides a header the request
+    /// itself sets: `Content-Type` and `User-Agent` are request-owned.
+    #[tokio::test]
+    async fn default_headers_do_not_duplicate_request_owned_headers() {
+        let (url, server) = serve_once();
+        let client = {
+            let _guard = UA_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _restore = RestoreDefaultUserAgent;
+            super::super::set_default_headers(
+                [
+                    ("content-type".to_owned(), "text/plain".to_owned()),
+                    ("user-agent".to_owned(), "sneaky/0".to_owned()),
+                    ("x-extra".to_owned(), "1".to_owned()),
+                ]
+                .into(),
+            );
+            crate::transport::HttpClientBuilder::new(
+                url.trim_end_matches('/'),
+                std::sync::Arc::new(crate::transport::NoopInjector),
+            )
+            .user_agent("real/1")
+            .build()
+        };
+
+        client
+            .post_without_response("/", &serde_json::json!({"a": 1}))
+            .await
+            .expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert_eq!(head.matches("content-type:").count(), 1, "{head}");
+        assert!(head.contains("content-type: application/json"), "{head}");
+        assert_eq!(head.matches("user-agent:").count(), 1, "{head}");
+        assert!(head.contains("user-agent: real/1"), "{head}");
+        assert!(head.contains("x-extra: 1"), "{head}");
+    }
+
+    /// The client's own default `Content-Type` replaces the JSON one, exactly
+    /// once (a client opting into a vendor media type), while a process-wide
+    /// default of the same name does not.
+    #[tokio::test]
+    async fn own_default_content_type_replaces_json_once() {
+        let (url, server) = serve_once();
+        let client = {
+            let _guard = UA_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _restore = RestoreDefaultUserAgent;
+            super::super::set_default_headers(
+                [("content-type".to_owned(), "text/plain".to_owned())].into(),
+            );
+            crate::transport::HttpClientBuilder::new(
+                url.trim_end_matches('/'),
+                std::sync::Arc::new(crate::transport::NoopInjector),
+            )
+            .default_headers(
+                [(
+                    "Content-Type".to_owned(),
+                    "application/vnd.test+json".to_owned(),
+                )]
+                .into(),
+            )
+            .build()
+        };
+
+        client
+            .post_without_response("/", &serde_json::json!({"a": 1}))
+            .await
+            .expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert_eq!(head.matches("content-type:").count(), 1, "{head}");
+        assert!(
+            head.contains("content-type: application/vnd.test+json"),
+            "{head}"
+        );
     }
 
     /// A client's `X-Client-Session` replaces a process default `x-client-session`
