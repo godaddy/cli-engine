@@ -33,6 +33,7 @@ use crate::{
     flags::{register_global_flags, register_reason_flag},
     module::ModuleContext,
     output::{global_human_view_registry_snapshot, global_schema_registry_snapshot},
+    transport::{Attribution, Signals},
 };
 
 pub use argv0::{Argv0LinkMethod, Argv0Route};
@@ -402,15 +403,32 @@ impl Cli {
         run::execute_from_until_signal(self, args, stdout, stderr, shutdown).await
     }
 
-    /// Publishes the configured outbound User-Agent process-wide so that
-    /// command [`HttpClient`](crate::transport::HttpClient)s and the engine's
-    /// own OAuth token requests share it.
+    /// Publishes the configured outbound identity process-wide so that
+    /// command [`HttpClient`](crate::transport::HttpClient)s, clients from
+    /// [`reqwest_client_builder`](crate::transport::reqwest_client_builder),
+    /// and the engine's own OAuth token requests share it.
     ///
     /// Called from the execution entrypoints rather than [`Cli::new`] so that
     /// merely constructing a `Cli` (as tests do in bulk) does not mutate global
     /// state. See [`CliConfig::user_agent_string`] for resolution order.
-    fn install_default_user_agent(&self) {
-        crate::transport::set_default_user_agent(self.config.user_agent_string());
+    fn install_client_identity(&self) {
+        let (user_agent, headers) =
+            self.client_identity(&Signals::from_process(&self.config.app_id));
+        crate::transport::set_default_user_agent(user_agent);
+        crate::transport::set_default_headers(headers);
+    }
+
+    /// Computes the outbound User-Agent and default headers for `signals`:
+    /// the configured base user-agent, plus attribution tokens and headers
+    /// when the CLI opted in.
+    fn client_identity(&self, signals: &Signals) -> (String, BTreeMap<String, String>) {
+        let mut user_agent = self.config.user_agent_string();
+        let Some(config) = &self.config.attribution else {
+            return (user_agent, BTreeMap::new());
+        };
+        let attribution = Attribution::resolve(config, &self.config.app_id, signals);
+        user_agent.push_str(&attribution.user_agent_suffix);
+        (user_agent, attribution.headers)
     }
 
     /// Registers an auth provider after construction.

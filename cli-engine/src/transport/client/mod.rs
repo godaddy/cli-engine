@@ -9,12 +9,33 @@ use serde_json::Value;
 
 use super::{AuthInjector, Error};
 
+mod factory;
 mod methods;
+
+pub use factory::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, reqwest_client_builder};
 
 const MAX_RETRIES: usize = 3;
 const BASE_BACKOFF: Duration = Duration::from_millis(500);
 const BUILTIN_DEFAULT_USER_AGENT: &str = "cli/dev";
-static DEFAULT_USER_AGENT: OnceLock<RwLock<String>> = OnceLock::new();
+
+/// Process-wide outbound identity: the user-agent and any headers every
+/// client should carry. One lock covers both so they are published together.
+#[derive(Clone, Debug)]
+struct ClientIdentity {
+    user_agent: String,
+    headers: BTreeMap<String, String>,
+}
+
+static CLIENT_IDENTITY: OnceLock<RwLock<ClientIdentity>> = OnceLock::new();
+
+fn client_identity() -> &'static RwLock<ClientIdentity> {
+    CLIENT_IDENTITY.get_or_init(|| {
+        RwLock::new(ClientIdentity {
+            user_agent: BUILTIN_DEFAULT_USER_AGENT.to_owned(),
+            headers: BTreeMap::new(),
+        })
+    })
+}
 
 /// Sets the process-wide default user-agent for outbound requests.
 ///
@@ -24,10 +45,8 @@ static DEFAULT_USER_AGENT: OnceLock<RwLock<String>> = OnceLock::new();
 /// token/refresh requests and the client-credentials injector. A per-client
 /// user-agent still overrides it for that client.
 pub fn set_default_user_agent(user_agent: impl Into<String>) {
-    let lock =
-        DEFAULT_USER_AGENT.get_or_init(|| RwLock::new(BUILTIN_DEFAULT_USER_AGENT.to_owned()));
-    if let Ok(mut current) = lock.write() {
-        *current = user_agent.into();
+    if let Ok(mut current) = client_identity().write() {
+        current.user_agent = user_agent.into();
     }
 }
 
@@ -36,14 +55,33 @@ pub fn set_default_user_agent(user_agent: impl Into<String>) {
 ///
 /// Used by [`HttpClientBuilder`] and by the engine's OAuth token requests so
 /// that all outbound traffic carries the same user-agent.
-pub(crate) fn default_user_agent() -> String {
-    DEFAULT_USER_AGENT
-        .get_or_init(|| RwLock::new(BUILTIN_DEFAULT_USER_AGENT.to_owned()))
+#[must_use]
+pub fn default_user_agent() -> String {
+    client_identity().read().map_or_else(
+        |_| BUILTIN_DEFAULT_USER_AGENT.to_owned(),
+        |identity| identity.user_agent.clone(),
+    )
+}
+
+/// Sets the process-wide default headers sent on requests from
+/// [`reqwest_client_builder`] and [`HttpClientBuilder`].
+///
+/// A client's own headers (including auth) win over these on a name clash.
+/// Unlike the user-agent, these are not applied to the engine's OAuth token
+/// requests.
+pub fn set_default_headers(headers: BTreeMap<String, String>) {
+    if let Ok(mut current) = client_identity().write() {
+        current.headers = headers;
+    }
+}
+
+/// Returns the process-wide default headers set via [`set_default_headers`].
+#[must_use]
+pub fn default_headers() -> BTreeMap<String, String> {
+    client_identity()
         .read()
-        .map_or_else(
-            |_| BUILTIN_DEFAULT_USER_AGENT.to_owned(),
-            |value| value.clone(),
-        )
+        .map(|identity| identity.headers.clone())
+        .unwrap_or_default()
 }
 
 /// Serializes unit tests that mutate the process-wide default user-agent so
@@ -52,10 +90,10 @@ pub(crate) fn default_user_agent() -> String {
 #[cfg(test)]
 pub(crate) static UA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Restores the process-wide default user-agent to the builtin on drop, so a
-/// panicking assertion in a test that mutates it cannot leak the value into
-/// later tests in this binary. Declare it after acquiring [`UA_TEST_LOCK`] so
-/// the reset runs while the lock is still held.
+/// Restores the process-wide default user-agent and headers to the builtins on
+/// drop, so a panicking assertion in a test that mutates them cannot leak the
+/// values into later tests in this binary. Declare it after acquiring
+/// [`UA_TEST_LOCK`] so the reset runs while the lock is still held.
 #[cfg(test)]
 pub(crate) struct RestoreDefaultUserAgent;
 
@@ -63,6 +101,7 @@ pub(crate) struct RestoreDefaultUserAgent;
 impl Drop for RestoreDefaultUserAgent {
     fn drop(&mut self) {
         set_default_user_agent(BUILTIN_DEFAULT_USER_AGENT);
+        set_default_headers(BTreeMap::new());
     }
 }
 
@@ -294,14 +333,22 @@ impl HttpClientBuilder {
     #[must_use]
     pub fn build(self) -> HttpClient {
         HttpClient {
-            base: reqwest::Client::new(),
+            base: factory::build_default_client(),
             base_url: self.base_url,
             auth: self.auth,
             user_agent: self.user_agent,
-            default_headers: self.default_headers,
+            default_headers: merged_default_headers(self.default_headers),
             logger: self.logger,
         }
     }
+}
+
+/// Layers the client's own headers over the process-wide defaults so a
+/// per-client header wins on a name clash.
+fn merged_default_headers(own: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut headers = default_headers();
+    headers.extend(own);
+    headers
 }
 
 /// Converts a `reqwest` header map into owned name/value pairs for logging.

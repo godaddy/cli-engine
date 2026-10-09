@@ -87,7 +87,7 @@ where
     E: Write,
     Shutdown: Future<Output = ()>,
 {
-    cli.install_default_user_agent();
+    cli.install_client_identity();
     let output = run_until_signal(cli.run(args), shutdown).await;
     if output.exit_code == 130
         && output.rendered == "command interrupted\n"
