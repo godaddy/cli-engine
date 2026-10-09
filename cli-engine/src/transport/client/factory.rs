@@ -41,9 +41,18 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Later settings win.
 pub fn reqwest_client_builder() -> reqwest::ClientBuilder {
     let (user_agent, headers) = client_identity_snapshot();
-    reqwest::Client::builder()
+    timeout_policy_builder()
         .user_agent(user_agent)
         .default_headers(header_map(&headers))
+}
+
+/// A builder carrying only the timeout policy, with no process identity.
+///
+/// [`super::HttpClient`] applies its user-agent and default headers per
+/// request from the snapshot its builder captured, so its base client must not
+/// read the process-wide identity a second time.
+fn timeout_policy_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
         .read_timeout(DEFAULT_READ_TIMEOUT)
 }
@@ -63,10 +72,10 @@ fn header_map(headers: &std::collections::BTreeMap<String, String>) -> reqwest::
         .collect()
 }
 
-/// Builds a client from [`reqwest_client_builder`], falling back to a bare
-/// client if the TLS backend fails to initialize.
+/// Builds the timeout-only base client for [`super::HttpClient`], falling back
+/// to a bare client if the TLS backend fails to initialize.
 pub(super) fn build_default_client() -> reqwest::Client {
-    reqwest_client_builder()
+    timeout_policy_builder()
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -204,6 +213,68 @@ mod tests {
         assert!(head.contains("x-client-session: client"), "{head}");
         assert!(!head.contains("x-client-session: process"), "{head}");
         assert!(head.contains("x-process-only: 1"), "{head}");
+    }
+
+    /// A client's `X-Client-Session` replaces a process default `x-client-session`
+    /// (header names are case-insensitive); only the client's value is sent.
+    #[tokio::test]
+    async fn http_client_header_override_is_case_insensitive() {
+        let (url, server) = serve_once();
+        let client = {
+            let _guard = UA_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _restore = RestoreDefaultUserAgent;
+            super::super::set_default_headers(
+                [("x-client-session".to_owned(), "process".to_owned())].into(),
+            );
+            crate::transport::HttpClientBuilder::new(
+                url.trim_end_matches('/'),
+                std::sync::Arc::new(crate::transport::NoopInjector),
+            )
+            .default_headers([("X-Client-Session".to_owned(), "client".to_owned())].into())
+            .build()
+        };
+
+        client.get_bytes("/").await.expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert_eq!(head.matches("x-client-session:").count(), 1, "{head}");
+        assert!(head.contains("x-client-session: client"), "{head}");
+    }
+
+    /// `HttpClient` uses the identity captured when its builder was created;
+    /// publishing a different identity before `build()` must not leak into it.
+    #[tokio::test]
+    async fn http_client_does_not_resnapshot_identity_at_build_time() {
+        let (url, server) = serve_once();
+        let client = {
+            let _guard = UA_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _restore = RestoreDefaultUserAgent;
+            super::super::set_client_identity(
+                "app-a/1".to_owned(),
+                [("x-app".to_owned(), "a".to_owned())].into(),
+            );
+            let builder = crate::transport::HttpClientBuilder::new(
+                url.trim_end_matches('/'),
+                std::sync::Arc::new(crate::transport::NoopInjector),
+            );
+            super::super::set_client_identity(
+                "app-b/2".to_owned(),
+                [("x-app-b".to_owned(), "b".to_owned())].into(),
+            );
+            builder.build()
+        };
+
+        client.get_bytes("/").await.expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert!(head.contains("user-agent: app-a/1"), "{head}");
+        assert!(head.contains("x-app: a"), "{head}");
+        assert!(!head.contains("app-b"), "{head}");
+        assert!(!head.contains("x-app-b"), "{head}");
     }
 
     /// The user-agent and default headers are published and read as a pair, so

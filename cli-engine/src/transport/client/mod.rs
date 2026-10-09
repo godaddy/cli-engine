@@ -100,7 +100,9 @@ pub(crate) fn client_identity_snapshot() -> (String, BTreeMap<String, String>) {
     )
 }
 
-/// Keeps only entries that are valid HTTP header names with valid values.
+/// Keeps only entries that are valid HTTP header names with valid values, with
+/// names lowercased (header names are case-insensitive, so one canonical form
+/// lets later merging detect a clash).
 fn valid_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .into_iter()
@@ -112,6 +114,7 @@ fn valid_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> 
             }
             valid
         })
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
         .collect()
 }
 
@@ -388,12 +391,17 @@ impl HttpClientBuilder {
 }
 
 /// Layers the client's own headers over the process-wide defaults so a
-/// per-client header wins on a name clash.
+/// per-client header wins on a name clash. Header names are case-insensitive,
+/// so `X-Foo` in `own` replaces a default `x-foo` instead of being sent
+/// alongside it.
 fn merged_default_headers(
     mut process: BTreeMap<String, String>,
     own: BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    process.extend(own);
+    for (name, value) in own {
+        process.retain(|existing, _| !existing.eq_ignore_ascii_case(&name));
+        process.insert(name, value);
+    }
     process
 }
 
