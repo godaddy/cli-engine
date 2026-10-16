@@ -410,6 +410,8 @@ pub(super) fn prescan_env_flag(mut args: impl Iterator<Item = String>) -> Option
 
 #[cfg(test)]
 mod user_agent_tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::cli::{BuildInfo, Cli, CliConfig};
     use crate::transport::Signals;
@@ -463,6 +465,59 @@ mod user_agent_tests {
             |_| false,
             false,
         )
+    }
+
+    /// A CLI that never opted in must not run harness detection at all (no env
+    /// reads, no filesystem probes), yet must still publish its base user-agent
+    /// and drop any headers a previous run left behind.
+    #[test]
+    fn disabled_attribution_skips_detection_and_clears_old_headers() {
+        let _guard = crate::transport::client::UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultUserAgent;
+        crate::transport::client::set_client_identity(
+            "previous/1".to_owned(),
+            BTreeMap::from([("x-client-session".to_owned(), "stale".to_owned())]),
+        );
+        let cli =
+            Cli::new(CliConfig::new("plain", "Plain", "plain").with_build(BuildInfo::new("3.0.0")));
+
+        let mut collected = 0;
+
+        cli.publish_client_identity(|| {
+            collected += 1;
+            harness_signals("plain")
+        });
+
+        assert_eq!(collected, 0, "detection must not run when disabled");
+        let (user_agent, headers) = crate::transport::client::client_identity_snapshot();
+        assert_eq!(user_agent, "plain/3.0.0");
+        assert!(headers.is_empty(), "stale headers survived: {headers:?}");
+    }
+
+    #[test]
+    fn enabled_attribution_collects_signals_exactly_once() {
+        let _guard = crate::transport::client::UA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = crate::transport::client::RestoreDefaultUserAgent;
+        let cli = Cli::new(
+            CliConfig::new("attr", "Attr", "attr")
+                .with_build(BuildInfo::new("1.0.0"))
+                .with_client_attribution(crate::transport::AttributionConfig::new()),
+        );
+        let mut collected = 0;
+
+        cli.publish_client_identity(|| {
+            collected += 1;
+            harness_signals("attr")
+        });
+
+        assert_eq!(collected, 1);
+        let (user_agent, headers) = crate::transport::client::client_identity_snapshot();
+        assert_eq!(user_agent, "attr/1.0.0 mode/agent agent/claude-code");
+        assert!(headers.contains_key("x-client-session"));
     }
 
     #[test]

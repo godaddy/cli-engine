@@ -412,8 +412,19 @@ impl Cli {
     /// merely constructing a `Cli` (as tests do in bulk) does not mutate global
     /// state. See [`CliConfig::user_agent_string`] for resolution order.
     fn install_client_identity(&self) {
-        let (user_agent, headers) =
-            self.client_identity(&Signals::from_process(&self.config.app_id));
+        self.publish_client_identity(|| Signals::from_process(&self.config.app_id));
+    }
+
+    /// Publishes the identity, collecting `signals` only if attribution is
+    /// enabled: a CLI that never opted in must not read harness environment
+    /// variables or probe filesystem markers, not even for `--help`. It still
+    /// publishes the base user-agent and clears any previous run's headers.
+    fn publish_client_identity(&self, signals: impl FnOnce() -> Signals) {
+        let (user_agent, headers) = if self.config.attribution.is_some() {
+            self.client_identity(&signals())
+        } else {
+            (self.config.user_agent_string(), BTreeMap::new())
+        };
         crate::transport::client::set_client_identity(user_agent, headers);
     }
 

@@ -2,7 +2,7 @@
 
 Client attribution lets a CLI built on cli-engine tell the services it calls what kind of caller it is (a person at a terminal, a CI job, a script, or an AI coding agent) so usage can be understood without any telemetry channel. It adds a few tokens to the `User-Agent` header and, when an AI harness exposes a session id, one correlation header. It sends nothing to any endpoint the CLI was not already calling, writes nothing to disk, and never contacts a collector.
 
-It is off by default. A CLI opts in with `CliConfig::with_client_attribution`.
+It is off by default. A CLI opts in with `CliConfig::with_client_attribution`. A CLI that has not opted in does no detection at all: it reads no harness environment variables and probes no filesystem paths, even for `--help`.
 
 ## What is sent
 
