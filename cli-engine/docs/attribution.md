@@ -28,7 +28,7 @@ Users can drop the session header with `<APP_ID>_NO_SESSION_ID=1`, where `<APP_I
 
 ## Seeing exactly what goes out
 
-Run any command with `--debug=transport` to print each outbound request's headers to stderr, including the user-agent and the session header.
+Run a command with `--debug=transport` to print each outbound request's headers to stderr, including the user-agent and the session header. This is automatic for requests made through `HttpClient`. A plain `reqwest` client built from `transport::reqwest_client_builder()` sends the same attribution headers but is only traced if the CLI calls `transport::debug_log_reqwest_request` and `debug_log_reqwest_response` around its requests (see the HTTP debug logging section of `concepts.md`), so an empty trace from such a client does not mean no session header was sent.
 
 ## How detection works, and its limits
 
