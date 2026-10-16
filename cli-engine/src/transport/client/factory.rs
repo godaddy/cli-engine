@@ -324,6 +324,29 @@ mod tests {
         assert!(head.contains("user-agent: identity/1"), "{head}");
     }
 
+    /// An explicit per-request precondition must survive a conflicting client
+    /// default: `If-Match: *` would otherwise discard the caller's ETag and
+    /// permit a lost update.
+    #[tokio::test]
+    async fn own_default_cannot_replace_an_explicit_if_match() {
+        let (url, server) = serve_once();
+        let client = crate::transport::HttpClientBuilder::new(
+            url.trim_end_matches('/'),
+            std::sync::Arc::new(crate::transport::NoopInjector),
+        )
+        .default_headers([("If-Match".to_owned(), "*".to_owned())].into())
+        .build();
+
+        client
+            .put_if_match_without_response("/", &serde_json::json!({"a": 1}), "\"v7\"")
+            .await
+            .expect("request succeeds");
+
+        let head = server.join().expect("server thread").to_lowercase();
+        assert_eq!(head.matches("if-match:").count(), 1, "{head}");
+        assert!(head.contains("if-match: \"v7\""), "{head}");
+    }
+
     /// A client's own default `Content-Type` must not replace a multipart
     /// request's generated `Content-Type`: that header carries the boundary
     /// the server needs to parse the body.

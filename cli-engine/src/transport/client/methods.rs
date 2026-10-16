@@ -837,13 +837,13 @@ impl HttpClient {
 
     /// Finalizes a built request: applies default headers, then injects auth.
     ///
-    /// The client's own defaults replace a same-named header the request set
-    /// by default (for example `Content-Type`), once. Process-wide defaults
-    /// rank lowest: they only fill in headers still absent, so they can never
-    /// duplicate or override anything. Applying both here, on the built
-    /// request, rather than appending on the builder, is what prevents
-    /// duplicate header lines and keeps the defaults visible in the
-    /// `--debug transport` trace.
+    /// The client's own defaults may replace the request's JSON `Content-Type`
+    /// (once, never on multipart); for every other header they only fill in
+    /// what the request has not set, so an explicit per-request header such as
+    /// `If-Match` always wins. Process-wide defaults only ever fill in absent
+    /// headers. Applying both here, on the built request, rather than
+    /// appending on the builder, is what prevents duplicate header lines and
+    /// keeps the defaults visible in the `--debug transport` trace.
     async fn prepare_request(&self, request: &mut reqwest::Request) -> Result<()> {
         self.apply_default_headers(request)?;
         self.auth
@@ -864,12 +864,15 @@ impl HttpClient {
         };
         for (name, value) in &self.default_headers {
             let (name, value) = parse(name, value)?;
-            // A multipart `Content-Type` carries the boundary the server needs
-            // to parse the body; replacing it would make the upload unreadable.
-            if name == header::CONTENT_TYPE && has_multipart_content_type(request) {
-                continue;
+            // `Content-Type` is the one header a default may replace (a client
+            // opting into a vendor media type), and not on multipart requests,
+            // whose value carries the boundary the server needs. Anything else
+            // the request already set, such as the `If-Match` precondition,
+            // must win: replacing it could silently permit a lost update.
+            let replaces = name == header::CONTENT_TYPE && !has_multipart_content_type(request);
+            if replaces || !request.headers().contains_key(&name) {
+                request.headers_mut().insert(name, value);
             }
-            request.headers_mut().insert(name, value);
         }
         for (name, value) in &self.process_headers {
             let (name, value) = parse(name, value)?;

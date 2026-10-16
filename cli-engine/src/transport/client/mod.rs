@@ -364,11 +364,13 @@ impl HttpClientBuilder {
 
     /// Sets headers sent on every request.
     ///
-    /// A default replaces (never duplicates) a header the request sets by
-    /// default with the same name, for example `Content-Type`; this is how a
-    /// client opts into a vendor media type. Header names are case-insensitive.
-    /// An invalid name or value fails the request. Process-wide defaults rank
-    /// below these: they only fill in headers that are otherwise absent.
+    /// A default fills in a header the request does not set. The one header it
+    /// may replace is `Content-Type` on a non-multipart request (this is how a
+    /// client opts into a vendor media type); everything the request sets
+    /// itself, such as `If-Match`, wins. Defaults never duplicate a header.
+    /// Names are case-insensitive. An invalid name or value fails the request.
+    /// Process-wide defaults rank below these: they only fill in headers that
+    /// are otherwise absent.
     #[must_use]
     pub fn default_headers(mut self, headers: BTreeMap<String, String>) -> Self {
         self.default_headers = headers;
