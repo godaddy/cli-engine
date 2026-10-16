@@ -42,7 +42,7 @@ fn session_header_carries_a_hash_never_the_raw_id() {
 
     let value = attribution
         .headers
-        .get("x-client-session")
+        .get("x-client-session-id")
         .expect("session header is sent");
     assert_eq!(value.len(), 16);
     assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -157,7 +157,7 @@ fn config_can_rename_the_session_header() {
     let attribution = Attribution::resolve(&config, "gddy", &signals(&claude_env(), false));
 
     assert!(attribution.headers.contains_key("x-gddy-session"));
-    assert!(!attribution.headers.contains_key("x-client-session"));
+    assert!(!attribution.headers.contains_key("x-client-session-id"));
 }
 
 #[test]

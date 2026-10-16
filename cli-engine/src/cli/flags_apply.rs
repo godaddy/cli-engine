@@ -478,7 +478,7 @@ mod user_agent_tests {
         let _restore = crate::transport::client::RestoreDefaultUserAgent;
         crate::transport::client::set_client_identity(
             "previous/1".to_owned(),
-            BTreeMap::from([("x-client-session".to_owned(), "stale".to_owned())]),
+            BTreeMap::from([("x-client-session-id".to_owned(), "stale".to_owned())]),
         );
         let cli =
             Cli::new(CliConfig::new("plain", "Plain", "plain").with_build(BuildInfo::new("3.0.0")));
@@ -517,7 +517,7 @@ mod user_agent_tests {
         assert_eq!(collected, 1);
         let (user_agent, headers) = crate::transport::client::client_identity_snapshot();
         assert_eq!(user_agent, "attr/1.0.0 mode/agent agent/claude-code");
-        assert!(headers.contains_key("x-client-session"));
+        assert!(headers.contains_key("x-client-session-id"));
     }
 
     #[test]
@@ -544,7 +544,7 @@ mod user_agent_tests {
 
         assert_eq!(user_agent, "attr/1.0.0 mode/agent agent/claude-code");
         assert_eq!(headers.len(), 1);
-        assert!(headers.contains_key("x-client-session"));
+        assert!(headers.contains_key("x-client-session-id"));
     }
 
     #[test]

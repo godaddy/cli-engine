@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::flags::{app_id_env_prefix, detect_interactive};
 
-const DEFAULT_SESSION_HEADER: &str = "x-client-session";
+const DEFAULT_SESSION_HEADER: &str = "x-client-session-id";
 const SESSION_HASH_BYTES: usize = 8;
 
 /// Opts a CLI into client attribution: `mode/<agent|ci|interactive|script>`
@@ -49,7 +49,7 @@ impl Default for AttributionConfig {
 
 impl AttributionConfig {
     /// Creates the default configuration: user-agent tokens plus a hashed
-    /// session id in the `x-client-session` header when a harness supplies one.
+    /// session id in the `x-client-session-id` header when a harness supplies one.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

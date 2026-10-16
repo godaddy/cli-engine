@@ -131,20 +131,20 @@ mod tests {
 
     #[tokio::test]
     async fn default_headers_reach_the_wire() {
-        let client = build_with_defaults("probe/1", &[("x-client-session", "abc123")], |b| b);
+        let client = build_with_defaults("probe/1", &[("x-client-session-id", "abc123")], |b| b);
         let (url, server) = serve_once();
 
         client.get(&url).send().await.expect("request succeeds");
 
         let head = server.join().expect("server thread").to_lowercase();
-        assert!(head.contains("x-client-session: abc123"), "{head}");
+        assert!(head.contains("x-client-session-id: abc123"), "{head}");
     }
 
     /// Generated clients add `Authorization` via `.default_headers(..)` on this
     /// builder; that must add to, not replace, the process defaults.
     #[tokio::test]
     async fn later_default_headers_add_to_process_defaults() {
-        let client = build_with_defaults("probe/1", &[("x-client-session", "abc123")], |b| {
+        let client = build_with_defaults("probe/1", &[("x-client-session-id", "abc123")], |b| {
             let mut extra = reqwest::header::HeaderMap::new();
             extra.insert(
                 reqwest::header::AUTHORIZATION,
@@ -157,7 +157,7 @@ mod tests {
         client.get(&url).send().await.expect("request succeeds");
 
         let head = server.join().expect("server thread").to_lowercase();
-        assert!(head.contains("x-client-session: abc123"), "{head}");
+        assert!(head.contains("x-client-session-id: abc123"), "{head}");
         assert!(head.contains("authorization: bearer tok"), "{head}");
     }
 
@@ -172,7 +172,7 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _restore = RestoreDefaultUserAgent;
             super::super::set_default_headers(
-                [("x-client-session", "process"), ("x-process-only", "1")]
+                [("x-client-session-id", "process"), ("x-process-only", "1")]
                     .into_iter()
                     .map(|(name, value)| (name.to_owned(), value.to_owned()))
                     .collect(),
@@ -182,7 +182,7 @@ mod tests {
                 std::sync::Arc::new(crate::transport::NoopInjector),
             )
             .default_headers(
-                [("x-client-session", "client".to_owned())]
+                [("x-client-session-id", "client".to_owned())]
                     .into_iter()
                     .map(|(name, value)| (name.to_owned(), value))
                     .collect(),
@@ -193,8 +193,8 @@ mod tests {
         client.get_bytes("/").await.expect("request succeeds");
 
         let head = server.join().expect("server thread").to_lowercase();
-        assert!(head.contains("x-client-session: client"), "{head}");
-        assert!(!head.contains("x-client-session: process"), "{head}");
+        assert!(head.contains("x-client-session-id: client"), "{head}");
+        assert!(!head.contains("x-client-session-id: process"), "{head}");
         assert!(head.contains("x-process-only: 1"), "{head}");
     }
 
@@ -247,7 +247,11 @@ mod tests {
         let _restore = RestoreDefaultUserAgent;
         super::super::set_client_identity(
             "cli-a/1".to_owned(),
-            [("x-client-session".to_owned(), "a-session-hash".to_owned())].into(),
+            [(
+                "x-client-session-id".to_owned(),
+                "a-session-hash".to_owned(),
+            )]
+            .into(),
         );
 
         super::super::set_default_user_agent("cli-b/2");
@@ -379,7 +383,7 @@ mod tests {
         );
     }
 
-    /// A client's `X-Client-Session` replaces a process default `x-client-session`
+    /// A client's `X-Client-Session-Id` replaces a process default `x-client-session-id`
     /// (header names are case-insensitive); only the client's value is sent.
     #[tokio::test]
     async fn http_client_header_override_is_case_insensitive() {
@@ -390,21 +394,21 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _restore = RestoreDefaultUserAgent;
             super::super::set_default_headers(
-                [("x-client-session".to_owned(), "process".to_owned())].into(),
+                [("x-client-session-id".to_owned(), "process".to_owned())].into(),
             );
             crate::transport::HttpClientBuilder::new(
                 url.trim_end_matches('/'),
                 std::sync::Arc::new(crate::transport::NoopInjector),
             )
-            .default_headers([("X-Client-Session".to_owned(), "client".to_owned())].into())
+            .default_headers([("X-Client-Session-Id".to_owned(), "client".to_owned())].into())
             .build()
         };
 
         client.get_bytes("/").await.expect("request succeeds");
 
         let head = server.join().expect("server thread").to_lowercase();
-        assert_eq!(head.matches("x-client-session:").count(), 1, "{head}");
-        assert!(head.contains("x-client-session: client"), "{head}");
+        assert_eq!(head.matches("x-client-session-id:").count(), 1, "{head}");
+        assert!(head.contains("x-client-session-id: client"), "{head}");
     }
 
     /// `HttpClient` uses the identity captured when its builder was created;
