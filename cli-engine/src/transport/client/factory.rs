@@ -6,19 +6,7 @@
 //! outbound policy (user-agent, timeouts, and future correlation headers) is
 //! defined once in the engine instead of per call site.
 
-use std::time::Duration;
-
-use super::client_identity_snapshot;
-
-/// Connect timeout applied to every client from [`reqwest_client_builder`].
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Idle read timeout applied to every client from [`reqwest_client_builder`].
-///
-/// This bounds the wait for each read (first response byte included), not the
-/// whole request, so a large streaming download that keeps making progress is
-/// never cut off.
-pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+use super::{client_identity_snapshot, timeouts::TimeoutPolicy};
 
 /// Returns a [`reqwest::ClientBuilder`] preconfigured with the engine's
 /// outbound policy.
@@ -33,33 +21,35 @@ pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// - Both are captured when this function is called, as one snapshot. Call it
 ///   from a command handler (after the `execute*` entrypoints have published
 ///   the identity), not during module registration, which runs earlier.
-/// - [`DEFAULT_CONNECT_TIMEOUT`] and [`DEFAULT_READ_TIMEOUT`] bound hangs.
-///   There is deliberately no total-request timeout: callers that want one
-///   (for example a short API call) set `.timeout(..)` on the returned builder,
-///   and transfer-heavy callers keep the default.
+/// - The default [`TimeoutPolicy`] (5s connect, 30s read) bounds hangs. Each
+///   call returns an independent builder, so a caller with several situations
+///   (an API client, a long upload) calls [`reqwest_client_builder_with`] once
+///   per situation with the policy that fits, and they all share the identity.
+///   There is deliberately no total-request timeout: callers that want one set
+///   `.timeout(..)` on the returned builder.
 ///
 /// The builder is returned unbuilt so callers can layer their own settings on
 /// top (default headers, redirect policy, a per-client user-agent override).
 /// Later settings win.
 pub fn reqwest_client_builder() -> reqwest::ClientBuilder {
+    reqwest_client_builder_with(TimeoutPolicy::default())
+}
+
+/// Like [`reqwest_client_builder`], with an explicit [`TimeoutPolicy`] in place
+/// of the default one.
+///
+/// A policy can disable a timeout (`None`), which `reqwest` itself cannot undo
+/// once set, so choose the policy here rather than trying to remove a timeout
+/// from the builder afterwards.
+pub fn reqwest_client_builder_with(timeouts: TimeoutPolicy) -> reqwest::ClientBuilder {
     let (user_agent, headers) = client_identity_snapshot();
     // The user-agent goes last: `reqwest` stores it as a default header, so
     // applying it after the header map keeps a `user-agent` entry in that map
     // from replacing the identity, matching how `HttpClient` ranks them.
-    timeout_policy_builder()
+    timeouts
+        .apply(reqwest::Client::builder())
         .default_headers(header_map(&headers))
         .user_agent(user_agent)
-}
-
-/// A builder carrying only the timeout policy, with no process identity.
-///
-/// [`super::HttpClient`] applies its user-agent and default headers per
-/// request from the snapshot its builder captured, so its base client must not
-/// read the process-wide identity a second time.
-fn timeout_policy_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
-        .read_timeout(DEFAULT_READ_TIMEOUT)
 }
 
 /// Converts default headers to a `HeaderMap`. Published defaults are already
@@ -77,60 +67,27 @@ fn header_map(headers: &std::collections::BTreeMap<String, String>) -> reqwest::
         .collect()
 }
 
-/// Builds the timeout-only base client for [`super::HttpClient`], falling back
-/// to a bare client if the TLS backend fails to initialize.
-pub(super) fn build_default_client() -> reqwest::Client {
-    timeout_policy_builder()
+/// Builds a client carrying only `timeouts`, with no process identity.
+///
+/// [`super::HttpClient`] applies its user-agent and default headers per
+/// request from the snapshot its builder captured, so its base clients must not
+/// read the process-wide identity a second time. Falls back to a bare client if
+/// the TLS backend fails to initialize.
+pub(super) fn build_client(timeouts: TimeoutPolicy) -> reqwest::Client {
+    timeouts
+        .apply(reqwest::Client::builder())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-    };
+    use std::{net::TcpListener, time::Duration};
 
     use super::*;
-    use crate::transport::client::{RestoreDefaultUserAgent, UA_TEST_LOCK};
-
-    /// Serves one request on loopback and returns the request head (the bytes
-    /// up to the blank line that ends the headers).
-    ///
-    /// TCP may deliver the head across several reads, so this reads until the
-    /// terminator arrives. It then drains any request body still in flight
-    /// before closing, so the client never sees a reset mid-write.
-    fn serve_once() -> (String, std::thread::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let url = format!("http://{}/", listener.local_addr().expect("local addr"));
-        let handle = std::thread::spawn(move || {
-            const HEAD_END: &[u8] = b"\r\n\r\n";
-            let (mut stream, _) = listener.accept().expect("accept");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("set read timeout");
-            let mut received = Vec::new();
-            let mut buf = [0_u8; 4096];
-            let head_len = loop {
-                if let Some(at) = received.windows(HEAD_END.len()).position(|w| w == HEAD_END) {
-                    break at;
-                }
-                let read = stream.read(&mut buf).expect("read request head");
-                assert!(read > 0, "connection closed before the request head ended");
-                received.extend_from_slice(&buf[..read]);
-            };
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                .expect("write response");
-            stream
-                .set_read_timeout(Some(Duration::from_millis(50)))
-                .expect("set drain timeout");
-            while matches!(stream.read(&mut buf), Ok(read) if read > 0) {}
-            String::from_utf8_lossy(&received[..head_len]).into_owned()
-        });
-        (url, handle)
-    }
+    use crate::transport::client::{
+        RestoreDefaultUserAgent, UA_TEST_LOCK, test_support::serve_once,
+    };
 
     /// Builds a client while the process-default user-agent is `default_ua`.
     ///
@@ -620,10 +577,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(400));
             drop(stream);
         });
-        let client = reqwest_client_builder()
-            .read_timeout(Duration::from_millis(100))
-            .build()
-            .expect("client builds");
+        let client = reqwest_client_builder_with(
+            TimeoutPolicy::default().with_read(Some(Duration::from_millis(100))),
+        )
+        .build()
+        .expect("client builds");
 
         let error = client.get(&url).send().await.expect_err("must time out");
 

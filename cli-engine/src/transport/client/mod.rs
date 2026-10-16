@@ -11,8 +11,12 @@ use super::{AuthInjector, Error};
 
 mod factory;
 mod methods;
+#[cfg(test)]
+mod test_support;
+mod timeouts;
 
-pub use factory::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, reqwest_client_builder};
+pub use factory::{reqwest_client_builder, reqwest_client_builder_with};
+pub use timeouts::{DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT, TimeoutPolicy};
 
 const MAX_RETRIES: usize = 3;
 const BASE_BACKOFF: Duration = Duration::from_millis(500);
@@ -327,6 +331,7 @@ pub struct HttpClientBuilder {
     process_headers: BTreeMap<String, String>,
     default_headers: BTreeMap<String, String>,
     logger: Arc<dyn TransportLogger>,
+    timeouts: TimeoutPolicy,
 }
 
 impl HttpClientBuilder {
@@ -346,6 +351,7 @@ impl HttpClientBuilder {
             process_headers,
             default_headers: BTreeMap::new(),
             logger: default_transport_logger(),
+            timeouts: TimeoutPolicy::default(),
         }
     }
 
@@ -396,11 +402,26 @@ impl HttpClientBuilder {
         self.logger(logger)
     }
 
+    /// Sets the [`TimeoutPolicy`] for every request this client makes.
+    /// Defaults to [`TimeoutPolicy::default`] (5s connect, 30s read).
+    ///
+    /// A client has exactly one policy. For work that needs different timeouts
+    /// (for example an upload whose server responds only after the whole body
+    /// arrives, which a read timeout would cut off), build another client with
+    /// its own policy, such as [`TimeoutPolicy::uploads`]. The user-agent and
+    /// default headers come from the process-wide identity, so they are shared
+    /// across all of those clients without any extra setup.
+    #[must_use]
+    pub fn timeouts(mut self, timeouts: TimeoutPolicy) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
     /// Builds the client.
     #[must_use]
     pub fn build(self) -> HttpClient {
         HttpClient {
-            base: factory::build_default_client(),
+            base: factory::build_client(self.timeouts),
             base_url: self.base_url,
             auth: self.auth,
             user_agent: self.user_agent,
