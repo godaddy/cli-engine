@@ -217,3 +217,15 @@ async fn a_hand_edited_wrong_type_is_an_error_not_a_default() {
     let (code, out) = run(&["prefs", "show"]).await;
     assert_ne!(code, 0, "{out}");
 }
+
+#[tokio::test]
+async fn invalid_engine_values_are_validation_errors_with_a_fix() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _env = EnvGuard::set(dir.path());
+
+    let (code, out) = run(&["config", "set", "credentials.store", "bogus"]).await;
+    assert_ne!(code, 0, "{out}");
+    assert_eq!(out["error"]["code"], json!("VALIDATION_ERROR"), "{out}");
+    assert!(out["fix"].as_str().is_some_and(|f| !f.is_empty()), "{out}");
+}

@@ -375,10 +375,15 @@ impl ConfigFile {
 
     /// Returns the dotted path of every scalar or array value in the file, in
     /// document order. Tables are descended into, not listed themselves.
+    ///
+    /// A key that itself contains a `.` (written `"a.b" = 1`) is omitted: a
+    /// dotted path cannot tell it apart from the nested key `a` → `b`, so it
+    /// could not be read back with [`get`](ConfigFile::get) or removed with
+    /// [`unset`](ConfigFile::unset).
     #[must_use]
     pub fn leaf_keys(&self) -> Vec<String> {
         fn walk(table: &dyn toml_edit::TableLike, prefix: &str, out: &mut Vec<String>) {
-            for (key, item) in table.iter() {
+            for (key, item) in table.iter().filter(|(key, _)| !key.contains('.')) {
                 let path = if prefix.is_empty() {
                     key.to_owned()
                 } else {
@@ -776,5 +781,16 @@ mod tests {
         let cfg = ConfigFile::default();
         assert!(cfg.path().is_none());
         assert!(cfg.save().is_err(), "save without a path should error");
+    }
+
+    #[test]
+    fn leaf_keys_omit_keys_containing_a_dot() {
+        let cfg = doc_config("\"a.b\" = 7\nplain = 1\n[a]\nb = 9\n");
+        assert_eq!(
+            cfg.leaf_keys(),
+            ["plain", "a.b"],
+            "only the nested a.b, once"
+        );
+        assert_eq!(cfg.get_json("a.b"), Some(serde_json::Value::from(9)));
     }
 }
