@@ -79,6 +79,8 @@ pub mod command;
 pub mod config;
 /// Built-in `config` command group.
 pub mod config_commands;
+/// Typed, discoverable settings for the config file.
+pub mod config_schema;
 /// Built-in `env` command group (private; only `cli.rs` consumes it).
 mod env_commands;
 /// Declarative, attribute-driven per-environment configuration: `EnvConfig`,
@@ -141,7 +143,8 @@ pub use config::{
     ConfigFile, CredentialStore, CredentialsConfig, EngineConfig, ParseCredentialStoreError,
     credential_store_env_var, resolve_credential_store, resolve_credential_store_with,
 };
-pub use config_commands::config_command_group;
+pub use config_commands::{config_command_group, config_command_group_with};
+pub use config_schema::{ConfigEntry, ConfigKey, ConfigKind, ConfigSchema, SettingSource};
 pub use env_config::{
     ConfigSource, EnvConfig, EnvConfigError, EnvSource, EnvVarSource, SourceChain, ValueSource,
 };

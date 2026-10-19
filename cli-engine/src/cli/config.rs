@@ -7,8 +7,8 @@ use clap::{ArgMatches, Command};
 
 use super::argv0::{Argv0Route, is_valid_argv0_name};
 use crate::{
-    ActivityEmitter, Auditor, AuthProvider, Authorizer, CommandMeta, GuideEntry, Middleware,
-    Module, Result, RuntimeCommandSpec,
+    ActivityEmitter, Auditor, AuthProvider, Authorizer, CommandMeta, ConfigSchema, GuideEntry,
+    Middleware, Module, Result, RuntimeCommandSpec,
     feature_flags::{FlagPolicy, Stage},
     output::{HumanViewDef, NextAction},
     search::SearchDocument,
@@ -172,6 +172,10 @@ pub struct CliConfig {
     /// consumer's own `config` noun. Enable via
     /// [`CliConfig::with_config_commands`].
     pub config_commands: bool,
+    /// The CLI's own typed settings, shown and validated by the `config`
+    /// commands. Set via [`CliConfig::with_config_schema`], which also mounts
+    /// them.
+    pub config_schema: Option<ConfigSchema>,
     /// Alternative `argv[0]` names this binary may be invoked as, mapped to the
     /// behavior the engine should take (busybox/git-style multi-call dispatch).
     ///
@@ -601,6 +605,53 @@ impl CliConfig {
         self
     }
 
+    /// Registers the CLI's own settings and mounts the `config` commands
+    /// (implying [`with_config_commands`](Self::with_config_commands)).
+    ///
+    /// `T` is a plain settings struct: its fields become keys in the config
+    /// file (nested structs become dotted keys), its doc comments become
+    /// descriptions, and `#[serde(default)]` supplies defaults (hence the
+    /// `Serialize` bound). Once
+    /// registered, `config set` rejects unknown keys and values that do not
+    /// parse as the key's type, `config get`/`list` show each key's default
+    /// and description, and `config unset` removes a key. Read the values in a
+    /// handler with `ctx.config().deserialize::<T>()`.
+    ///
+    /// ```
+    /// use cli_engine::CliConfig;
+    /// use schemars::JsonSchema;
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+    /// #[serde(default)]
+    /// struct Prefs {
+    ///     /// Show domain names in their ASCII (punycode) form.
+    ///     punycode: bool,
+    /// }
+    ///
+    /// let config = CliConfig::new("my-cli", "Team CLI", "my-cli").with_config_schema::<Prefs>();
+    /// ```
+    ///
+    /// For a cross-field rule, build the schema yourself and use
+    /// [`with_config_schema_value`](Self::with_config_schema_value).
+    #[must_use]
+    pub fn with_config_schema<T>(self) -> Self
+    where
+        T: serde::de::DeserializeOwned + serde::Serialize + schemars::JsonSchema + 'static,
+    {
+        self.with_config_schema_value(ConfigSchema::of::<T>())
+    }
+
+    /// Like [`with_config_schema`](Self::with_config_schema), for a
+    /// [`ConfigSchema`] built by hand, e.g. with
+    /// [`ConfigSchema::validate_with`].
+    #[must_use]
+    pub fn with_config_schema_value(mut self, schema: ConfigSchema) -> Self {
+        self.config_commands = true;
+        self.config_schema = Some(schema);
+        self
+    }
+
     /// Registers an alternative `argv[0]` name that acts as a shortcut to a
     /// command path on this same CLI.
     ///
@@ -714,6 +765,7 @@ impl std::fmt::Debug for CliConfig {
             .field("has_extra_search_docs", &self.extra_search_docs.is_some())
             .field("has_root_next_actions", &self.root_next_actions.is_some())
             .field("admin_category", &self.admin_category)
+            .field("config_schema", &self.config_schema)
             .field(
                 "argv0_routes",
                 &self.argv0_routes.keys().collect::<Vec<_>>(),
