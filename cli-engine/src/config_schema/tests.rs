@@ -462,6 +462,20 @@ mod bad_names {
         drop(ConfigSchema::of::<Dotted>());
     }
 
+    #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+    #[serde(default)]
+    struct Empty {
+        #[serde(rename = "")]
+        flag: bool,
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "name is empty")]
+    fn an_empty_field_name_is_rejected_at_registration() {
+        drop(ConfigSchema::of::<Empty>());
+    }
+
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "reserved for the engine")]
@@ -474,6 +488,8 @@ mod bad_names {
     fn release_builds_omit_unusable_keys_instead_of_advertising_them() {
         let dotted = ConfigSchema::of::<Dotted>();
         assert!(dotted.find("a.b").is_none() && dotted.find("fine").is_some());
+        let empty = ConfigSchema::of::<Empty>();
+        assert!(empty.keys().iter().all(|k| !k.key.is_empty()));
         let reserved = ConfigSchema::of::<Reserved>();
         assert!(reserved.find("output").is_none() && reserved.find("fine").is_some());
         let mut file = ConfigFile::default();
@@ -481,4 +497,25 @@ mod bad_names {
         assert!(reserved.set(&mut file, "output", "true").is_err());
         assert_eq!(file.get_json("output.format"), Some(Value::from("json")));
     }
+}
+
+#[test]
+fn a_configured_keys_default_is_what_applies_once_it_is_unset() {
+    let schema = ConfigSchema::of::<Nested>();
+
+    // Unsetting `limits.max` leaves `[limits]` (other = 1) behind, so the
+    // handler would read `Limits::default()`'s 0, not `Nested::default()`'s 10.
+    let mut retained = ConfigFile::default();
+    retained.set("limits.max", "30").expect("hand edit");
+    retained.set("limits.other", "1").expect("hand edit");
+    let entry = schema.entry(&retained, "limits.max").expect("entry");
+    assert_eq!(entry.key.default, Some(Value::from(0)));
+    assert_eq!(entry.value, Value::from(30));
+
+    // With nothing else in `[limits]`, unsetting prunes the table, so the
+    // parent default applies.
+    let mut pruned = ConfigFile::default();
+    pruned.set("limits.max", "30").expect("hand edit");
+    let entry = schema.entry(&pruned, "limits.max").expect("entry");
+    assert_eq!(entry.key.default, Some(Value::from(10)));
 }

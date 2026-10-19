@@ -267,7 +267,6 @@ impl ConfigSchema {
     /// keys, or tables the CLI reads without registering).
     #[must_use]
     pub fn entries(&self, file: &ConfigFile) -> Vec<ConfigEntry> {
-        let typed = self.effective_settings(file);
         let undeclared = file
             .leaf_keys()
             .into_iter()
@@ -275,7 +274,7 @@ impl ConfigSchema {
             .map(|key| undeclared_entry(key, file));
         self.keys
             .iter()
-            .map(|k| entry_for(k, file, typed.as_ref()))
+            .map(|k| self.entry_for(k, file))
             .chain(undeclared)
             .collect()
     }
@@ -283,8 +282,7 @@ impl ConfigSchema {
     /// Returns the entry for `key` if it is a known key.
     #[must_use]
     pub fn entry(&self, file: &ConfigFile, key: &str) -> Option<ConfigEntry> {
-        let typed = self.effective_settings(file);
-        self.find(key).map(|k| entry_for(k, file, typed.as_ref()))
+        self.find(key).map(|k| self.entry_for(k, file))
     }
 
     /// What the registered settings struct resolves `file` to, or `None` when
@@ -360,6 +358,57 @@ impl ConfigSchema {
         Ok(removed)
     }
 
+    fn entry_for(&self, key: &ConfigKey, file: &ConfigFile) -> ConfigEntry {
+        let mut declared = key.clone();
+        let (value, source) = match file.get_json(&key.key) {
+            Some(value) => {
+                // What would apply if this key were removed, which can differ
+                // from the empty-file default when a parent table would remain.
+                declared.default = self.default_without(file, key);
+                (value, SettingSource::File)
+            }
+            // Resolve against the typed settings the file actually yields, so
+            // this agrees with what a handler reads even when a parent table
+            // exists but is empty, or an optional section is absent.
+            None => match lookup(self.effective_settings(file).as_ref(), &key.key) {
+                Lookup::Value(value) => {
+                    declared.default = Some(value.clone());
+                    (value.clone(), SettingSource::Default)
+                }
+                // Also covers an absent optional section: it has no default either.
+                Lookup::Unset => {
+                    declared.default = None;
+                    (Value::Null, SettingSource::Unset)
+                }
+                Lookup::Unknown => match &key.default {
+                    Some(default) => (default.clone(), SettingSource::Default),
+                    None => (Value::Null, SettingSource::Unset),
+                },
+            },
+        };
+        ConfigEntry {
+            key: declared,
+            value,
+            source,
+        }
+    }
+
+    /// The default `key` would take if it were unset, resolved against a copy
+    /// of `file` with the key removed (pruning emptied parent tables exactly as
+    /// `unset` does), falling back to the declared default when that cannot be
+    /// determined.
+    fn default_without(&self, file: &ConfigFile, key: &ConfigKey) -> Option<Value> {
+        let mut without = file.clone();
+        if without.unset(&key.key).is_err() {
+            return key.default.clone();
+        }
+        match lookup(self.effective_settings(&without).as_ref(), &key.key) {
+            Lookup::Value(value) => Some(value.clone()),
+            Lookup::Unset => None,
+            Lookup::Unknown => key.default.clone(),
+        }
+    }
+
     /// Whether `path` is a declared key or a section holding declared keys.
     fn is_declared_path(&self, path: &str) -> bool {
         self.keys.iter().any(|k| {
@@ -419,36 +468,6 @@ fn undeclared_entry(key: String, file: &ConfigFile) -> ConfigEntry {
         },
         value,
         source: SettingSource::File,
-    }
-}
-
-fn entry_for(key: &ConfigKey, file: &ConfigFile, typed: Option<&Value>) -> ConfigEntry {
-    let mut declared = key.clone();
-    let (value, source) = match file.get_json(&key.key) {
-        Some(value) => (value, SettingSource::File),
-        // Resolve against the typed settings the file actually yields, so this
-        // agrees with what a handler reads even when a parent table exists but
-        // is empty, or an optional section is absent.
-        None => match lookup(typed, &key.key) {
-            Lookup::Value(value) => {
-                declared.default = Some(value.clone());
-                (value.clone(), SettingSource::Default)
-            }
-            // Also covers an absent optional section: it has no default either.
-            Lookup::Unset => {
-                declared.default = None;
-                (Value::Null, SettingSource::Unset)
-            }
-            Lookup::Unknown => match &key.default {
-                Some(default) => (default.clone(), SettingSource::Default),
-                None => (Value::Null, SettingSource::Unset),
-            },
-        },
-    };
-    ConfigEntry {
-        key: declared,
-        value,
-        source,
     }
 }
 

@@ -36,15 +36,16 @@ pub(super) fn collect_keys(root: &Value) -> Vec<ConfigKey> {
     out
 }
 
-/// Whether a settings field name can be a config key. A name with a `.` cannot
-/// be told apart from a nested key in a dotted path (so a write would land in
-/// the wrong place), and a top-level name the engine reserves would let a write
-/// replace one of its tables.
+/// Whether a settings field name can be a config key. An empty name, or one
+/// with a `.`, cannot be told apart from a nested key in a dotted path (so a
+/// write would land in the wrong place), and a top-level name the engine
+/// reserves would let a write replace one of its tables.
 ///
 /// Both are authoring errors in the settings struct: debug builds assert, and
 /// release builds leave the key out rather than advertise one that misbehaves.
 fn usable_name(prefix: &str, name: &str) -> bool {
     let dotted = name.contains('.');
+    let empty = name.is_empty();
     let reserved = prefix.is_empty() && ENGINE_RESERVED_TABLES.contains(&name);
     debug_assert!(
         !dotted,
@@ -52,11 +53,15 @@ fn usable_name(prefix: &str, name: &str) -> bool {
          rename the field"
     );
     debug_assert!(
+        !empty,
+        "config setting name is empty (via #[serde(rename = \"\")]); rename the field"
+    );
+    debug_assert!(
         !reserved,
         "config setting name {name:?} is a table reserved for the engine ({}); rename the field",
         ENGINE_RESERVED_TABLES.join(", ")
     );
-    !dotted && !reserved
+    !dotted && !empty && !reserved
 }
 
 fn walk(root: &Value, node: &Value, prefix: &str, depth: usize, out: &mut Vec<ConfigKey>) {
