@@ -183,16 +183,28 @@ impl ConfigSchema {
     ///
     /// Keys, types, and descriptions (doc comments) come from `T`'s JSON
     /// Schema. Defaults are what `T` deserializes to from an empty file (via
-    /// `#[serde(default)]`), so `T` needs `Serialize` as well; a `T` with
-    /// required fields simply shows no defaults. A value is accepted only if it parses as the key's type and
-    /// the resulting file still deserializes into `T`, so `T`'s own `Deserialize`
-    /// rules apply. `T` should not use `#[serde(deny_unknown_fields)]`: the file
-    /// also holds the engine's own tables.
+    /// `#[serde(default)]`), so `T` needs `Serialize` as well. A value is
+    /// accepted only if it parses as the key's type and the resulting file
+    /// still deserializes into `T`, so `T`'s own `Deserialize` rules apply.
+    ///
+    /// Every field of `T` needs a default, because `config set` writes one key
+    /// at a time and each write must leave a file that deserializes into `T`.
+    /// `T` should not use `#[serde(deny_unknown_fields)]`: the file also holds
+    /// the engine's own tables.
+    ///
+    /// # Panics
+    /// In debug builds, if `T` does not deserialize from an empty file.
     #[must_use]
     pub fn of<T>() -> Self
     where
         T: DeserializeOwned + Serialize + JsonSchema + 'static,
     {
+        debug_assert!(
+            ConfigFile::default().deserialize::<T>().is_ok(),
+            "config settings struct {} must deserialize from an empty file: give every field a \
+             default (e.g. #[serde(default)]), or `config set` can never initialize it",
+            std::any::type_name::<T>()
+        );
         let mut schema = Self::engine();
         let root = serde_json::to_value(schemars::schema_for!(T)).unwrap_or(Value::Null);
         let mut keys = collect_keys(&root);
@@ -270,28 +282,26 @@ impl ConfigSchema {
     /// Parses `raw` as `key`'s type, validates the result, and writes it to
     /// `file` (not to disk), returning the stored value.
     ///
-    /// `file` is left untouched when validation fails.
+    /// Every write, including engine keys and (in a non-strict schema) keys
+    /// the schema does not declare, is applied to a copy and checked against
+    /// the registered settings struct and rules first, so `file` is left
+    /// untouched when validation fails.
     ///
     /// # Errors
     /// Returns an error with a `fix` for an unknown key (strict schemas), a
     /// value that does not parse as the key's type, or a value the settings
-    /// struct rejects.
+    /// struct or a registered rule rejects.
     pub fn set(&self, file: &mut ConfigFile, key: &str, raw: &str) -> crate::Result<Value> {
-        let known = match self.find(key) {
-            Some(known) => known,
-            None if self.strict => return Err(self.unknown_key(key)),
-            None => {
-                file.set(key, raw)?;
-                return Ok(file.get_json(key).unwrap_or(Value::Null));
-            }
-        };
-        if known.engine {
-            file.set(key, raw)?;
-            return Ok(file.get_json(key).unwrap_or(Value::Null));
-        }
-        let value = parse_value(known, raw)?;
         let mut candidate = file.clone();
-        candidate.set_value(key, value)?;
+        match self.find(key) {
+            None if self.strict => return Err(self.unknown_key(key)),
+            Some(known) if !known.engine => {
+                candidate.set_value(key, parse_value(known, raw)?)?;
+            }
+            // Engine keys validate themselves; an undeclared key in a
+            // permissive schema has its type inferred.
+            _ => candidate.set(key, raw)?,
+        }
         self.run_check(&candidate, key)?;
         *file = candidate;
         Ok(file.get_json(key).unwrap_or(Value::Null))
@@ -301,14 +311,26 @@ impl ConfigSchema {
     /// present. A key that is known, or already in the file, can be unset even
     /// if a newer or older version of the CLI no longer declares it.
     ///
+    /// Removing a declared key is checked like a `set`, since it changes the
+    /// effective settings (the default applies again), and is refused if it
+    /// would make them invalid. If the file is already invalid, the removal is
+    /// allowed: it may be part of the repair. Removing an undeclared key never
+    /// affects the typed settings and is never refused.
+    ///
     /// # Errors
     /// Returns an error with a `fix` for an unknown, absent key (strict
-    /// schemas).
+    /// schemas), or a removal that would leave invalid settings.
     pub fn unset(&self, file: &mut ConfigFile, key: &str) -> crate::Result<bool> {
         if self.strict && self.find(key).is_none() && file.get_json(key).is_none() {
             return Err(self.unknown_key(key));
         }
-        file.unset(key)
+        let mut candidate = file.clone();
+        let removed = candidate.unset(key)?;
+        if removed && self.find(key).is_some() && self.run_check(file, key).is_ok() {
+            self.run_check(&candidate, key)?;
+        }
+        *file = candidate;
+        Ok(removed)
     }
 
     fn run_check(&self, candidate: &ConfigFile, key: &str) -> crate::Result<()> {
@@ -317,8 +339,9 @@ impl ConfigSchema {
         };
         check(candidate).map_err(|reason| {
             validation_error(
-                format!("invalid value for {key:?}: {reason}"),
-                format!("Choose a different value for {key:?}; `config list` shows what each setting accepts."),
+                format!("cannot change {key:?}: {reason}"),
+                "Run `config list` to see what each setting accepts, or fix the conflicting \
+                 setting first.",
             )
         })
     }
@@ -448,13 +471,27 @@ fn overlay_defaults<T: DeserializeOwned + Serialize>(keys: &mut [ConfigKey]) {
     let Ok(defaults) = serde_json::to_value(defaults) else {
         return;
     };
-    for key in keys {
-        let found = key
-            .key
-            .split('.')
-            .try_fold(&defaults, |value, segment| value.get(segment));
-        if let Some(default) = found.filter(|v| !v.is_null()) {
-            key.default = Some(default.clone());
+    'keys: for key in keys {
+        let mut value = &defaults;
+        for segment in key.key.split('.') {
+            match value {
+                // An absent optional section has no child defaults, whatever
+                // the schema says about the section's type.
+                Value::Null => {
+                    key.default = None;
+                    continue 'keys;
+                }
+                Value::Object(map) => match map.get(segment) {
+                    Some(next) => value = next,
+                    // Omitted by a serialization attribute (e.g. `skip_serializing`):
+                    // no value to override with, so leave the key as the schema had it.
+                    None => continue 'keys,
+                },
+                _ => continue 'keys,
+            }
+        }
+        if !value.is_null() {
+            key.default = Some(value.clone());
         }
     }
 }
@@ -751,5 +788,132 @@ mod tests {
             (page.value, page.source),
             (Value::Null, SettingSource::Unset)
         );
+    }
+
+    /// Settings with a cross-field rule and a non-zero default.
+    #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+    #[serde(default)]
+    struct Range {
+        min: u32,
+        max: u32,
+    }
+
+    impl Default for Range {
+        fn default() -> Self {
+            Self { min: 0, max: 10 }
+        }
+    }
+
+    fn range_schema() -> ConfigSchema {
+        ConfigSchema::of::<Range>().validate_with(|r: &Range| {
+            if r.min <= r.max {
+                Ok(())
+            } else {
+                Err(format!("min {} exceeds max {}", r.min, r.max))
+            }
+        })
+    }
+
+    #[test]
+    fn unset_is_refused_when_the_default_would_break_a_rule() {
+        let schema = range_schema();
+        let mut file = ConfigFile::default();
+        schema.set(&mut file, "max", "30").expect("max");
+        schema.set(&mut file, "min", "20").expect("min");
+        let before = file.to_toml_string();
+        let err = schema
+            .unset(&mut file, "max")
+            .expect_err("default 10 < min 20");
+        assert!(err.to_string().contains("min 20 exceeds max 10"), "{err}");
+        assert_eq!(file.to_toml_string(), before, "file untouched");
+    }
+
+    #[test]
+    fn unset_is_allowed_while_the_file_is_already_invalid() {
+        let schema = range_schema();
+        let mut file = ConfigFile::default();
+        file.set("min", "20").expect("hand edit");
+        file.set("max", "5").expect("hand edit");
+        // Still invalid afterwards (20 > default 10), but refusing would trap the user.
+        assert!(schema.unset(&mut file, "max").expect("repair step"));
+        assert_eq!(file.get_json("max"), None);
+    }
+
+    #[test]
+    fn rules_apply_to_engine_keys() {
+        let schema =
+            ConfigSchema::engine().validate_with(|e: &crate::config::EngineConfig| {
+                match e.output.format.as_deref() {
+                    Some("toon") => Err("toon is not allowed here".to_owned()),
+                    _ => Ok(()),
+                }
+            });
+        let mut file = ConfigFile::default();
+        assert!(schema.set(&mut file, "output.format", "toon").is_err());
+        assert_eq!(file.to_toml_string(), "");
+        schema
+            .set(&mut file, "output.format", "human")
+            .expect("allowed");
+    }
+
+    #[test]
+    fn rules_apply_to_undeclared_keys_in_a_permissive_schema() {
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct Loose {
+            replicas: i64,
+        }
+        impl Default for Loose {
+            fn default() -> Self {
+                Self { replicas: 1 }
+            }
+        }
+        let schema = ConfigSchema::engine().validate_with(|l: &Loose| {
+            if l.replicas <= 5 {
+                Ok(())
+            } else {
+                Err("at most 5 replicas".to_owned())
+            }
+        });
+        let mut file = ConfigFile::default();
+        assert!(schema.set(&mut file, "replicas", "9").is_err());
+        assert_eq!(file.get_json("replicas"), None);
+        schema
+            .set(&mut file, "replicas", "3")
+            .expect("within the rule");
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+    #[serde(default)]
+    struct OptionalSection {
+        domain: Option<Domain>,
+    }
+
+    #[test]
+    fn absent_optional_section_has_no_child_defaults() {
+        let schema = ConfigSchema::of::<OptionalSection>();
+        let key = schema.find("domain.punycode").expect("key");
+        assert_eq!(key.default, None);
+        let entry = schema
+            .entry(&ConfigFile::default(), "domain.punycode")
+            .expect("entry");
+        assert_eq!(entry.source, SettingSource::Unset);
+
+        let mut file = ConfigFile::default();
+        schema
+            .set(&mut file, "domain.punycode", "true")
+            .expect("creates the section");
+        assert_eq!(file.get_json("domain.punycode"), Some(Value::Bool(true)));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "must deserialize from an empty file")]
+    fn of_rejects_settings_without_defaults() {
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        struct Required {
+            name: String,
+        }
+        drop(ConfigSchema::of::<Required>());
     }
 }

@@ -435,6 +435,10 @@ impl ConfigFile {
 
     /// Persists the document to its config path via an atomic write.
     ///
+    /// For a read-modify-write, start from [`try_load`](ConfigFile::try_load):
+    /// a document from [`load`](ConfigFile::load) is empty when the file on
+    /// disk was malformed, and saving it replaces the user's file.
+    ///
     /// # Errors
     /// Returns an error when no config path is available (no resolvable config
     /// directory) or the write fails.
