@@ -107,6 +107,10 @@ pub fn load(app_id: &str) -> EngineConfig {
     ConfigFile::load(app_id).engine()
 }
 
+/// Top-level tables owned by the engine. `ConfigFile::set` validates their keys,
+/// and a consumer's settings struct may not use these names.
+pub(crate) const ENGINE_RESERVED_TABLES: &[&str] = &["credentials", "output"];
+
 /// A loaded per-application config file.
 ///
 /// cli-engine reads a single TOML file at `<config-base>/<app_id>/config.toml`
@@ -316,7 +320,6 @@ impl ConfigFile {
         // Only the documented key in each table is accepted; any other key
         // in those tables is rejected to prevent silently writing unknown
         // engine config that would be ignored (and confuse the user).
-        const ENGINE_RESERVED_TABLES: &[&str] = &["credentials", "output"];
         let first_segment = dotted_key.split('.').next().unwrap_or("");
         if ENGINE_RESERVED_TABLES.contains(&first_segment) {
             match dotted_key {

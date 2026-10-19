@@ -423,14 +423,22 @@ fn undeclared_entry(key: String, file: &ConfigFile) -> ConfigEntry {
 }
 
 fn entry_for(key: &ConfigKey, file: &ConfigFile, typed: Option<&Value>) -> ConfigEntry {
+    let mut declared = key.clone();
     let (value, source) = match file.get_json(&key.key) {
         Some(value) => (value, SettingSource::File),
         // Resolve against the typed settings the file actually yields, so this
         // agrees with what a handler reads even when a parent table exists but
         // is empty, or an optional section is absent.
         None => match lookup(typed, &key.key) {
-            Lookup::Value(value) => (value.clone(), SettingSource::Default),
-            Lookup::Unset => (Value::Null, SettingSource::Unset),
+            Lookup::Value(value) => {
+                declared.default = Some(value.clone());
+                (value.clone(), SettingSource::Default)
+            }
+            // Also covers an absent optional section: it has no default either.
+            Lookup::Unset => {
+                declared.default = None;
+                (Value::Null, SettingSource::Unset)
+            }
             Lookup::Unknown => match &key.default {
                 Some(default) => (default.clone(), SettingSource::Default),
                 None => (Value::Null, SettingSource::Unset),
@@ -438,7 +446,7 @@ fn entry_for(key: &ConfigKey, file: &ConfigFile, typed: Option<&Value>) -> Confi
         },
     };
     ConfigEntry {
-        key: key.clone(),
+        key: declared,
         value,
         source,
     }

@@ -269,6 +269,10 @@ fn child_default_applies_only_once_the_optional_section_exists() {
         .entry(&ConfigFile::default(), "domain.punycode")
         .expect("entry");
     assert_eq!(
+        absent.key.default, None,
+        "no section, so no default is advertised either"
+    );
+    assert_eq!(
         (absent.value, absent.source),
         (Value::Null, SettingSource::Unset)
     );
@@ -276,6 +280,7 @@ fn child_default_applies_only_once_the_optional_section_exists() {
     let mut file = ConfigFile::default();
     file.set("domain.other", "1").expect("creates [domain]");
     let present = schema.entry(&file, "domain.punycode").expect("entry");
+    assert_eq!(present.key.default, Some(Value::Bool(false)));
     assert_eq!(
         (present.value, present.source),
         (Value::Bool(false), SettingSource::Default)
@@ -429,4 +434,51 @@ fn a_conflicting_parent_value_is_a_validation_error_with_a_fix() {
         Some(Value::Bool(false)),
         "file untouched"
     );
+}
+
+/// Settings structs with field names that cannot be config keys.
+mod bad_names {
+    use super::*;
+
+    #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+    #[serde(default)]
+    struct Dotted {
+        #[serde(rename = "a.b")]
+        flag: bool,
+        fine: bool,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+    #[serde(default)]
+    struct Reserved {
+        output: bool,
+        fine: bool,
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "contains a '.'")]
+    fn a_dotted_field_name_is_rejected_at_registration() {
+        drop(ConfigSchema::of::<Dotted>());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "reserved for the engine")]
+    fn an_engine_reserved_field_name_is_rejected_at_registration() {
+        drop(ConfigSchema::of::<Reserved>());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_builds_omit_unusable_keys_instead_of_advertising_them() {
+        let dotted = ConfigSchema::of::<Dotted>();
+        assert!(dotted.find("a.b").is_none() && dotted.find("fine").is_some());
+        let reserved = ConfigSchema::of::<Reserved>();
+        assert!(reserved.find("output").is_none() && reserved.find("fine").is_some());
+        let mut file = ConfigFile::default();
+        file.set("output.format", "json").expect("engine key");
+        assert!(reserved.set(&mut file, "output", "true").is_err());
+        assert_eq!(file.get_json("output.format"), Some(Value::from("json")));
+    }
 }

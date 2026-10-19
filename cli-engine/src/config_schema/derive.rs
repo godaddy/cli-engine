@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use super::{ConfigKey, ConfigKind, Lookup, lookup};
-use crate::config::ConfigFile;
+use crate::config::{ConfigFile, ENGINE_RESERVED_TABLES};
 
 /// How deep a nested settings struct may go before the walker stops. Guards
 /// against recursive types.
@@ -36,11 +36,37 @@ pub(super) fn collect_keys(root: &Value) -> Vec<ConfigKey> {
     out
 }
 
+/// Whether a settings field name can be a config key. A name with a `.` cannot
+/// be told apart from a nested key in a dotted path (so a write would land in
+/// the wrong place), and a top-level name the engine reserves would let a write
+/// replace one of its tables.
+///
+/// Both are authoring errors in the settings struct: debug builds assert, and
+/// release builds leave the key out rather than advertise one that misbehaves.
+fn usable_name(prefix: &str, name: &str) -> bool {
+    let dotted = name.contains('.');
+    let reserved = prefix.is_empty() && ENGINE_RESERVED_TABLES.contains(&name);
+    debug_assert!(
+        !dotted,
+        "config setting name {name:?} contains a '.', which a dotted key cannot represent; \
+         rename the field"
+    );
+    debug_assert!(
+        !reserved,
+        "config setting name {name:?} is a table reserved for the engine ({}); rename the field",
+        ENGINE_RESERVED_TABLES.join(", ")
+    );
+    !dotted && !reserved
+}
+
 fn walk(root: &Value, node: &Value, prefix: &str, depth: usize, out: &mut Vec<ConfigKey>) {
     let Some(properties) = node.get("properties").and_then(Value::as_object) else {
         return;
     };
     for (name, property) in properties {
+        if !usable_name(prefix, name) {
+            continue;
+        }
         let property = resolve(root, property);
         let key = if prefix.is_empty() {
             name.clone()
