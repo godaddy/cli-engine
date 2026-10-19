@@ -76,11 +76,6 @@ pub struct ConfigKey {
     /// Validated by [`ConfigFile::set`] itself rather than by this schema.
     #[serde(skip)]
     engine: bool,
-    /// Dotted path of an optional section (`Option<Struct>` defaulting to
-    /// `None`) this key lives under. `default` only applies once that section
-    /// is present in the file.
-    #[serde(skip)]
-    optional_parent: Option<String>,
 }
 
 /// Where a setting's effective value comes from.
@@ -122,6 +117,8 @@ pub(crate) fn validation_error(message: impl Into<String>, fix: impl Into<String
 }
 
 type Check = Arc<dyn Fn(&ConfigFile) -> Result<(), String> + Send + Sync>;
+/// The typed settings a file currently resolves to, as JSON, if it is valid.
+type Effective = Arc<dyn Fn(&ConfigFile) -> Option<Value> + Send + Sync>;
 
 /// The set of keys `config get`/`set`/`unset`/`list` know about.
 ///
@@ -133,6 +130,7 @@ pub struct ConfigSchema {
     keys: Vec<ConfigKey>,
     strict: bool,
     check: Option<Check>,
+    effective: Option<Effective>,
 }
 
 impl std::fmt::Debug for ConfigSchema {
@@ -162,7 +160,6 @@ impl ConfigSchema {
             default: default.map(Value::from),
             allowed: Vec::new(),
             engine: true,
-            optional_parent: None,
         };
         Self {
             keys: vec![
@@ -180,6 +177,7 @@ impl ConfigSchema {
             ],
             strict: false,
             check: None,
+            effective: None,
         }
     }
 
@@ -217,6 +215,10 @@ impl ConfigSchema {
         schema.strict = true;
         schema.check = Some(Arc::new(|file| {
             file.deserialize::<T>().map(drop).map_err(|e| e.to_string())
+        }));
+        schema.effective = Some(Arc::new(|file| {
+            let typed = file.deserialize::<T>().ok()?;
+            serde_json::to_value(typed).ok()
         }));
         schema
     }
@@ -265,6 +267,7 @@ impl ConfigSchema {
     /// keys, or tables the CLI reads without registering).
     #[must_use]
     pub fn entries(&self, file: &ConfigFile) -> Vec<ConfigEntry> {
+        let typed = self.effective_settings(file);
         let undeclared = file
             .leaf_keys()
             .into_iter()
@@ -272,7 +275,7 @@ impl ConfigSchema {
             .map(|key| undeclared_entry(key, file));
         self.keys
             .iter()
-            .map(|k| entry_for(k, file))
+            .map(|k| entry_for(k, file, typed.as_ref()))
             .chain(undeclared)
             .collect()
     }
@@ -280,7 +283,16 @@ impl ConfigSchema {
     /// Returns the entry for `key` if it is a known key.
     #[must_use]
     pub fn entry(&self, file: &ConfigFile, key: &str) -> Option<ConfigEntry> {
-        self.find(key).map(|k| entry_for(k, file))
+        let typed = self.effective_settings(file);
+        self.find(key).map(|k| entry_for(k, file, typed.as_ref()))
+    }
+
+    /// What the registered settings struct resolves `file` to, or `None` when
+    /// there is no struct or the file does not deserialize into it.
+    fn effective_settings(&self, file: &ConfigFile) -> Option<Value> {
+        self.effective
+            .as_ref()
+            .and_then(|effective| effective(file))
     }
 
     /// Parses `raw` as `key`'s type, validates the result, and writes it to
@@ -300,7 +312,14 @@ impl ConfigSchema {
         match self.find(key) {
             None if self.strict => return Err(self.unknown_key(key)),
             Some(known) if !known.engine => {
-                candidate.set_value(key, parse_value(known, raw)?)?;
+                let value = parse_value(known, raw)?;
+                candidate.set_value(key, value).map_err(|e| {
+                    validation_error(
+                        e.to_string(),
+                        "A parent of this key is already set to a plain value. Fix or remove it in \
+                         the config file (`config path` prints the location).",
+                    )
+                })?;
             }
             // Engine keys validate themselves; an undeclared key in a
             // permissive schema has its type inferred.
@@ -320,24 +339,21 @@ impl ConfigSchema {
     /// present. A key that is known, or already in the file, can be unset even
     /// if a newer or older version of the CLI no longer declares it.
     ///
-    /// Removing a declared key, or a whole section containing declared keys, is
-    /// checked like a `set`, since it changes the
-    /// effective settings (the default applies again), and is refused if it
-    /// would make them invalid. If the file is already invalid, the removal is
-    /// allowed: it may be part of the repair. Removing an undeclared key never
-    /// affects the typed settings and is never refused.
+    /// Every removal is checked like a `set`, since it can change the
+    /// effective settings (the default applies again, or an entry leaves a
+    /// map), and is refused if it would make them invalid. If the file is
+    /// already invalid, the removal is allowed: it may be part of the repair.
     ///
     /// # Errors
     /// Returns an error with a `fix` for an unknown, absent key (strict
     /// schemas), or a removal that would leave invalid settings.
     pub fn unset(&self, file: &mut ConfigFile, key: &str) -> crate::Result<bool> {
-        let declared = self.is_declared_path(key);
-        if self.strict && !declared && file.get_json(key).is_none() {
+        if self.strict && !self.is_declared_path(key) && file.get_json(key).is_none() {
             return Err(self.unknown_key(key));
         }
         let mut candidate = file.clone();
         let removed = candidate.unset(key)?;
-        if removed && declared && self.run_check(file, key).is_ok() {
+        if removed && self.run_check(file, key).is_ok() {
             self.run_check(&candidate, key)?;
         }
         *file = candidate;
@@ -400,29 +416,62 @@ fn undeclared_entry(key: String, file: &ConfigFile) -> ConfigEntry {
             default: None,
             allowed: Vec::new(),
             engine: false,
-            optional_parent: None,
         },
         value,
         source: SettingSource::File,
     }
 }
 
-fn entry_for(key: &ConfigKey, file: &ConfigFile) -> ConfigEntry {
-    // A default under an optional section applies only once the section exists.
-    let default = key.default.as_ref().filter(|_| {
-        key.optional_parent
-            .as_ref()
-            .is_none_or(|p| file.get_json(p).is_some())
-    });
-    let (value, source) = match (file.get_json(&key.key), default) {
-        (Some(value), _) => (value, SettingSource::File),
-        (None, Some(default)) => (default.clone(), SettingSource::Default),
-        (None, None) => (Value::Null, SettingSource::Unset),
+fn entry_for(key: &ConfigKey, file: &ConfigFile, typed: Option<&Value>) -> ConfigEntry {
+    let (value, source) = match file.get_json(&key.key) {
+        Some(value) => (value, SettingSource::File),
+        // Resolve against the typed settings the file actually yields, so this
+        // agrees with what a handler reads even when a parent table exists but
+        // is empty, or an optional section is absent.
+        None => match lookup(typed, &key.key) {
+            Lookup::Value(value) => (value.clone(), SettingSource::Default),
+            Lookup::Unset => (Value::Null, SettingSource::Unset),
+            Lookup::Unknown => match &key.default {
+                Some(default) => (default.clone(), SettingSource::Default),
+                None => (Value::Null, SettingSource::Unset),
+            },
+        },
     };
     ConfigEntry {
         key: key.clone(),
         value,
         source,
+    }
+}
+
+/// The result of looking a dotted key up in serialized typed settings.
+enum Lookup<'typed> {
+    /// A concrete value.
+    Value(&'typed Value),
+    /// The value is `null`, or sits under an optional section that is absent.
+    Unset,
+    /// Not determinable: no typed settings, or serialization omitted the field.
+    Unknown,
+}
+
+fn lookup<'typed>(typed: Option<&'typed Value>, path: &str) -> Lookup<'typed> {
+    let Some(mut value) = typed else {
+        return Lookup::Unknown;
+    };
+    for segment in path.split('.') {
+        match value {
+            Value::Null => return Lookup::Unset,
+            Value::Object(map) => match map.get(segment) {
+                Some(next) => value = next,
+                None => return Lookup::Unknown,
+            },
+            _ => return Lookup::Unknown,
+        }
+    }
+    if value.is_null() {
+        Lookup::Unset
+    } else {
+        Lookup::Value(value)
     }
 }
 

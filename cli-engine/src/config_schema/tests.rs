@@ -356,3 +356,77 @@ fn of_rejects_settings_without_defaults() {
     }
     drop(ConfigSchema::of::<Required>());
 }
+
+#[test]
+fn defaults_follow_the_typed_document_when_a_parent_table_is_present_but_empty() {
+    let schema = ConfigSchema::of::<Nested>();
+
+    let absent = schema
+        .entry(&ConfigFile::default(), "limits.max")
+        .expect("entry");
+    assert_eq!(
+        absent.value,
+        Value::from(10),
+        "no [limits]: Nested::default() applies"
+    );
+
+    // `[limits]` exists, so `Limits` fills its own missing field: 0, not 10.
+    let mut file = ConfigFile::default();
+    file.set("limits.other", "1").expect("hand edit");
+    let present = schema.entry(&file, "limits.max").expect("entry");
+    assert_eq!(
+        (present.value, present.source),
+        (Value::from(0), SettingSource::Default)
+    );
+}
+
+#[test]
+fn removing_a_map_entry_is_checked() {
+    #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+    #[serde(default)]
+    struct Weights {
+        weights: std::collections::BTreeMap<String, u32>,
+    }
+    let schema = ConfigSchema::of::<Weights>().validate_with(|w: &Weights| {
+        let total: u32 = w.weights.values().sum();
+        if w.weights.is_empty() || total == 100 {
+            Ok(())
+        } else {
+            Err(format!("weights total {total}"))
+        }
+    });
+    let mut file = ConfigFile::default();
+    file.set("weights.primary", "50").expect("hand edit");
+    file.set("weights.secondary", "50").expect("hand edit");
+    let before = file.to_toml_string();
+
+    let err = schema
+        .unset(&mut file, "weights.primary")
+        .expect_err("total would be 50");
+    assert!(err.to_string().contains("weights total 50"), "{err}");
+    assert_eq!(file.to_toml_string(), before, "file untouched");
+    assert!(
+        schema
+            .unset(&mut file, "weights")
+            .expect("whole map is fine")
+    );
+}
+
+#[test]
+fn a_conflicting_parent_value_is_a_validation_error_with_a_fix() {
+    let schema = ConfigSchema::of::<OptionalSection>();
+    let mut file = ConfigFile::default();
+    file.set("domain", "false").expect("hand edit");
+    let err = schema
+        .set(&mut file, "domain.punycode", "true")
+        .expect_err("domain is not a table");
+    assert!(
+        matches!(&err, CliCoreError::Fix { fix, .. } if fix.contains("config file")),
+        "expected a fix, got {err:?}"
+    );
+    assert_eq!(
+        file.get_json("domain"),
+        Some(Value::Bool(false)),
+        "file untouched"
+    );
+}

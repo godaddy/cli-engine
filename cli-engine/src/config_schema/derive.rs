@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use super::{ConfigKey, ConfigKind};
+use super::{ConfigKey, ConfigKind, Lookup, lookup};
 use crate::config::ConfigFile;
 
 /// How deep a nested settings struct may go before the walker stops. Guards
@@ -22,28 +22,9 @@ pub(super) fn overlay_defaults<T: DeserializeOwned + Serialize>(keys: &mut [Conf
     let Ok(defaults) = serde_json::to_value(defaults) else {
         return;
     };
-    'keys: for key in keys {
-        let mut value = &defaults;
-        let segments: Vec<&str> = key.key.split('.').collect();
-        for (depth, segment) in segments.iter().enumerate() {
-            match value {
-                // An absent optional section: children keep their default but
-                // it only applies once the section is present in the file.
-                Value::Null => {
-                    key.optional_parent = Some(segments[..depth].join("."));
-                    continue 'keys;
-                }
-                Value::Object(map) => match map.get(*segment) {
-                    Some(next) => value = next,
-                    // Omitted by a serialization attribute (e.g. `skip_serializing`):
-                    // no value to override with, so leave the key as the schema had it.
-                    None => continue 'keys,
-                },
-                _ => continue 'keys,
-            }
-        }
-        if !value.is_null() {
-            key.default = Some(value.clone());
+    for key in keys {
+        if let Lookup::Value(default) = lookup(Some(&defaults), &key.key) {
+            key.default = Some(default.clone());
         }
     }
 }
@@ -95,7 +76,6 @@ fn leaf(key: String, schema: &Value) -> ConfigKey {
         default: schema.get("default").filter(|d| !d.is_null()).cloned(),
         allowed,
         engine: false,
-        optional_parent: None,
     }
 }
 
