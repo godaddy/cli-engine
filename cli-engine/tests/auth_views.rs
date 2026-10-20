@@ -297,3 +297,41 @@ async fn expr_that_keeps_the_shape_keeps_the_view() {
     let header = header_line(&rendered);
     assert!(position(header, "IDENTITY") < position(header, "EXPIRES"));
 }
+
+#[tokio::test]
+async fn fields_after_expr_name_the_reshaped_result_not_the_view() {
+    let cli = cli_with(config());
+    let status = ["auth", "status", "--provider", "primary", "--env", "prod"];
+    let login = ["auth", "login", "--env", "prod"];
+    for base in [&status[..], &login[..]] {
+        let mut args = base.to_vec();
+        args.extend([
+            "--expr",
+            "{user: identity, where: env}",
+            "--fields",
+            "user",
+            "--output",
+            "human",
+        ]);
+        let rendered = run(&cli, &args).await;
+        assert!(rendered.to_lowercase().contains("user"), "{rendered}");
+        assert!(rendered.contains("tester"), "{rendered}");
+        assert!(!rendered.to_lowercase().contains("where"), "{rendered}");
+    }
+}
+
+#[tokio::test]
+async fn fields_without_expr_still_reject_names_the_view_lacks() {
+    let cli = cli_with(config());
+    let output = cli
+        .run([
+            "my-cli", "auth", "status", "--fields", "nope", "--output", "human",
+        ])
+        .await;
+    assert_ne!(output.exit_code, 0);
+    assert!(
+        output.rendered.contains("unknown field"),
+        "{}",
+        output.rendered
+    );
+}

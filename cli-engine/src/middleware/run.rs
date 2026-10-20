@@ -512,8 +512,11 @@ impl Middleware {
         // closes elsewhere. So an explicit `--fields` (never a
         // `default_fields` fallback — same reasoning as
         // `PipelineOpts::fields_are_default`) is checked against the view's
-        // column catalog here instead.
+        // column catalog here instead. Not under `--expr`: its result can be
+        // any shape, so the view's columns say nothing about what `--fields`
+        // may name.
         if human_view
+            && self.expr.is_empty()
             && self.fields_explicit
             && let Some(columns) = self.human_views.columns(view_id)
         {

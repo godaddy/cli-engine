@@ -385,8 +385,9 @@ pub(crate) fn render_human_with_registry_selected(
     }
     match registry.columns(schema_id) {
         // A view that names none of the data's fields because `--expr`
-        // reshaped it would render blank; show the data generically instead,
-        // ignoring the `--fields` selection, which was written against the view.
+        // reshaped it would render blank; show the data generically instead.
+        // Only an explicit `--fields` carries over (it can name the reshaped
+        // fields); a command's default fields were written against the view.
         Some(columns)
             if reshaped
                 && envelope
@@ -394,7 +395,8 @@ pub(crate) fn render_human_with_registry_selected(
                     .as_ref()
                     .is_some_and(|data| !view_applies_to(data, columns)) =>
         {
-            render_human_with_view(envelope, None, "", false)
+            let fields = if fields_explicit { fields } else { "" };
+            render_human_with_view(envelope, None, fields, fields_explicit)
         }
         Some(columns) => {
             let selected = select_columns(columns, fields);
