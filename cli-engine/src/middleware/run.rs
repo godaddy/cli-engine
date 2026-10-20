@@ -497,15 +497,20 @@ impl Middleware {
         // the full payload — the data is not projected, which would
         // otherwise blank out the kept columns. Everywhere else (JSON/TOON,
         // or generic human output) it projects the output data.
+        // `--expr` hands the caller control of the result's shape, so
+        // neither the command's `default_fields` nor its view describe the
+        // result any longer. Fall back to no projection (not `default_fields`,
+        // whose names the expression's result need not contain — which would
+        // silently project to `{}`), and render generically so an explicit
+        // `--fields` is validated and projected against the result, as for
+        // JSON. An explicit `--fields` still applies. `--filter` keeps both.
         let effective_fields = if self.fields_explicit {
             self.fields.as_str()
-        } else {
+        } else if self.expr.is_empty() {
             default_fields
+        } else {
+            ""
         };
-        // `--expr` hands the caller control of the result's shape, so the
-        // view's columns no longer describe it: render generically, and let
-        // the pipeline validate and project `--fields` against the result,
-        // as it does for JSON.
         let view_id = if self.expr.is_empty() { view_id } else { "" };
         let human_view = output_format == OutputFormat::Human && self.human_views.has_view(view_id);
         // `apply_pipeline` never sees `effective_fields` for a registered

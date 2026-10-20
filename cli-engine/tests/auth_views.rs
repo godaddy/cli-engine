@@ -347,3 +347,29 @@ async fn unknown_fields_are_rejected_with_and_without_expr() {
         );
     }
 }
+
+#[tokio::test]
+async fn expr_ignores_default_fields() {
+    // With `default_fields` set (how a consumer hides `provider`), a bare
+    // `--expr` must render its own result, not project the command's default
+    // fields onto it — otherwise the result's fields are dropped to `{}`.
+    let cli = cli_with(
+        config()
+            .with_auth_status_default_fields(NO_PROVIDER)
+            .with_auth_login_default_fields("identity,expires_at,env,refreshable,scopes"),
+    );
+    let status = ["auth", "status", "--provider", "primary", "--env", "prod"];
+    let login = ["auth", "login", "--env", "prod"];
+    for base in [&status[..], &login[..]] {
+        for out in ["human", "json"] {
+            let mut args = base.to_vec();
+            args.extend(["--expr", "{user: identity}", "--output", out]);
+            let rendered = run(&cli, &args).await;
+            assert!(
+                rendered.to_lowercase().contains("user"),
+                "{out}: {rendered}"
+            );
+            assert!(rendered.contains("tester"), "{out}: {rendered}");
+        }
+    }
+}
