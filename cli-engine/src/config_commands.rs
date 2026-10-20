@@ -11,7 +11,7 @@
 //! - `config get <key>` — print a setting's value, default, and description.
 //! - `config set <key> <value>` — validate, set, and persist (mutating; dry-run aware).
 //! - `config unset <key>` — remove a key so its default applies again (mutating; dry-run aware).
-//! - `config list` — print every known setting, plus the raw file contents.
+//! - `config list` — print every known setting with its value and source, followed by any other keys found in the file that the CLI does not declare.
 //!
 //! With only the engine's own keys registered the group is permissive, exactly
 //! as it was before schemas existed: any dotted key is accepted and typed by
