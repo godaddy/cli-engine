@@ -93,12 +93,12 @@ fn walk(
             }
             walk(root, &property, &key, depth + 1, &nullable_parents, out);
         } else {
-            out.push(leaf(key, &property, nullable_parents));
+            out.push(leaf(key, &property, nullable, nullable_parents));
         }
     }
 }
 
-fn leaf(key: String, schema: &Value, nullable_parents: &[String]) -> ConfigKey {
+fn leaf(key: String, schema: &Value, nullable: bool, nullable_parents: &[String]) -> ConfigKey {
     let allowed = allowed_values(schema);
     let kind = match schema.get("type").and_then(Value::as_str) {
         Some("boolean") => ConfigKind::Bool,
@@ -119,6 +119,7 @@ fn leaf(key: String, schema: &Value, nullable_parents: &[String]) -> ConfigKey {
         default: schema.get("default").filter(|d| !d.is_null()).cloned(),
         allowed,
         engine: false,
+        nullable,
         nullable_parents: nullable_parents.to_vec(),
     }
 }
@@ -126,6 +127,10 @@ fn leaf(key: String, schema: &Value, nullable_parents: &[String]) -> ConfigKey {
 /// String choices from `enum`, or from a `oneOf` of `const`s (what schemars
 /// emits for an enum whose variants carry doc comments).
 fn allowed_values(schema: &Value) -> Vec<String> {
+    // A single-variant enum, which `resolve` unwraps from its one-element `oneOf`.
+    if let Some(only) = schema.get("const").and_then(Value::as_str) {
+        return vec![only.to_owned()];
+    }
     if let Some(values) = schema.get("enum").and_then(Value::as_array) {
         return values
             .iter()

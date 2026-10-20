@@ -76,6 +76,9 @@ pub struct ConfigKey {
     /// Validated by [`ConfigFile::set`] itself rather than by this schema.
     #[serde(skip)]
     engine: bool,
+    /// Whether the key itself is an `Option`.
+    #[serde(skip)]
+    nullable: bool,
     /// Dotted paths of the `Option<Struct>` sections this key lives under.
     #[serde(skip)]
     nullable_parents: Vec<String>,
@@ -163,6 +166,7 @@ impl ConfigSchema {
             default: default.map(Value::from),
             allowed: Vec::new(),
             engine: true,
+            nullable: false,
             nullable_parents: Vec::new(),
         };
         Self {
@@ -374,27 +378,29 @@ impl ConfigSchema {
             // Resolve against the typed settings the file actually yields, so
             // this agrees with what a handler reads even when a parent table
             // exists but is empty, or an optional section is absent.
-            None => match lookup(self.effective_settings(file).as_ref(), &key.key) {
-                Lookup::Value(value) => {
-                    declared.default = Some(value.clone());
-                    (value.clone(), SettingSource::Default)
+            None => {
+                let typed = self.effective_settings(file);
+                match lookup(typed.as_ref(), &key.key) {
+                    Lookup::Value(value) => {
+                        declared.default = Some(value.clone());
+                        (value.clone(), SettingSource::Default)
+                    }
+                    // Also covers an absent optional section: it has no default either.
+                    Lookup::Unset => {
+                        declared.default = None;
+                        (Value::Null, SettingSource::Unset)
+                    }
+                    // Serialization left it out; if that is a `None`, nothing is set.
+                    Lookup::Unknown if omitted_none(key, typed.as_ref()) => {
+                        declared.default = None;
+                        (Value::Null, SettingSource::Unset)
+                    }
+                    Lookup::Unknown => match &key.default {
+                        Some(default) => (default.clone(), SettingSource::Default),
+                        None => (Value::Null, SettingSource::Unset),
+                    },
                 }
-                // Also covers an absent optional section: it has no default either.
-                Lookup::Unset => {
-                    declared.default = None;
-                    (Value::Null, SettingSource::Unset)
-                }
-                // Serialization left it out. If that is because an optional
-                // section is absent, the handler reads `None`: nothing is set.
-                Lookup::Unknown if omitted_optional_section(key, file) => {
-                    declared.default = None;
-                    (Value::Null, SettingSource::Unset)
-                }
-                Lookup::Unknown => match &key.default {
-                    Some(default) => (default.clone(), SettingSource::Default),
-                    None => (Value::Null, SettingSource::Unset),
-                },
-            },
+            }
         };
         ConfigEntry {
             key: declared,
@@ -412,10 +418,11 @@ impl ConfigSchema {
         if without.unset(&key.key).is_err() {
             return key.default.clone();
         }
-        match lookup(self.effective_settings(&without).as_ref(), &key.key) {
+        let typed = self.effective_settings(&without);
+        match lookup(typed.as_ref(), &key.key) {
             Lookup::Value(value) => Some(value.clone()),
             Lookup::Unset => None,
-            Lookup::Unknown if omitted_optional_section(key, &without) => None,
+            Lookup::Unknown if omitted_none(key, typed.as_ref()) => None,
             Lookup::Unknown => key.default.clone(),
         }
     }
@@ -476,6 +483,7 @@ fn undeclared_entry(key: String, file: &ConfigFile) -> ConfigEntry {
             default: None,
             allowed: Vec::new(),
             engine: false,
+            nullable: false,
             nullable_parents: Vec::new(),
         },
         value,
@@ -483,15 +491,19 @@ fn undeclared_entry(key: String, file: &ConfigFile) -> ConfigEntry {
     }
 }
 
-/// Whether `key` lives under an `Option<Struct>` section that `file` does not
-/// contain, so the typed settings hold `None` there. Serialization attributes
-/// such as `skip_serializing_if` can leave that `None` out of the serialized
-/// settings entirely, which the lookup alone cannot tell apart from other
-/// omissions.
-fn omitted_optional_section(key: &ConfigKey, file: &ConfigFile) -> bool {
-    key.nullable_parents
-        .iter()
-        .any(|section| file.get_json(section).is_none())
+/// Whether the typed settings omitted `key` because its value is `None`: the
+/// key is an `Option`, or sits under an `Option<Struct>` section the typed
+/// settings do not contain. Serialization attributes such as
+/// `skip_serializing_if = "Option::is_none"` leave a `None` out entirely, which
+/// the lookup alone cannot tell apart from other omissions. With no typed
+/// settings (none registered, or the file is invalid) nothing is known.
+fn omitted_none(key: &ConfigKey, typed: Option<&Value>) -> bool {
+    typed.is_some()
+        && (key.nullable
+            || key
+                .nullable_parents
+                .iter()
+                .any(|section| !matches!(lookup(typed, section), Lookup::Value(_))))
 }
 
 /// The result of looking a dotted key up in serialized typed settings.

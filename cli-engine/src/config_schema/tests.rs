@@ -577,3 +577,108 @@ fn a_configured_key_under_an_optional_section_advertises_what_unset_would_leave(
     assert_eq!(entry_of::<OptionalSection>(true).key.default, kept);
     assert_eq!(entry_of::<SkippedSection>(true).key.default, kept);
 }
+
+/// The only mode.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+enum Mode {
+    /// The sole choice.
+    #[default]
+    #[serde(rename = "only")]
+    Only,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct ModePrefs {
+    mode: Mode,
+}
+
+#[test]
+fn a_single_variant_enum_accepts_its_only_value() {
+    let schema = ConfigSchema::of::<ModePrefs>();
+    let key = schema.find("mode").expect("key");
+    assert_eq!(key.kind, ConfigKind::String);
+    assert_eq!(key.allowed, ["only"]);
+
+    let mut file = ConfigFile::default();
+    schema.set(&mut file, "mode", "only").expect("valid");
+    assert!(schema.set(&mut file, "mode", "other").is_err());
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct OptLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct OptNested {
+    limits: OptLimits,
+}
+
+impl Default for OptNested {
+    fn default() -> Self {
+        Self {
+            limits: OptLimits { max: Some(10) },
+        }
+    }
+}
+
+#[test]
+fn an_omitted_none_leaf_is_unset_not_the_parents_default() {
+    let schema = ConfigSchema::of::<OptNested>();
+
+    // No `[limits]`: `OptNested::default()` supplies Some(10).
+    let absent = schema
+        .entry(&ConfigFile::default(), "limits.max")
+        .expect("entry");
+    assert_eq!(absent.value, Value::from(10));
+
+    // `[limits]` exists without `max`: `OptLimits::default()` gives None.
+    let mut file = ConfigFile::default();
+    file.set("limits.other", "1").expect("hand edit");
+    let present = schema.entry(&file, "limits.max").expect("entry");
+    assert_eq!(
+        (present.value, present.source),
+        (Value::Null, SettingSource::Unset)
+    );
+
+    // Unsetting `max` leaves `[limits]` (other = 1), so the handler reads None.
+    file.set("limits.max", "30").expect("hand edit");
+    let configured = schema.entry(&file, "limits.max").expect("entry");
+    assert_eq!(configured.key.default, None);
+
+    // With nothing else in `[limits]`, unsetting prunes it and Some(10) applies.
+    let mut pruned = ConfigFile::default();
+    pruned.set("limits.max", "30").expect("hand edit");
+    let configured = schema.entry(&pruned, "limits.max").expect("entry");
+    assert_eq!(configured.key.default, Some(Value::from(10)));
+}
+
+#[test]
+fn omission_is_a_none_only_when_the_typed_parent_is_missing() {
+    let child = |nullable| ConfigKey {
+        key: "domain.punycode".to_owned(),
+        kind: ConfigKind::Bool,
+        description: String::new(),
+        default: None,
+        allowed: Vec::new(),
+        engine: false,
+        nullable,
+        nullable_parents: vec!["domain".to_owned()],
+    };
+    let child_omitted = serde_json::json!({ "domain": {} });
+    let section_omitted = serde_json::json!({});
+
+    // The section is in the typed settings (e.g. it defaults to `Some`), and
+    // its child was skipped by a serialization attribute: unknown, not `None`.
+    assert!(!omitted_none(&child(false), Some(&child_omitted)));
+    // The section is missing from the typed settings: it is `None`.
+    assert!(omitted_none(&child(false), Some(&section_omitted)));
+    // An `Option` leaf that serialization omitted is `None`.
+    assert!(omitted_none(&child(true), Some(&child_omitted)));
+    // No typed settings: nothing is known.
+    assert!(!omitted_none(&child(true), None));
+}
