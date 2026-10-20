@@ -76,6 +76,9 @@ pub struct ConfigKey {
     /// Validated by [`ConfigFile::set`] itself rather than by this schema.
     #[serde(skip)]
     engine: bool,
+    /// Dotted paths of the `Option<Struct>` sections this key lives under.
+    #[serde(skip)]
+    nullable_parents: Vec<String>,
 }
 
 /// Where a setting's effective value comes from.
@@ -160,6 +163,7 @@ impl ConfigSchema {
             default: default.map(Value::from),
             allowed: Vec::new(),
             engine: true,
+            nullable_parents: Vec::new(),
         };
         Self {
             keys: vec![
@@ -380,6 +384,12 @@ impl ConfigSchema {
                     declared.default = None;
                     (Value::Null, SettingSource::Unset)
                 }
+                // Serialization left it out. If that is because an optional
+                // section is absent, the handler reads `None`: nothing is set.
+                Lookup::Unknown if omitted_optional_section(key, file) => {
+                    declared.default = None;
+                    (Value::Null, SettingSource::Unset)
+                }
                 Lookup::Unknown => match &key.default {
                     Some(default) => (default.clone(), SettingSource::Default),
                     None => (Value::Null, SettingSource::Unset),
@@ -405,6 +415,7 @@ impl ConfigSchema {
         match lookup(self.effective_settings(&without).as_ref(), &key.key) {
             Lookup::Value(value) => Some(value.clone()),
             Lookup::Unset => None,
+            Lookup::Unknown if omitted_optional_section(key, &without) => None,
             Lookup::Unknown => key.default.clone(),
         }
     }
@@ -465,10 +476,22 @@ fn undeclared_entry(key: String, file: &ConfigFile) -> ConfigEntry {
             default: None,
             allowed: Vec::new(),
             engine: false,
+            nullable_parents: Vec::new(),
         },
         value,
         source: SettingSource::File,
     }
+}
+
+/// Whether `key` lives under an `Option<Struct>` section that `file` does not
+/// contain, so the typed settings hold `None` there. Serialization attributes
+/// such as `skip_serializing_if` can leave that `None` out of the serialized
+/// settings entirely, which the lookup alone cannot tell apart from other
+/// omissions.
+fn omitted_optional_section(key: &ConfigKey, file: &ConfigFile) -> bool {
+    key.nullable_parents
+        .iter()
+        .any(|section| file.get_json(section).is_none())
 }
 
 /// The result of looking a dotted key up in serialized typed settings.

@@ -519,3 +519,61 @@ fn a_configured_keys_default_is_what_applies_once_it_is_unset() {
     let entry = schema.entry(&pruned, "limits.max").expect("entry");
     assert_eq!(entry.key.default, Some(Value::from(10)));
 }
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct SkippedSection {
+    // Serializes to `{}` (not `{"domain": null}`) when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<Domain>,
+}
+
+#[test]
+fn an_omitted_optional_section_reports_unset_even_when_serialization_skips_it() {
+    let schema = ConfigSchema::of::<SkippedSection>();
+
+    let absent = schema
+        .entry(&ConfigFile::default(), "domain.punycode")
+        .expect("entry");
+    assert_eq!(absent.key.default, None);
+    assert_eq!(
+        (absent.value, absent.source),
+        (Value::Null, SettingSource::Unset)
+    );
+
+    // A present section still supplies its child defaults.
+    let mut file = ConfigFile::default();
+    file.set("domain.other", "1").expect("creates [domain]");
+    let present = schema.entry(&file, "domain.punycode").expect("entry");
+    assert_eq!(present.key.default, Some(Value::Bool(false)));
+    assert_eq!(
+        (present.value, present.source),
+        (Value::Bool(false), SettingSource::Default)
+    );
+}
+
+#[test]
+fn a_configured_key_under_an_optional_section_advertises_what_unset_would_leave() {
+    fn entry_of<T>(extra_key_in_section: bool) -> ConfigEntry
+    where
+        T: DeserializeOwned + Serialize + JsonSchema + 'static,
+    {
+        let schema = ConfigSchema::of::<T>();
+        let mut file = ConfigFile::default();
+        schema
+            .set(&mut file, "domain.punycode", "true")
+            .expect("set");
+        if extra_key_in_section {
+            file.set("domain.other", "1").expect("hand edit");
+        }
+        schema.entry(&file, "domain.punycode").expect("known key")
+    }
+
+    // Unsetting the only key prunes `[domain]`, leaving `None`: no default.
+    assert_eq!(entry_of::<OptionalSection>(false).key.default, None);
+    assert_eq!(entry_of::<SkippedSection>(false).key.default, None);
+    // Another key keeps `[domain]` alive, so the child default applies.
+    let kept = Some(Value::Bool(false));
+    assert_eq!(entry_of::<OptionalSection>(true).key.default, kept);
+    assert_eq!(entry_of::<SkippedSection>(true).key.default, kept);
+}

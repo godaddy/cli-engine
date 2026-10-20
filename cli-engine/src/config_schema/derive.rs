@@ -32,7 +32,7 @@ pub(super) fn overlay_defaults<T: DeserializeOwned + Serialize>(keys: &mut [Conf
 /// Flattens an object schema into dotted [`ConfigKey`]s.
 pub(super) fn collect_keys(root: &Value) -> Vec<ConfigKey> {
     let mut out = Vec::new();
-    walk(root, &resolve(root, root), "", 0, &mut out);
+    walk(root, &resolve(root, root), "", 0, &[], &mut out);
     out
 }
 
@@ -64,7 +64,14 @@ fn usable_name(prefix: &str, name: &str) -> bool {
     !dotted && !empty && !reserved
 }
 
-fn walk(root: &Value, node: &Value, prefix: &str, depth: usize, out: &mut Vec<ConfigKey>) {
+fn walk(
+    root: &Value,
+    node: &Value,
+    prefix: &str,
+    depth: usize,
+    nullable_parents: &[String],
+    out: &mut Vec<ConfigKey>,
+) {
     let Some(properties) = node.get("properties").and_then(Value::as_object) else {
         return;
     };
@@ -72,6 +79,7 @@ fn walk(root: &Value, node: &Value, prefix: &str, depth: usize, out: &mut Vec<Co
         if !usable_name(prefix, name) {
             continue;
         }
+        let nullable = is_nullable(property);
         let property = resolve(root, property);
         let key = if prefix.is_empty() {
             name.clone()
@@ -79,14 +87,18 @@ fn walk(root: &Value, node: &Value, prefix: &str, depth: usize, out: &mut Vec<Co
             format!("{prefix}.{name}")
         };
         if property.get("properties").is_some() && depth < MAX_DEPTH {
-            walk(root, &property, &key, depth + 1, out);
+            let mut nullable_parents = nullable_parents.to_vec();
+            if nullable {
+                nullable_parents.push(key.clone());
+            }
+            walk(root, &property, &key, depth + 1, &nullable_parents, out);
         } else {
-            out.push(leaf(key, &property));
+            out.push(leaf(key, &property, nullable_parents));
         }
     }
 }
 
-fn leaf(key: String, schema: &Value) -> ConfigKey {
+fn leaf(key: String, schema: &Value, nullable_parents: &[String]) -> ConfigKey {
     let allowed = allowed_values(schema);
     let kind = match schema.get("type").and_then(Value::as_str) {
         Some("boolean") => ConfigKind::Bool,
@@ -107,6 +119,7 @@ fn leaf(key: String, schema: &Value) -> ConfigKey {
         default: schema.get("default").filter(|d| !d.is_null()).cloned(),
         allowed,
         engine: false,
+        nullable_parents: nullable_parents.to_vec(),
     }
 }
 
@@ -174,6 +187,23 @@ fn take_target(root: &Value, merged: &mut Map<String, Value>) -> Option<Map<Stri
         return only;
     }
     None
+}
+
+/// Whether a property, as declared (before [`resolve`] strips it), accepts
+/// `null`: what schemars emits for an `Option<T>`.
+fn is_nullable(property: &Value) -> bool {
+    let null_type = |v: &Value| v.get("type").and_then(Value::as_str) == Some("null");
+    let in_type_list = property
+        .get("type")
+        .and_then(Value::as_array)
+        .is_some_and(|types| types.iter().any(|t| t.as_str() == Some("null")));
+    let in_alternatives = ["anyOf", "oneOf"].iter().any(|combinator| {
+        property
+            .get(*combinator)
+            .and_then(Value::as_array)
+            .is_some_and(|variants| variants.iter().any(null_type))
+    });
+    in_type_list || in_alternatives
 }
 
 /// Turns `"type": ["boolean", "null"]` into `"type": "boolean"`.
