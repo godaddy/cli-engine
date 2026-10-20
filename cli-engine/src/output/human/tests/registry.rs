@@ -24,14 +24,7 @@ fn custom_human_output_appends_next_steps_footer() {
             .with_param("cart-id", NextActionParam::value("cart-1")),
         ]);
 
-    let out = render_human_with_registry_selected(
-        &envelope,
-        &registry,
-        "shopping-cart",
-        "",
-        false,
-        false,
-    );
+    let out = render_human_with_registry_selected(&envelope, &registry, "shopping-cart", "", false);
 
     assert!(out.starts_with("Cart: ready\n"), "{out}");
     assert!(out.contains("\nNext steps:\n"), "{out}");
@@ -59,33 +52,7 @@ fn human_view_registry_custom_renderer_wins_over_columns() {
     });
     let envelope = Envelope::success(json!({"name": "alpha"}), "things");
 
-    let rendered =
-        render_human_with_registry_selected(&envelope, &registry, "things", "", false, false);
+    let rendered = render_human_with_registry_selected(&envelope, &registry, "things", "", false);
 
     assert_eq!(rendered, "custom:alpha\n");
-}
-
-#[test]
-fn view_naming_none_of_the_data_falls_back_only_when_expr_reshaped_it() {
-    let mut registry = HumanViewRegistry::new();
-    registry.register(HumanViewDef::new(
-        "things",
-        vec![TableColumn::new("name", "Name")],
-    ));
-    // An ordinary response that merely lacks the view's optional field keeps
-    // the view; the same shape after `--expr` is shown generically.
-    let envelope = Envelope::success(json!({"id": "1"}), "things");
-
-    let ordinary =
-        render_human_with_registry_selected(&envelope, &registry, "things", "", false, false);
-    assert!(ordinary.contains("Name"), "{ordinary}");
-    assert!(!ordinary.contains("Id"), "{ordinary}");
-
-    let reshaped =
-        render_human_with_registry_selected(&envelope, &registry, "things", "", false, true);
-    assert!(
-        reshaped.contains("Id") || reshaped.contains("id"),
-        "{reshaped}"
-    );
-    assert!(!reshaped.contains("Name"), "{reshaped}");
 }

@@ -16,7 +16,6 @@ mod tests;
 mod value_format;
 
 use body::render_data_body;
-use columns::view_applies_to;
 use footer::{
     append_cursor_summary, append_next_actions, append_pagination_summary, append_render_notes,
 };
@@ -359,11 +358,6 @@ pub fn preview_human_view(data: impl Serialize, columns: &[TableColumn]) -> Stri
 /// selected columns, since the user named exactly what they want to see; the
 /// row overflows the terminal rather than losing or shortening a column.
 /// `NO_TRUNCATE_MAX_WIDTH` still caps a pathologically long value either way.
-///
-/// `reshaped` is `true` when `--expr` reshaped the data. Only a reshaped
-/// result can fall back to generic rendering when the view names none of its
-/// fields; an ordinary response that merely lacks the view's optional fields
-/// keeps the view.
 #[must_use]
 pub(crate) fn render_human_with_registry_selected(
     envelope: &Envelope,
@@ -371,7 +365,6 @@ pub(crate) fn render_human_with_registry_selected(
     schema_id: &str,
     fields: &str,
     fields_explicit: bool,
-    reshaped: bool,
 ) -> String {
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
@@ -384,20 +377,6 @@ pub(crate) fn render_human_with_registry_selected(
         return output;
     }
     match registry.columns(schema_id) {
-        // A view that names none of the data's fields because `--expr`
-        // reshaped it would render blank; show the data generically instead.
-        // Only an explicit `--fields` carries over (it can name the reshaped
-        // fields); a command's default fields were written against the view.
-        Some(columns)
-            if reshaped
-                && envelope
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| !view_applies_to(data, columns)) =>
-        {
-            let fields = if fields_explicit { fields } else { "" };
-            render_human_with_view(envelope, None, fields, fields_explicit)
-        }
         Some(columns) => {
             let selected = select_columns(columns, fields);
             render_human_with_view(envelope, Some(&selected), fields, fields_explicit)

@@ -26,28 +26,6 @@ pub(crate) fn terminal_width() -> usize {
     }
 }
 
-/// Whether a registered view can show anything of `data`.
-///
-/// `false` only when `data` is an object, or a non-empty array of objects,
-/// and none of the view's columns resolve in any of them — the shape of a
-/// result `--expr` has reshaped into fields the view never names, which the
-/// view would render as an all-blank table. Anything else (no data, scalars,
-/// an empty array, at least one resolving column) keeps the view.
-pub(super) fn view_applies_to(data: &Value, columns: &[TableColumn]) -> bool {
-    let resolves = |object: &serde_json::Map<String, Value>| {
-        columns
-            .iter()
-            .any(|column| resolve_field_path(object, &column.field).is_some())
-    };
-    match data {
-        Value::Object(object) => resolves(object),
-        Value::Array(items) if items.iter().all(Value::is_object) && !items.is_empty() => {
-            items.iter().filter_map(Value::as_object).any(resolves)
-        }
-        _ => true,
-    }
-}
-
 /// Builds the column catalog for data with no registered view: when `fields`
 /// names specific fields (not empty/`all`/`*`), columns are derived from that
 /// list, in the order given (deduplicated) — the same order source a

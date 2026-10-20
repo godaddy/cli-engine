@@ -502,6 +502,11 @@ impl Middleware {
         } else {
             default_fields
         };
+        // `--expr` hands the caller control of the result's shape, so the
+        // view's columns no longer describe it: render generically, and let
+        // the pipeline validate and project `--fields` against the result,
+        // as it does for JSON.
+        let view_id = if self.expr.is_empty() { view_id } else { "" };
         let human_view = output_format == OutputFormat::Human && self.human_views.has_view(view_id);
         // `apply_pipeline` never sees `effective_fields` for a registered
         // view (`projection_fields` below is forced to `""` so the view reads
@@ -512,11 +517,8 @@ impl Middleware {
         // closes elsewhere. So an explicit `--fields` (never a
         // `default_fields` fallback — same reasoning as
         // `PipelineOpts::fields_are_default`) is checked against the view's
-        // column catalog here instead. Not under `--expr`: its result can be
-        // any shape, so the view's columns say nothing about what `--fields`
-        // may name.
+        // column catalog here instead.
         if human_view
-            && self.expr.is_empty()
             && self.fields_explicit
             && let Some(columns) = self.human_views.columns(view_id)
         {
@@ -679,7 +681,6 @@ impl Middleware {
                 view_id,
                 effective_fields,
                 self.fields_explicit,
-                !self.expr.is_empty(),
             )
         } else {
             crate::output::render(output_format, &prepared)?

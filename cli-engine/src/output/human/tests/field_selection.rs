@@ -91,7 +91,6 @@ fn no_view_array_rendering_follows_requested_field_order() {
         "domain:suggest",
         "domain,price1Year,currency",
         true,
-        false,
     );
 
     let header_line = rendered.lines().next().expect("header line");
@@ -121,14 +120,8 @@ fn registered_view_rendering_follows_requested_field_order() {
         "things",
     );
 
-    let rendered = render_human_with_registry_selected(
-        &envelope,
-        &registry,
-        "things",
-        "status,id",
-        true,
-        false,
-    );
+    let rendered =
+        render_human_with_registry_selected(&envelope, &registry, "things", "status,id", true);
 
     let header_line = rendered.lines().next().expect("header line");
     assert!(!header_line.contains("NAME"), "{rendered}");

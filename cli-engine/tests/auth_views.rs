@@ -249,19 +249,17 @@ async fn fields_default_precedes_the_field_table() {
 }
 
 #[tokio::test]
-async fn expr_reshaped_results_fall_back_to_generic_rendering() {
+async fn expr_renders_the_result_generically() {
     let cli = cli_with(config());
-    let login = ["auth", "login", "--env", "prod"];
     let status = ["auth", "status", "--provider", "primary", "--env", "prod"];
-    for (base, expr) in [
-        (&status[..], "{user: identity}"),
-        (&login[..], "{user: identity}"),
-    ] {
+    let login = ["auth", "login", "--env", "prod"];
+    for base in [&status[..], &login[..]] {
         let mut args = base.to_vec();
-        args.extend(["--expr", expr, "--output", "human"]);
+        args.extend(["--expr", "{user: identity}", "--output", "human"]);
         let rendered = run(&cli, &args).await;
         assert!(rendered.to_lowercase().contains("user"), "{rendered}");
         assert!(rendered.contains("tester"), "{rendered}");
+        assert!(!rendered.contains("Provider"), "{rendered}");
     }
 
     let rows = run(
@@ -280,34 +278,35 @@ async fn expr_reshaped_results_fall_back_to_generic_rendering() {
 }
 
 #[tokio::test]
-async fn expr_that_keeps_the_shape_keeps_the_view() {
+async fn filter_keeps_the_view() {
     let cli = cli_with(config());
-    let rendered = run(
+    let filtered = run(
         &cli,
         &[
             "auth",
             "status",
-            "--expr",
-            "[?env=='prod']",
+            "--filter",
+            "env=='prod'",
             "--output",
             "human",
         ],
     )
     .await;
-    let header = header_line(&rendered);
+    let header = header_line(&filtered);
     assert!(position(header, "IDENTITY") < position(header, "EXPIRES"));
 }
 
 #[tokio::test]
-async fn fields_after_expr_name_the_reshaped_result_not_the_view() {
+async fn fields_after_expr_select_from_the_expression_result() {
     let cli = cli_with(config());
     let status = ["auth", "status", "--provider", "primary", "--env", "prod"];
     let login = ["auth", "login", "--env", "prod"];
     for base in [&status[..], &login[..]] {
+        // The expression keeps `identity` (a view column) and adds `user`.
         let mut args = base.to_vec();
         args.extend([
             "--expr",
-            "{user: identity, where: env}",
+            "{identity: identity, user: env}",
             "--fields",
             "user",
             "--output",
@@ -315,23 +314,36 @@ async fn fields_after_expr_name_the_reshaped_result_not_the_view() {
         ]);
         let rendered = run(&cli, &args).await;
         assert!(rendered.to_lowercase().contains("user"), "{rendered}");
-        assert!(rendered.contains("tester"), "{rendered}");
-        assert!(!rendered.to_lowercase().contains("where"), "{rendered}");
+        assert!(rendered.contains("prod"), "{rendered}");
+        assert!(!rendered.contains("tester"), "{rendered}");
     }
 }
 
 #[tokio::test]
-async fn fields_without_expr_still_reject_names_the_view_lacks() {
+async fn unknown_fields_are_rejected_with_and_without_expr() {
     let cli = cli_with(config());
-    let output = cli
-        .run([
-            "my-cli", "auth", "status", "--fields", "nope", "--output", "human",
-        ])
-        .await;
-    assert_ne!(output.exit_code, 0);
-    assert!(
-        output.rendered.contains("unknown field"),
-        "{}",
-        output.rendered
-    );
+    for extra in [
+        vec!["--fields", "nope"],
+        vec!["--expr", "{user: identity}", "--fields", "uesr"],
+        vec!["--expr", "@", "--fields", "nope"],
+    ] {
+        let mut args = vec![
+            "my-cli",
+            "auth",
+            "status",
+            "--provider",
+            "primary",
+            "--env",
+            "prod",
+        ];
+        args.extend(extra.iter().copied());
+        args.extend(["--output", "human"]);
+        let output = cli.run(args).await;
+        assert_ne!(output.exit_code, 0, "{}", output.rendered);
+        assert!(
+            output.rendered.contains("unknown field"),
+            "{}",
+            output.rendered
+        );
+    }
 }
