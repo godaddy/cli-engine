@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.1...cli-engine-v0.10.2) (2026-10-20)
+
+
+### Features
+
+* **transport:** shared reqwest client factory and opt-in client attribution ([#125](https://github.com/godaddy/cli-engine/issues/125)) ([5f338dd](https://github.com/godaddy/cli-engine/commit/5f338dd16cdf1ecbeef46b87e7f3d6cf28d564cb))
+
 ## [0.10.1](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.0...cli-engine-v0.10.1) (2026-10-08)
 
 
