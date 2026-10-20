@@ -205,7 +205,10 @@ impl ConfigFile {
         Ok(file)
     }
 
-    fn check_loaded(&self) -> crate::Result<()> {
+    /// Fails when the file on disk was malformed or unreadable, so a caller
+    /// that reports settings can say so instead of presenting an empty
+    /// document's defaults as if they were the user's configuration.
+    pub(crate) fn check_loaded(&self) -> crate::Result<()> {
         match &self.load_error {
             None => Ok(()),
             Some(reason) => Err(crate::config_schema::validation_error(

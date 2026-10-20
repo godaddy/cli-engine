@@ -96,6 +96,7 @@ fn get_command(schema: &Arc<ConfigSchema>) -> RuntimeCommandSpec {
             async move {
                 let key = args.key;
                 let file = context.config();
+                file.check_loaded()?;
                 if let Some(entry) = schema.entry(file, &key) {
                     return Ok(CommandResult::new(serde_json::to_value(entry)?));
                 }
@@ -185,6 +186,7 @@ fn list_command(schema: &Arc<ConfigSchema>) -> RuntimeCommandSpec {
         move |context| {
             let schema = Arc::clone(&schema);
             async move {
+                context.config().check_loaded()?;
                 let entries = schema.entries(context.config());
                 Ok(CommandResult::new(serde_json::to_value(entries)?))
             }

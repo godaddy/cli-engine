@@ -229,3 +229,33 @@ async fn invalid_engine_values_are_validation_errors_with_a_fix() {
     assert_eq!(out["error"]["code"], json!("VALIDATION_ERROR"), "{out}");
     assert!(out["fix"].as_str().is_some_and(|f| !f.is_empty()), "{out}");
 }
+
+#[tokio::test]
+async fn get_and_list_report_a_malformed_file_instead_of_showing_defaults() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _env = EnvGuard::set(dir.path());
+    write_config(dir.path(), "not = valid = toml");
+
+    for args in [["config", "get", "punycode"], ["config", "list", "--json"]] {
+        let (code, out) = run(&args).await;
+        assert_ne!(
+            code, 0,
+            "{args:?} must not show defaults for a broken file: {out}"
+        );
+        assert!(
+            out["fix"].as_str().is_some_and(|f| !f.is_empty()),
+            "{args:?}: {out}"
+        );
+        assert!(
+            out["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("config.toml")),
+            "{args:?} should name the file: {out}"
+        );
+    }
+
+    // `path` stays usable: it is how a user finds the file to fix.
+    let (code, out) = run(&["config", "path"]).await;
+    assert_eq!(code, 0, "{out}");
+}
