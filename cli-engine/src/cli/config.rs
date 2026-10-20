@@ -124,6 +124,12 @@ pub struct CliConfig {
     /// the built-in group is built, so the built-ins are never lost or
     /// overwritten.
     pub auth_extra_commands: Vec<RuntimeCommandSpec>,
+    /// Default `--fields` for the built-in `auth status`. Populate via
+    /// [`CliConfig::with_auth_status_default_fields`].
+    pub auth_status_default_fields: Option<String>,
+    /// Default `--fields` for the built-in `auth login`. Populate via
+    /// [`CliConfig::with_auth_login_default_fields`].
+    pub auth_login_default_fields: Option<String>,
     /// Global guide entries mounted under `guide`.
     pub guides: Vec<GuideEntry>,
     /// Global human output views.
@@ -494,6 +500,24 @@ impl CliConfig {
         commands: impl IntoIterator<Item = RuntimeCommandSpec>,
     ) -> Self {
         self.auth_extra_commands.extend(commands);
+        self
+    }
+
+    /// Sets the default `--fields` of the built-in `auth status`.
+    ///
+    /// Same semantics as [`CommandSpec::with_default_fields`](crate::CommandSpec::with_default_fields): the fields
+    /// shown (and their order) when `--fields` is absent.
+    #[must_use]
+    pub fn with_auth_status_default_fields(mut self, fields: impl Into<String>) -> Self {
+        self.auth_status_default_fields = Some(fields.into());
+        self
+    }
+
+    /// Sets the default `--fields` of the built-in `auth login`. See
+    /// [`CliConfig::with_auth_status_default_fields`].
+    #[must_use]
+    pub fn with_auth_login_default_fields(mut self, fields: impl Into<String>) -> Self {
+        self.auth_login_default_fields = Some(fields.into());
         self
     }
 
