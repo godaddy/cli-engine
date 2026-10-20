@@ -179,6 +179,15 @@ impl Cli {
             .subcommand(Command::new("tree").about("Display full command tree"))
             .subcommand(completion_command())
             .subcommand(search_command());
+        // The flag is only a default-on behavior for a CLI that opted into TTY
+        // auto-detection, so say so only then.
+        if config.auto_interactive {
+            root = root.mut_arg("interactive", |arg| {
+                arg.help(
+                    "Force interactive prompts for missing inputs (default when a TTY is detected)",
+                )
+            });
+        }
         if let Some(register_flags) = &config.register_flags {
             root = register_flags(root);
         }

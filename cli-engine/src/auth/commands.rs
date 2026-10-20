@@ -1,12 +1,64 @@
 use clap::{Arg, ArgAction};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Dispatcher;
 use crate::{
-    CliCoreError, CommandContext, CommandResult, CommandSpec, Credential, GroupSpec, Result,
-    RuntimeCommandSpec, RuntimeGroupSpec, Tier,
+    CliCoreError, CommandContext, CommandResult, CommandSpec, Credential, GroupSpec, HumanViewDef,
+    Result, RuntimeCommandSpec, RuntimeGroupSpec, TableColumn, Tier,
 };
+
+/// Human view id the built-in `auth status` command renders with.
+///
+/// Register a [`HumanViewDef`] under this id (via
+/// [`CliConfig::with_view`](crate::CliConfig::with_view) or
+/// [`register_global_human_view`](crate::register_global_human_view)) to
+/// replace the engine's [`default_auth_status_view`].
+pub const AUTH_STATUS_VIEW_ID: &str = "auth:status";
+
+/// Human view id the built-in `auth login` command renders with. See
+/// [`AUTH_STATUS_VIEW_ID`].
+pub const AUTH_LOGIN_VIEW_ID: &str = "auth:login";
+
+/// The engine's default human view for `auth status`: identity and expiry
+/// first, then the environment and provider they belong to.
+///
+/// A consumer overriding [`AUTH_STATUS_VIEW_ID`] can start from this and
+/// drop or reorder columns, for example to hide `provider` when only one is
+/// registered.
+#[must_use]
+pub fn default_auth_status_view() -> HumanViewDef {
+    HumanViewDef::new(
+        AUTH_STATUS_VIEW_ID,
+        vec![
+            TableColumn::new("identity", "Identity"),
+            TableColumn::new("expires_at", "Expires"),
+            TableColumn::new("env", "Env"),
+            TableColumn::new("provider", "Provider"),
+            TableColumn::new("expired", "Expired"),
+            TableColumn::new("refreshable", "Refreshable"),
+            TableColumn::new("scopes", "Scopes"),
+        ],
+    )
+}
+
+/// The engine's default human view for `auth login`. See
+/// [`default_auth_status_view`].
+#[must_use]
+pub fn default_auth_login_view() -> HumanViewDef {
+    HumanViewDef::new(
+        AUTH_LOGIN_VIEW_ID,
+        vec![
+            TableColumn::new("identity", "Identity"),
+            TableColumn::new("expires_at", "Expires"),
+            TableColumn::new("env", "Env"),
+            TableColumn::new("provider", "Provider"),
+            TableColumn::new("refreshable", "Refreshable"),
+            TableColumn::new("scopes", "Scopes"),
+        ],
+    )
+}
 
 /// Data rendered after a successful `auth login`.
 ///
@@ -15,7 +67,7 @@ use crate::{
 /// result and should not construct it directly — `#[non_exhaustive]` lets
 /// this framework add fields (as it did for [`refreshable`](Self::refreshable))
 /// without another breaking release.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct AuthLoginResult {
     /// Provider used for login.
@@ -46,7 +98,7 @@ pub struct AuthLoginResult {
 /// result and should not construct it directly — `#[non_exhaustive]` lets
 /// this framework add fields (as it did for [`refreshable`](Self::refreshable))
 /// without another breaking release.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct AuthStatusEntry {
     /// Provider name.
@@ -86,6 +138,8 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
                 .with_tier(Tier::Mutate)
                 .mutates(true)
                 .no_auth(true)
+                .with_view_id(AUTH_LOGIN_VIEW_ID)
+                .with_json_schema::<AuthLoginResult>()
                 .with_arg(provider_arg(&effective_default, registered_names))
                 .with_arg(Arg::new("env").long("env").value_name("ENV"))
                 .with_arg(
@@ -115,6 +169,8 @@ pub fn auth_command_group(default_provider: &str, registered_names: &[String]) -
             CommandSpec::new("status", "Show cached credential status")
                 .with_system("auth")
                 .no_auth(true)
+                .with_view_id(AUTH_STATUS_VIEW_ID)
+                .with_json_schema::<AuthStatusEntry>()
                 .with_arg(provider_arg(&effective_default, registered_names))
                 .with_arg(Arg::new("env").long("env").value_name("ENV")),
             async |context| {

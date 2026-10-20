@@ -25,7 +25,8 @@ pub mod storage;
 use async_trait::async_trait;
 
 pub use commands::{
-    AuthLoginResult, AuthStatusEntry, auth_command_group, login_and_build,
+    AUTH_LOGIN_VIEW_ID, AUTH_STATUS_VIEW_ID, AuthLoginResult, AuthStatusEntry, auth_command_group,
+    default_auth_login_view, default_auth_status_view, login_and_build,
     login_and_build_with_scopes, logout_result, status_result, to_status_entry,
 };
 pub use credential::{CACHE_TTL, Credential};
