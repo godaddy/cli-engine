@@ -359,6 +359,11 @@ pub fn preview_human_view(data: impl Serialize, columns: &[TableColumn]) -> Stri
 /// selected columns, since the user named exactly what they want to see; the
 /// row overflows the terminal rather than losing or shortening a column.
 /// `NO_TRUNCATE_MAX_WIDTH` still caps a pathologically long value either way.
+///
+/// `reshaped` is `true` when `--expr` reshaped the data. Only a reshaped
+/// result can fall back to generic rendering when the view names none of its
+/// fields; an ordinary response that merely lacks the view's optional fields
+/// keeps the view.
 #[must_use]
 pub(crate) fn render_human_with_registry_selected(
     envelope: &Envelope,
@@ -366,6 +371,7 @@ pub(crate) fn render_human_with_registry_selected(
     schema_id: &str,
     fields: &str,
     fields_explicit: bool,
+    reshaped: bool,
 ) -> String {
     if let Some(error) = &envelope.error {
         return format!("Error: {}\n", error.message);
@@ -378,14 +384,15 @@ pub(crate) fn render_human_with_registry_selected(
         return output;
     }
     match registry.columns(schema_id) {
-        // A view that names none of the data's fields (`--expr` reshaped it)
-        // would render blank; show the data generically instead, ignoring the
-        // `--fields` selection, which was written against the view.
+        // A view that names none of the data's fields because `--expr`
+        // reshaped it would render blank; show the data generically instead,
+        // ignoring the `--fields` selection, which was written against the view.
         Some(columns)
-            if envelope
-                .data
-                .as_ref()
-                .is_some_and(|data| !view_applies_to(data, columns)) =>
+            if reshaped
+                && envelope
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| !view_applies_to(data, columns)) =>
         {
             render_human_with_view(envelope, None, "", false)
         }

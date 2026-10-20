@@ -676,6 +676,7 @@ impl Middleware {
                 view_id,
                 effective_fields,
                 self.fields_explicit,
+                !self.expr.is_empty(),
             )
         } else {
             crate::output::render(output_format, &prepared)?
