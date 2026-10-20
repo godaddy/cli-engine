@@ -16,6 +16,7 @@ mod tests;
 mod value_format;
 
 use body::render_data_body;
+use columns::view_applies_to;
 use footer::{
     append_cursor_summary, append_next_actions, append_pagination_summary, append_render_notes,
 };
@@ -377,6 +378,17 @@ pub(crate) fn render_human_with_registry_selected(
         return output;
     }
     match registry.columns(schema_id) {
+        // A view that names none of the data's fields (`--expr` reshaped it)
+        // would render blank; show the data generically instead, ignoring the
+        // `--fields` selection, which was written against the view.
+        Some(columns)
+            if envelope
+                .data
+                .as_ref()
+                .is_some_and(|data| !view_applies_to(data, columns)) =>
+        {
+            render_human_with_view(envelope, None, "", false)
+        }
         Some(columns) => {
             let selected = select_columns(columns, fields);
             render_human_with_view(envelope, Some(&selected), fields, fields_explicit)

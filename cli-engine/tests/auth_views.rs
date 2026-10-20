@@ -247,3 +247,53 @@ async fn fields_default_precedes_the_field_table() {
     let table_at = help.find("Output fields:").expect("table is shown");
     assert!(default_at < table_at, "{help}");
 }
+
+#[tokio::test]
+async fn expr_reshaped_results_fall_back_to_generic_rendering() {
+    let cli = cli_with(config());
+    let login = ["auth", "login", "--env", "prod"];
+    let status = ["auth", "status", "--provider", "primary", "--env", "prod"];
+    for (base, expr) in [
+        (&status[..], "{user: identity}"),
+        (&login[..], "{user: identity}"),
+    ] {
+        let mut args = base.to_vec();
+        args.extend(["--expr", expr, "--output", "human"]);
+        let rendered = run(&cli, &args).await;
+        assert!(rendered.to_lowercase().contains("user"), "{rendered}");
+        assert!(rendered.contains("tester"), "{rendered}");
+    }
+
+    let rows = run(
+        &cli,
+        &[
+            "auth",
+            "status",
+            "--expr",
+            "[].{user: identity}",
+            "--output",
+            "human",
+        ],
+    )
+    .await;
+    assert!(rows.contains("USER") && rows.contains("tester"), "{rows}");
+}
+
+#[tokio::test]
+async fn expr_that_keeps_the_shape_keeps_the_view() {
+    let cli = cli_with(config());
+    let rendered = run(
+        &cli,
+        &[
+            "auth",
+            "status",
+            "--expr",
+            "[?env=='prod']",
+            "--output",
+            "human",
+        ],
+    )
+    .await;
+    let header = header_line(&rendered);
+    assert!(position(header, "IDENTITY") < position(header, "EXPIRES"));
+}
