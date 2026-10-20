@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.2...cli-engine-v0.10.3) (2026-10-20)
+
+
+### Features
+
+* **config:** typed, validated settings with config unset and discoverable keys ([#127](https://github.com/godaddy/cli-engine/issues/127)) ([280286e](https://github.com/godaddy/cli-engine/commit/280286e6cd10ba20c411cf66f1a614a7400b618b))
+
 ## [0.10.2](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.1...cli-engine-v0.10.2) (2026-10-20)
 
 
