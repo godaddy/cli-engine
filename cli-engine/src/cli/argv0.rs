@@ -89,8 +89,15 @@ pub(super) enum Argv0Outcome {
 /// with a fully rendered result when a personality ran or an explicit `argv0`
 /// invocation was rejected. When no routes are registered this is inert and
 /// returns the arguments unchanged. `depth` counts chained hand-offs and
-/// bounds recursion via [`MAX_ARGV0_DEPTH`].
-pub(super) async fn resolve_argv0(cli: &Cli, text_args: Vec<String>, depth: usize) -> Argv0Outcome {
+/// bounds recursion via [`MAX_ARGV0_DEPTH`]. `publish_identity` is forwarded to a
+/// personality's own run so the CLI that actually executes publishes its
+/// outbound identity, not the dispatcher's.
+pub(super) async fn resolve_argv0(
+    cli: &Cli,
+    text_args: Vec<String>,
+    depth: usize,
+    publish_identity: bool,
+) -> Argv0Outcome {
     if cli.config.argv0_routes.is_empty() {
         return Argv0Outcome::Proceed(text_args);
     }
@@ -162,7 +169,13 @@ pub(super) async fn resolve_argv0(cli: &Cli, text_args: Vec<String>, depth: usiz
             alt_args.push(bin);
             alt_args.extend(rest);
             Argv0Outcome::Handled(
-                Box::pin(super::run::run_with_depth(&alt, alt_args, depth + 1)).await,
+                Box::pin(super::run::run_with_depth(
+                    &alt,
+                    alt_args,
+                    depth + 1,
+                    publish_identity,
+                ))
+                .await,
             )
         }
         None if explicit => Argv0Outcome::Handled(render_argv0_error(

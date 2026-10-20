@@ -783,6 +783,12 @@ The transport module provides a `reqwest`-based HTTP client with:
 Auth injectors include bearer token, provider bearer, cookie, basic auth, API key, client
 credentials, and no-op injectors.
 
+Code that needs a plain `reqwest::Client` (progenitor-generated clients, hand-rolled streaming or multipart uploads) builds it from `transport::reqwest_client_builder()` instead of `reqwest::Client::builder()`. The builder comes preconfigured with the process-wide user-agent and default headers and a `TimeoutPolicy`, so identity is defined once in the engine while timeouts stay a per-situation choice. Callers layer their own settings on top.
+
+Timeouts are a `TimeoutPolicy` value: a connect timeout and a read timeout, each `Option<Duration>` (`None` disables it). The default is a 5s connect timeout and a 30s read timeout. The read timeout resets after every successful read, but for the response headers it runs from the start of the request and upload progress does not reset it, so a request whose server responds only after a long upload needs a policy with no read timeout (`TimeoutPolicy::uploads()` is the default connect timeout with none). Because `reqwest` cannot unset a timeout once set, pick the policy when you create the builder: each call to `reqwest_client_builder_with(policy)` returns an independent builder, so a CLI with several situations (an API client, a long upload) calls it once per situation and they all share the identity. `HttpClient` takes the same type through `HttpClientBuilder::timeouts(policy)`; a client has exactly one policy, so build one client per situation.
+
+A CLI can opt into client attribution (user-agent tokens for the kind of caller, and a hashed harness session id) with `CliConfig::with_client_attribution`. See [attribution.md](attribution.md) for exactly what is sent, how to opt out, and the limits of detection.
+
 ### HTTP debug logging
 
 The global `--debug` flag drives transport diagnostics through the `transport` component. Bare `--debug` enables every component; to select one, use the `=` form so the value is not mistaken for the command: `--debug=transport`, or `--debug='*,-transport'` to keep everything else but silence HTTP. (As an optional-value global flag, `--debug` only attaches a space-separated value when it appears after the leaf command; before the command, write `--debug=transport`.) `flags::debug_component_enabled` parses the comma-separated pattern.
