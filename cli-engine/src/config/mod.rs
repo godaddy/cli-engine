@@ -34,94 +34,21 @@
 //! where `${PREFIX}` is the app id sanitized by
 //! [`crate::flags::app_id_env_prefix`].
 
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
 use toml_edit::DocumentMut;
 
 use crate::error::CliCoreError;
 
-/// Where an auth provider stores credentials.
-///
-/// The variant selects a concrete storage backend
-/// (see [`crate::auth::storage`]). `Auto` is the default and tries the system
-/// keychain first, falling back to an unencrypted file when the keychain is
-/// unavailable (headless Linux, WSL).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum CredentialStore {
-    /// Try the system keychain; transparently fall back to an unencrypted file
-    /// when the keychain backend is unavailable. This is the default.
-    #[default]
-    Auto,
-    /// System keychain only. A keychain failure is a hard error and no file is
-    /// ever written.
-    Keyring,
-    /// File only: never contact the system keychain. Credentials are written as
-    /// unencrypted JSON under the config base directory.
-    File,
-}
+mod credential_store;
 
-impl CredentialStore {
-    /// Returns the lowercase canonical name (`auto`, `keyring`, or `file`).
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CredentialStore::Auto => "auto",
-            CredentialStore::Keyring => "keyring",
-            CredentialStore::File => "file",
-        }
-    }
-}
-
-impl std::fmt::Display for CredentialStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Error returned when a string does not name a [`CredentialStore`] variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseCredentialStoreError(String);
-
-impl std::fmt::Display for ParseCredentialStoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "invalid credential store {:?} (expected one of: auto, keyring, file)",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for ParseCredentialStoreError {}
-
-impl FromStr for CredentialStore {
-    type Err = ParseCredentialStoreError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(CredentialStore::Auto),
-            // `keychain` is accepted as an alias for the keychain-only mode.
-            "keyring" | "keychain" => Ok(CredentialStore::Keyring),
-            "file" => Ok(CredentialStore::File),
-            _ => Err(ParseCredentialStoreError(s.to_owned())),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for CredentialStore {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        raw.parse().map_err(serde::de::Error::custom)
-    }
-}
+pub use credential_store::{
+    CredentialStore, ParseCredentialStoreError, credential_store_env_var, resolve_credential_store,
+    resolve_credential_store_with,
+};
+pub(crate) use credential_store::{clear_credential_store_flag, set_credential_store_flag};
 
 /// Top-level engine configuration parsed from `config.toml`.
 ///
@@ -159,73 +86,6 @@ pub struct OutputConfig {
     pub format: Option<String>,
 }
 
-// Per-thread override from the `--credential-store` global flag.
-//
-// Stored in a `thread_local!` `Cell` so concurrent `Cli::run` calls on
-// different OS threads cannot interfere with each other. Each thread writes
-// its own flag at the start of `Cli::run` (via `set_credential_store_flag`)
-// and clears it at the end (via `clear_credential_store_flag`).
-//
-// Limitation: concurrent `Cli::run` calls sharing the same OS thread (e.g.
-// concurrent tokio tasks on a single-threaded runtime) are not supported —
-// the second call will observe the first run's flag. This scenario is atypical
-// for a CLI library.
-thread_local! {
-    static CREDENTIAL_STORE_FLAG: Cell<u8> = const { Cell::new(0) };
-}
-
-fn encode_store(store: Option<CredentialStore>) -> u8 {
-    match store {
-        None => 0,
-        Some(CredentialStore::Auto) => 1,
-        Some(CredentialStore::Keyring) => 2,
-        Some(CredentialStore::File) => 3,
-    }
-}
-
-fn decode_store(byte: u8) -> Option<CredentialStore> {
-    match byte {
-        1 => Some(CredentialStore::Auto),
-        2 => Some(CredentialStore::Keyring),
-        3 => Some(CredentialStore::File),
-        _ => None,
-    }
-}
-
-/// Records the value of the `--credential-store` flag for the current thread.
-///
-/// Called at the start of each CLI run with the parsed flag value (`None` when
-/// the flag was not supplied). Crate-internal: only the engine publishes
-/// per-run flag state, so library consumers cannot mutate this latch.
-pub(crate) fn set_credential_store_flag(store: Option<CredentialStore>) {
-    CREDENTIAL_STORE_FLAG.with(|f| f.set(encode_store(store)));
-}
-
-/// Clears the thread-local flag set by [`set_credential_store_flag`].
-///
-/// Called at the end of each `Cli::run` so the flag does not leak into
-/// subsequent sequential runs on the same thread.
-pub(crate) fn clear_credential_store_flag() {
-    CREDENTIAL_STORE_FLAG.with(|f| f.set(0));
-}
-
-/// Returns the flag override recorded by [`set_credential_store_flag`], if any.
-/// Crate-internal accessor for the per-thread flag latch.
-#[must_use]
-pub(crate) fn credential_store_flag() -> Option<CredentialStore> {
-    CREDENTIAL_STORE_FLAG.with(|f| decode_store(f.get()))
-}
-
-/// Derives the credential-store override env var from an app id, e.g.
-/// `godaddy` -> `GODADDY_CREDENTIAL_STORE`.
-#[must_use]
-pub fn credential_store_env_var(app_id: &str) -> String {
-    format!(
-        "{}_CREDENTIAL_STORE",
-        crate::flags::app_id_env_prefix(app_id)
-    )
-}
-
 /// Returns the path to the engine config file for `app_id`, if a base config
 /// directory can be resolved and `app_id` is a safe single path component.
 #[must_use]
@@ -246,6 +106,10 @@ pub fn config_file_path(app_id: &str) -> Option<PathBuf> {
 pub fn load(app_id: &str) -> EngineConfig {
     ConfigFile::load(app_id).engine()
 }
+
+/// Top-level tables owned by the engine. `ConfigFile::set` validates their keys,
+/// and a consumer's settings struct may not use these names.
+pub(crate) const ENGINE_RESERVED_TABLES: &[&str] = &["credentials", "output"];
 
 /// A loaded per-application config file.
 ///
@@ -269,6 +133,9 @@ pub fn load(app_id: &str) -> EngineConfig {
 pub struct ConfigFile {
     path: Option<PathBuf>,
     doc: DocumentMut,
+    /// Why the file on disk could not be used (malformed TOML or an I/O error
+    /// other than not-found). `doc` is empty in that case.
+    load_error: Option<String>,
 }
 
 impl Default for ConfigFile {
@@ -279,7 +146,11 @@ impl Default for ConfigFile {
 
 impl ConfigFile {
     fn from_doc(path: Option<PathBuf>, doc: DocumentMut) -> Self {
-        Self { path, doc }
+        Self {
+            path,
+            doc,
+            load_error: None,
+        }
     }
 
     /// Loads the config file for `app_id`.
@@ -296,21 +167,55 @@ impl ConfigFile {
     #[must_use]
     pub fn load(app_id: &str) -> Self {
         let path = config_file_path(app_id);
+        let mut load_error = None;
         let doc = match &path {
             None => DocumentMut::new(),
             Some(p) => match std::fs::read_to_string(p) {
                 Ok(contents) => contents.parse::<DocumentMut>().unwrap_or_else(|e| {
                     tracing::warn!(path = %p.display(), error = %e, "ignoring malformed config file");
+                    load_error = Some(format!("{} is not valid TOML: {e}", p.display()));
                     DocumentMut::new()
                 }),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
                 Err(e) => {
                     tracing::warn!(path = %p.display(), error = %e, "could not read config file");
+                    load_error = Some(format!("could not read {}: {e}", p.display()));
                     DocumentMut::new()
                 }
             },
         };
-        Self::from_doc(path, doc)
+        Self {
+            load_error,
+            ..Self::from_doc(path, doc)
+        }
+    }
+
+    /// Like [`load`](ConfigFile::load), but fails when the file exists and cannot
+    /// be read or parsed.
+    ///
+    /// Use this before a read-modify-write: [`load`](ConfigFile::load) degrades
+    /// a broken file to an empty document, and saving that would silently
+    /// overwrite whatever the user had.
+    ///
+    /// # Errors
+    /// Returns an error (with a `fix`) when the file is unreadable or malformed.
+    pub fn try_load(app_id: &str) -> crate::Result<Self> {
+        let file = Self::load(app_id);
+        file.check_loaded()?;
+        Ok(file)
+    }
+
+    /// Fails when the file on disk was malformed or unreadable, so a caller
+    /// that reports settings can say so instead of presenting an empty
+    /// document's defaults as if they were the user's configuration.
+    pub(crate) fn check_loaded(&self) -> crate::Result<()> {
+        match &self.load_error {
+            None => Ok(()),
+            Some(reason) => Err(crate::config_schema::validation_error(
+                format!("invalid config file: {reason}"),
+                "Fix or delete the config file, then retry.",
+            )),
+        }
     }
 
     /// Returns the resolved config file path, if a config directory was
@@ -337,9 +242,11 @@ impl ConfigFile {
     /// `cfg.section::<DeployConfig>("deploy")?`.
     ///
     /// # Errors
-    /// Returns an error when the table is present but does not deserialize into
-    /// `T`.
+    /// Returns an error when the config file on disk was malformed or
+    /// unreadable (so a typo is never silently read as "unset"), or when the
+    /// table is present but does not deserialize into `T`.
     pub fn section<T: DeserializeOwned>(&self, name: &str) -> crate::Result<Option<T>> {
+        self.check_loaded()?;
         let item = match self.doc.get(name) {
             None => return Ok(None),
             Some(item) => item,
@@ -363,8 +270,10 @@ impl ConfigFile {
     /// unknown keys are tolerated when `T` allows them.
     ///
     /// # Errors
-    /// Returns an error when the document does not deserialize into `T`.
+    /// Returns an error when the config file on disk was malformed or
+    /// unreadable, or when the document does not deserialize into `T`.
     pub fn deserialize<T: DeserializeOwned>(&self) -> crate::Result<T> {
+        self.check_loaded()?;
         toml_edit::de::from_document::<T>(self.doc.clone())
             .map_err(|e| CliCoreError::message(format!("config deserialize error: {e}")))
     }
@@ -414,7 +323,6 @@ impl ConfigFile {
         // Only the documented key in each table is accepted; any other key
         // in those tables is rejected to prevent silently writing unknown
         // engine config that would be ignored (and confuse the user).
-        const ENGINE_RESERVED_TABLES: &[&str] = &["credentials", "output"];
         let first_segment = dotted_key.split('.').next().unwrap_or("");
         if ENGINE_RESERVED_TABLES.contains(&first_segment) {
             match dotted_key {
@@ -438,6 +346,17 @@ impl ConfigFile {
                 }
             }
         }
+        self.set_value(dotted_key, infer_toml_value(value))
+    }
+
+    /// Writes an already-typed `value` at a dotted key, creating intermediate
+    /// tables. Unlike [`set`](ConfigFile::set) this performs no validation or
+    /// type inference; callers own both.
+    pub(crate) fn set_value(
+        &mut self,
+        dotted_key: &str,
+        value: toml_edit::Value,
+    ) -> crate::Result<()> {
         let segments: Vec<&str> = dotted_key.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
             return Err(CliCoreError::message(format!(
@@ -456,8 +375,66 @@ impl ConfigFile {
                 CliCoreError::message(format!("config key {segment:?} is not a table"))
             })?;
         }
-        table[last] = toml_edit::Item::Value(infer_toml_value(value));
+        table[last] = toml_edit::Item::Value(value);
         Ok(())
+    }
+
+    /// Returns the dotted path of every scalar or array value in the file, in
+    /// document order. Tables are descended into, not listed themselves.
+    ///
+    /// A key that itself contains a `.` (written `"a.b" = 1`) is omitted: a
+    /// dotted path cannot tell it apart from the nested key `a` → `b`, so it
+    /// could not be read back with [`get`](ConfigFile::get) or removed with
+    /// [`unset`](ConfigFile::unset).
+    #[must_use]
+    pub fn leaf_keys(&self) -> Vec<String> {
+        fn walk(table: &dyn toml_edit::TableLike, prefix: &str, out: &mut Vec<String>) {
+            for (key, item) in table.iter().filter(|(key, _)| !key.contains('.')) {
+                let path = if prefix.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                match item.as_table_like() {
+                    Some(child) => walk(child, &path, out),
+                    None => out.push(path),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.doc.as_table(), "", &mut out);
+        out
+    }
+
+    /// Removes the value at a dotted key, returning whether anything was
+    /// removed. Tables left empty by the removal are removed too, so unsetting
+    /// the last key in a section does not leave a bare `[section]` behind.
+    /// Comments and formatting elsewhere are preserved; call
+    /// [`save`](ConfigFile::save) to persist.
+    ///
+    /// # Errors
+    /// Returns an error for an empty/invalid key.
+    pub fn unset(&mut self, dotted_key: &str) -> crate::Result<bool> {
+        let segments: Vec<&str> = dotted_key.split('.').collect();
+        if segments.iter().any(|s| s.is_empty()) {
+            return Err(CliCoreError::message(format!(
+                "invalid config key {dotted_key:?}"
+            )));
+        }
+        Ok(remove_path(self.doc.as_table_mut(), &segments))
+    }
+
+    /// Returns the value at a dotted key as typed JSON (booleans and numbers
+    /// stay booleans and numbers), or `None` when absent.
+    ///
+    /// Unlike [`get`](ConfigFile::get), which flattens everything to a string.
+    #[must_use]
+    pub fn get_json(&self, dotted_key: &str) -> Option<serde_json::Value> {
+        let mut item = self.doc.as_item();
+        for segment in dotted_key.split('.') {
+            item = item.as_table_like()?.get(segment)?;
+        }
+        Some(item_to_json(item))
     }
 
     /// Renders the whole config document back to a TOML string (preserving
@@ -468,6 +445,10 @@ impl ConfigFile {
     }
 
     /// Persists the document to its config path via an atomic write.
+    ///
+    /// For a read-modify-write, start from [`try_load`](ConfigFile::try_load):
+    /// a document from [`load`](ConfigFile::load) is empty when the file on
+    /// disk was malformed, and saving it replaces the user's file.
     ///
     /// # Errors
     /// Returns an error when no config path is available (no resolvable config
@@ -483,6 +464,67 @@ impl ConfigFile {
     }
 }
 
+fn remove_path(table: &mut dyn toml_edit::TableLike, segments: &[&str]) -> bool {
+    let Some((first, rest)) = segments.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return table.remove(first).is_some();
+    }
+    let Some(child) = table
+        .get_mut(first)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return false;
+    };
+    let removed = remove_path(child, rest);
+    if removed && child.is_empty() {
+        table.remove(first);
+    }
+    removed
+}
+
+fn item_to_json(item: &toml_edit::Item) -> serde_json::Value {
+    use serde_json::Value;
+    match item {
+        toml_edit::Item::None => Value::Null,
+        toml_edit::Item::Value(v) => value_to_json(v),
+        toml_edit::Item::Table(t) => Value::Object(
+            t.iter()
+                .map(|(k, v)| (k.to_owned(), item_to_json(v)))
+                .collect(),
+        ),
+        toml_edit::Item::ArrayOfTables(a) => Value::Array(
+            a.iter()
+                .map(|t| {
+                    Value::Object(
+                        t.iter()
+                            .map(|(k, v)| (k.to_owned(), item_to_json(v)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn value_to_json(value: &toml_edit::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        toml_edit::Value::String(s) => Value::String(s.value().clone()),
+        toml_edit::Value::Integer(i) => Value::from(*i.value()),
+        toml_edit::Value::Float(f) => Value::from(*f.value()),
+        toml_edit::Value::Boolean(b) => Value::Bool(*b.value()),
+        toml_edit::Value::Datetime(d) => Value::String(d.value().to_string()),
+        toml_edit::Value::Array(a) => Value::Array(a.iter().map(value_to_json).collect()),
+        toml_edit::Value::InlineTable(t) => Value::Object(
+            t.iter()
+                .map(|(k, v)| (k.to_owned(), value_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Parses `value` as a TOML bool/integer/float when possible, else a string.
 fn infer_toml_value(value: &str) -> toml_edit::Value {
     if let Ok(b) = value.parse::<bool>() {
@@ -495,49 +537,6 @@ fn infer_toml_value(value: &str) -> toml_edit::Value {
         return f.into();
     }
     value.into()
-}
-
-/// Resolves the effective [`CredentialStore`] from explicit inputs.
-///
-/// Pure and side-effect free so the precedence is unit-testable without touching
-/// process state. Precedence (highest first): CLI `flag`, then `env` (an invalid
-/// value is logged and ignored, falling through), then the config `file`, then
-/// the default [`CredentialStore::Keyring`].
-#[must_use]
-pub fn resolve_credential_store_with(
-    flag: Option<CredentialStore>,
-    env: Option<&str>,
-    file: &EngineConfig,
-) -> CredentialStore {
-    if let Some(store) = flag {
-        return store;
-    }
-    if let Some(raw) = env {
-        match raw.parse::<CredentialStore>() {
-            Ok(store) => return store,
-            Err(e) => tracing::warn!(error = %e, "ignoring invalid credential-store env var"),
-        }
-    }
-    if let Some(store) = file.credentials.store {
-        return store;
-    }
-    CredentialStore::default()
-}
-
-/// Resolves the effective [`CredentialStore`] for `app_id` against process state.
-///
-/// Reads the CLI-flag override (`credential_store_flag`), the
-/// `${PREFIX}_CREDENTIAL_STORE` env var via the injected `var` getter, and the
-/// config file ([`load`]), then applies [`resolve_credential_store_with`]. The
-/// `var` getter is injected so callers/tests can supply environment lookups
-/// without mutating the process environment.
-pub fn resolve_credential_store(
-    app_id: &str,
-    var: impl Fn(&str) -> Option<String>,
-) -> CredentialStore {
-    let env = var(&credential_store_env_var(app_id));
-    let file = load(app_id);
-    resolve_credential_store_with(credential_store_flag(), env.as_deref(), &file)
 }
 
 /// Test-only helpers for serializing and mutating `XDG_CONFIG_HOME`.
@@ -612,55 +611,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_known_variants_case_insensitively() {
-        assert_eq!("auto".parse(), Ok(CredentialStore::Auto));
-        assert_eq!("Keyring".parse(), Ok(CredentialStore::Keyring));
-        assert_eq!("KEYCHAIN".parse(), Ok(CredentialStore::Keyring));
-        assert_eq!("  file  ".parse(), Ok(CredentialStore::File));
-    }
-
-    #[test]
-    fn rejects_unknown_variant() {
-        let err = "vault"
-            .parse::<CredentialStore>()
-            .expect_err("should reject");
-        assert!(err.to_string().contains("vault"));
-    }
-
-    #[test]
-    fn display_round_trips_through_from_str() {
-        for store in [
-            CredentialStore::Auto,
-            CredentialStore::Keyring,
-            CredentialStore::File,
-        ] {
-            assert_eq!(store.to_string().parse(), Ok(store));
-        }
-    }
-
-    #[test]
-    fn env_var_name_is_derived_from_app_id() {
-        assert_eq!(
-            credential_store_env_var("godaddy"),
-            "GODADDY_CREDENTIAL_STORE"
-        );
-        assert_eq!(
-            credential_store_env_var("my-cli"),
-            "MY_CLI_CREDENTIAL_STORE"
-        );
-    }
-
-    #[test]
     fn deserializes_store_from_toml() {
         let config: EngineConfig =
             toml_edit::de::from_str("[credentials]\nstore = \"file\"\n").expect("valid toml");
         assert_eq!(config.credentials.store, Some(CredentialStore::File));
-    }
-
-    #[test]
-    fn deserialize_rejects_bad_store_value() {
-        let result = toml_edit::de::from_str::<EngineConfig>("[credentials]\nstore = \"nope\"\n");
-        assert!(result.is_err(), "bad store value should fail to parse");
     }
 
     #[test]
@@ -672,74 +626,9 @@ mod tests {
     }
 
     #[test]
-    fn resolution_precedence_flag_beats_env_beats_file() {
-        let file = EngineConfig {
-            credentials: CredentialsConfig {
-                store: Some(CredentialStore::Keyring),
-            },
-            ..Default::default()
-        };
-        // flag wins over everything
-        assert_eq!(
-            resolve_credential_store_with(Some(CredentialStore::Auto), Some("file"), &file),
-            CredentialStore::Auto
-        );
-        // env wins over file
-        assert_eq!(
-            resolve_credential_store_with(None, Some("file"), &file),
-            CredentialStore::File
-        );
-        // file wins over default
-        assert_eq!(
-            resolve_credential_store_with(None, None, &file),
-            CredentialStore::Keyring
-        );
-    }
-
-    #[test]
-    fn resolution_defaults_to_auto() {
-        assert_eq!(
-            resolve_credential_store_with(None, None, &EngineConfig::default()),
-            CredentialStore::Auto
-        );
-    }
-
-    #[test]
-    fn resolution_ignores_invalid_env_and_falls_through() {
-        let file = EngineConfig {
-            credentials: CredentialsConfig {
-                store: Some(CredentialStore::File),
-            },
-            ..Default::default()
-        };
-        // invalid env is ignored, so the file value applies
-        assert_eq!(
-            resolve_credential_store_with(None, Some("garbage"), &file),
-            CredentialStore::File
-        );
-        // invalid env with no file falls through to the default
-        assert_eq!(
-            resolve_credential_store_with(None, Some("garbage"), &EngineConfig::default()),
-            CredentialStore::Auto
-        );
-    }
-
-    #[test]
     fn config_file_path_rejects_unsafe_app_id() {
         assert_eq!(config_file_path("../evil"), None);
         assert_eq!(config_file_path("a/b"), None);
-    }
-
-    #[test]
-    fn credential_store_flag_encodes_round_trips() {
-        for store in [
-            None,
-            Some(CredentialStore::Auto),
-            Some(CredentialStore::Keyring),
-            Some(CredentialStore::File),
-        ] {
-            assert_eq!(decode_store(encode_store(store)), store);
-        }
     }
 
     #[test]
@@ -898,5 +787,16 @@ mod tests {
         let cfg = ConfigFile::default();
         assert!(cfg.path().is_none());
         assert!(cfg.save().is_err(), "save without a path should error");
+    }
+
+    #[test]
+    fn leaf_keys_omit_keys_containing_a_dot() {
+        let cfg = doc_config("\"a.b\" = 7\nplain = 1\n[a]\nb = 9\n");
+        assert_eq!(
+            cfg.leaf_keys(),
+            ["plain", "a.b"],
+            "only the nested a.b, once"
+        );
+        assert_eq!(cfg.get_json("a.b"), Some(serde_json::Value::from(9)));
     }
 }

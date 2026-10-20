@@ -399,12 +399,35 @@ The file is loaded once at startup and cloned into each run's middleware, so rea
 
 ```text
 mycli config path                          # print the file path
-mycli config get deploy.region             # read a dotted key
-mycli config set deploy.region us-east     # set + save (mutating; --dry-run aware)
-mycli config list                          # print the whole file
+mycli config get deploy.region             # read a key: value, source, default, description
+mycli config set deploy.region us-east     # validate, set + save (mutating; --dry-run aware)
+mycli config unset deploy.region           # remove a key so its default applies again (mutating; --dry-run aware)
+mycli config list                          # table of every known setting, plus any other keys in the file
 ```
 
-`config set` is dry-run aware, parses the value as a bool/int/float when it looks like one (else a string), preserves existing comments and formatting (backed by `toml_edit`), and validates the engine-reserved `credentials.store` and `output.format` keys. Programmatically, `ConfigFile::set` + `ConfigFile::save` do the same.
+Writes preserve existing comments and formatting, and `set`/`unset` refuse to run against a config file that exists but is malformed or unreadable instead of overwriting it, while `get`/`list` report the problem instead of presenting defaults as if they were the user's settings (`config path` still works, so the file can be found and fixed). Without a registered schema (see below) `config set` is permissive: any dotted key is accepted, the value is parsed as a bool/int/float when it looks like one (else a string), and only the engine-reserved `credentials.store` and `output.format` keys are validated. Programmatically, start from `ConfigFile::try_load` (not `load`, which turns a broken file into an empty document that `save` would then write over), then `ConfigFile::set`/`unset` + `ConfigFile::save`; `ConfigSchema::set`/`unset` add the schema's validation.
+
+### Typed settings (`CliConfig::with_config_schema`)
+
+A CLI describes its own preferences as a plain struct and registers it. The struct's fields become keys (nested structs become dotted keys like `domain.punycode`), doc comments become descriptions, and `#[serde(default)]` supplies defaults; `config set` then parses each value as the field's declared type and rejects unknown keys.
+
+```rust
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+struct Prefs {
+    /// Show domain names in their ASCII (punycode) form.
+    punycode: bool,
+}
+
+let config = CliConfig::new("my-cli", "Team CLI", "my-cli").with_config_schema::<Prefs>();
+// handler: let prefs: Prefs = ctx.config().deserialize()?;
+```
+
+Registering a schema mounts the `config` group (it implies `with_config_commands`) and makes `set` strict: `my-cli config set punycode banana` and `my-cli config set punycod true` fail with a `VALIDATION_ERROR` and a `fix` (the latter with a did-you-mean), and a rejected `set` never touches the file. Values are stored as the declared type, so a `String` field set to `123` stays the string `"123"`. `config get`/`config list` report each key's `value`, `source` (`file`, `default`, or `unset`), `default`, `type`, and `description`, and `config list` also surfaces keys present in the file that the schema does not declare (stale or mistyped keys). `config set --help` lists the known settings.
+
+For a rule across fields, build the schema yourself and add `ConfigSchema::validate_with::<Prefs>(|prefs| ...)`, then pass it to `CliConfig::with_config_schema_value`. A few things to know: field names can't contain a `.` (including via `#[serde(rename)]`) or be one of the engine's reserved tables, `credentials` and `output` (`with_config_schema` asserts both in debug builds and leaves such a key out of release builds); every field of `T` needs a default (`#[serde(default)]`), because `config set` writes one key at a time and each write must leave a file that still deserializes (`with_config_schema` asserts this in debug builds); every `set` and `unset` is checked against `T` and any `validate_with` rules before it is saved, except that an `unset` is allowed while the file is already invalid, so a broken config can be repaired; `config get`/`list` resolve a missing value against the typed settings the file currently yields, so they agree with what a handler reads; `T` should not use `#[serde(deny_unknown_fields)]` (the file also holds the engine's own tables); array and table fields are readable but not settable with `config set`; and `ConfigFile::deserialize`/`section` return an error (rather than silently reading as empty) when the file on disk was malformed, so a typo never looks like "unset".
+
+Precedence between a flag, an environment variable, and a saved setting is the consumer's to wire up. The engine resolves it for `credentials.store` and `output.format` as described above; for a consumer setting, read the flag and environment variable first and only fall back to `ctx.config()` when neither decided.
 
 The `config` module also exposes `load`, `resolve_credential_store`, and the pure `resolve_credential_store_with` for testing credential-store precedence without touching process state.
 

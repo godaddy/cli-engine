@@ -228,7 +228,17 @@ pub(super) fn ensure_config_command(cli: &mut Cli) {
     if has_subcommand(&cli.root, "config") {
         return;
     }
-    let group = crate::config_commands::config_command_group();
+    let group = crate::config_commands::config_command_group_with(
+        cli.config.config_schema.clone().unwrap_or_default(),
+    );
+    // Registers `config list`'s inline human view (and any schemas).
+    let mut prefix = Vec::new();
+    register_runtime_group_metadata(
+        &group,
+        &mut prefix,
+        &mut cli.middleware.schema_registry,
+        &mut cli.middleware.human_views,
+    );
     let mut prefix = Vec::new();
     group.register_commands(&mut prefix, &mut cli.commands);
     let mut prefix = Vec::new();
