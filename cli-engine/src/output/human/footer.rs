@@ -216,6 +216,20 @@ pub(super) fn append_cursor_summary(
     }
 }
 
+/// Appends a "Warnings:" block listing non-fatal warnings to `out` (a no-op
+/// when there are none).
+pub(super) fn append_warnings(out: &mut String, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    out.push_str("\nWarnings:\n");
+    for warning in warnings {
+        out.push_str("  ");
+        out.push_str(warning);
+        out.push('\n');
+    }
+}
+
 /// Append a "Next steps:" footer listing suggested follow-up commands to `out`
 /// (a no-op when there are none). Each action shows its command template with
 /// any known param values substituted into their `<placeholder>` (params

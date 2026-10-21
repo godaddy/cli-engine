@@ -271,6 +271,7 @@ impl Middleware {
 
         let mut envelope =
             Envelope::success(data, command_system).with_next_actions(metadata.next_actions);
+        envelope.warnings = metadata.warnings;
         if is_dry_run {
             envelope = envelope.with_dry_run();
         }
