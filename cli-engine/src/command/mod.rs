@@ -79,6 +79,18 @@ impl CommandResult {
         self
     }
 
+    /// Appends a non-fatal warning to this result.
+    ///
+    /// Use for conditions the caller should know about even though the command
+    /// succeeded (a partial result, a deprecated flag, a skipped item). Chain
+    /// it once per warning. The envelope carries them under `warnings` in JSON
+    /// and TOON output, and human output renders a "Warnings:" block.
+    #[must_use]
+    pub fn with_warning(mut self, message: impl Into<String>) -> Self {
+        self.metadata.warnings.push(message.into());
+        self
+    }
+
     /// Marks this result as a dry-run preview outcome.
     ///
     /// Call only when the handler actually skipped its mutating step because
@@ -121,6 +133,9 @@ impl From<Value> for CommandResult {
 pub struct CommandResultMetadata {
     /// Suggested follow-up actions for the caller.
     pub next_actions: Vec<NextAction>,
+    /// Set by [`CommandResult::with_warning`]; rendered in the envelope's
+    /// `warnings` field.
+    pub warnings: Vec<String>,
     /// Set by [`CommandResult::with_dry_run`] when a
     /// [`handles_dry_run`](CommandSpec::handles_dry_run) handler skipped its
     /// mutating step. Middleware tags the audit/activity outcome and envelope

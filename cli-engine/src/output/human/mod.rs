@@ -18,6 +18,7 @@ mod value_format;
 use body::render_data_body;
 use footer::{
     append_cursor_summary, append_next_actions, append_pagination_summary, append_render_notes,
+    append_warnings,
 };
 
 pub(crate) use columns::terminal_width;
@@ -373,6 +374,7 @@ pub(crate) fn render_human_with_registry_selected(
         && let Some(custom) = registry.custom(schema_id)
     {
         let mut output = custom.render(data);
+        append_warnings(&mut output, &envelope.warnings);
         append_next_actions(&mut output, &envelope.next_actions);
         return output;
     }
@@ -469,6 +471,7 @@ pub(crate) fn render_human_with_view(
         append_pagination_summary(&mut body, envelope.pagination.as_ref(), shown);
         append_cursor_summary(&mut body, envelope.cursor.as_ref(), shown);
     }
+    append_warnings(&mut body, &envelope.warnings);
     append_next_actions(&mut body, &envelope.next_actions);
     body
 }
