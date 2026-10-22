@@ -174,6 +174,12 @@ impl<'src> Reflow<'src> {
             .is_some_and(|first| !starts_list_item(first, false))
     }
 
+    /// Under a plain paragraph any `=`/`-` run is its heading underline; with no
+    /// paragraph open only `=` runs are kept apart, as a conservative guess.
+    fn is_setext_underline_here(&self, trimmed: &str) -> bool {
+        is_setext_underline(trimmed) && (self.paragraph_is_open() || trimmed.starts_with('='))
+    }
+
     fn is_standalone(&self, line: &str) -> bool {
         let trimmed = line.trim_start();
         // 4+ columns of indent only means code when no paragraph is open;
@@ -181,7 +187,8 @@ impl<'src> Reflow<'src> {
         let indented_code = self.pending.is_empty() && indent_width(line) >= 4;
         indented_code
             || is_heading(trimmed)
-            || is_thematic_break_or_setext(trimmed)
+            || is_thematic_break(trimmed)
+            || self.is_setext_underline_here(trimmed)
             || raw_block_start(trimmed).is_some()
             || trimmed.starts_with('>')
     }
@@ -207,6 +214,11 @@ impl<'src> Reflow<'src> {
     }
 }
 
+/// Display columns taken by `text`, counting a tab as 4.
+fn column_width(text: &str) -> usize {
+    text.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
+}
+
 fn indent_width(line: &str) -> usize {
     line.chars()
         .take_while(|c| matches!(c, ' ' | '\t'))
@@ -214,25 +226,36 @@ fn indent_width(line: &str) -> usize {
         .sum()
 }
 
-fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
-    let trimmed = line.trim_start();
-    let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let len = trimmed.chars().take_while(|c| *c == marker).count();
-    (len >= 3).then(|| (marker, len, &trimmed[len..]))
+fn fence_marker(text: &str) -> Option<(char, usize, &str)> {
+    let marker = text.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let len = text.chars().take_while(|c| *c == marker).count();
+    (len >= 3).then(|| (marker, len, &text[len..]))
 }
 
+/// A fence may open on a list marker's line (`- ```sh`); its indent is then the
+/// column where the item's content starts, which is where the closer sits.
 fn opens_fence(line: &str) -> Option<Fence> {
-    fence_marker(line).map(|(marker, len, _)| Fence {
+    let trimmed = line.trim_start();
+    let leading = line.len() - trimmed.len();
+    let (text, indent) = match split_list_marker(line) {
+        Some((rest, _)) if !rest.trim().is_empty() => {
+            let content = rest.trim_start();
+            let content_start = line.len() - content.len();
+            (content, column_width(&line[..content_start]))
+        }
+        _ => (trimmed, indent_width(&line[..leading])),
+    };
+    fence_marker(text).map(|(marker, len, _)| Fence {
         marker,
         len,
-        indent: indent_width(line),
+        indent,
     })
 }
 
 /// A closing fence may be indented up to three columns past its opener; deeper
 /// than that the line is code inside the block.
 fn closes_fence(line: &str, fence: Fence) -> bool {
-    fence_marker(line).is_some_and(|(marker, len, rest)| {
+    fence_marker(line.trim_start()).is_some_and(|(marker, len, rest)| {
         marker == fence.marker
             && len >= fence.len
             && rest.trim().is_empty()
@@ -253,19 +276,22 @@ fn is_heading(trimmed: &str) -> bool {
             .is_none_or(char::is_whitespace)
 }
 
-/// Matches `---`/`***`/`___` rules and `===`/`---` setext heading underlines.
-fn is_thematic_break_or_setext(trimmed: &str) -> bool {
+/// Matches `---`/`***`/`___` rules, spaces between the marks allowed.
+fn is_thematic_break(trimmed: &str) -> bool {
     let mut marks = trimmed.chars().filter(|c| !c.is_whitespace());
-    let Some(first) = marks.next() else {
+    let Some(first) = marks.next().filter(|c| matches!(c, '-' | '*' | '_')) else {
         return false;
     };
     let rest = marks.clone().count() + 1;
-    let uniform = marks.all(|c| c == first);
-    match first {
-        '=' => uniform && !trimmed.contains(' '),
-        '-' | '*' | '_' => uniform && rest >= 3,
-        _ => false,
-    }
+    marks.all(|c| c == first) && rest >= 3
+}
+
+/// Matches a `=` or `-` setext heading underline of any length, which may be
+/// followed by trailing whitespace.
+fn is_setext_underline(trimmed: &str) -> bool {
+    let underline = trimmed.trim_end();
+    underline.starts_with('=') && underline.chars().all(|c| c == '=')
+        || underline.starts_with('-') && underline.chars().all(|c| c == '-')
 }
 
 /// HTML blocks whose content may include blank lines, paired with the
@@ -364,7 +390,7 @@ fn split_list_marker(line: &str) -> Option<(&str, bool)> {
         let rest = trimmed[digits..].strip_prefix(['.', ')'])?;
         (rest, trimmed[..digits].parse::<u32>().is_ok_and(|n| n == 1))
     };
-    (rest.is_empty() || rest.starts_with(' ')).then_some((rest, starts_at_one))
+    (rest.is_empty() || rest.starts_with([' ', '\t'])).then_some((rest, starts_at_one))
 }
 
 /// Whether `line` opens a bullet or ordered list item with content.
@@ -542,6 +568,35 @@ mod tests {
             reflow_markdown(source),
             "See the [note]: it says wrap behaviour.\n"
         );
+    }
+
+    #[test]
+    fn fenced_code_opened_on_a_list_marker_line_is_preserved() {
+        let source = "- ```sh\n  echo first\n  echo second\n  ```\n\nafter\nthe list.\n\n10. ~~~\n    a\n    b\n    ~~~\nmore\nprose\n";
+        assert_eq!(
+            reflow_markdown(source),
+            "- ```sh\n  echo first\n  echo second\n  ```\n\nafter the list.\n\n10. ~~~\n    a\n    b\n    ~~~\nmore prose\n"
+        );
+    }
+
+    #[test]
+    fn setext_underlines_may_be_short_or_have_trailing_whitespace() {
+        let source = "Title\n--\nBody\nline\n\nOther\n=== \nText\nhere\n\nThird\n-\nTail\n";
+        assert_eq!(
+            reflow_markdown(source),
+            "Title\n--\nBody line\n\nOther\n=== \nText here\n\nThird\n-\nTail\n"
+        );
+    }
+
+    #[test]
+    fn dashes_under_a_list_item_stay_continuation_text() {
+        assert_eq!(reflow_markdown("* item\n--\n"), "* item --\n");
+    }
+
+    #[test]
+    fn tab_separated_list_markers_start_items() {
+        let source = "*\tfirst\n*\tsecond\n1.\tone\n2.\ttwo\n";
+        assert_eq!(reflow_markdown(source), source);
     }
 
     #[test]
