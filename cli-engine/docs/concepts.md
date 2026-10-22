@@ -774,16 +774,16 @@ manifest. Modules can also call `Module::with_guides_from_markdown` or
 
 For human output (the default when stdout is a terminal) `guide <topic>` renders the markdown body with `termimad`, wrapping text to the current terminal width at word boundaries. For `--output json` and `--output toon` the raw markdown body is returned unchanged, so machine-readable output stays byte-for-byte identical to the source file.
 
-The markdown renderer is line-oriented: it preserves every newline in the source and does not join hard-wrapped lines back into a flowing paragraph. Follow these rules so guides reflow cleanly at any width:
+The underlying markdown renderer is line-oriented and preserves every source newline, so before rendering, cli-engine joins hard-wrapped prose back into flowing paragraphs. You can wrap guide source at any column (or not at all) and the text still fills the reader's terminal. The join is conservative and only touches paragraphs and list items:
 
-- Write each paragraph as a single physical line. Do not hard-wrap prose at a fixed column (~80/100) — a hard-wrapped paragraph keeps its authored breaks on wide terminals and only re-wraps the leftover fragments on narrow ones. A one-line paragraph fills whatever width the reader's terminal has.
-- Separate blocks (paragraphs, lists, headings) with a blank line.
-- Put code inside fenced code blocks. Code is laid out verbatim, never reflowed, so it is the right place for the only line breaks that must survive as authored.
-- Use `* ` for bullet lists and keep each item on a single line. A `* ` item that wraps keeps a hanging indent under its text, which is what you want.
+- Consecutive non-blank lines of a paragraph, or the continuation lines of a list item (`*`, `-`, `+`, `1.`), become one line. A new list marker still starts a new item.
+- Fenced code blocks, indented code, headings, thematic breaks, tables, block quotes, HTML blocks, and link reference definitions keep their authored line breaks.
+- A trailing backslash or two trailing spaces is an explicit hard break and is preserved.
+- Separate blocks with a blank line. Inside a paragraph, a line that starts with a block marker (a `#` heading, a `>` quote, a `|` table row, a `<` tag) is treated as that block, not as prose, so avoid wrapping a sentence so that a line begins with one of those.
 
 #### Known issues
 
-The renderer only recognizes `* `-prefixed bullets (with 0–3 leading spaces for nesting) as list items. Ordered/numbered lists (`1.`) and `-`/`+` bullets are treated as ordinary paragraphs, so when one of their items wraps, the continuation lines fall back to the left margin instead of indenting under the item text. Prefer `* ` bullets where wrapping matters; for a numbered sequence, either accept the flush-left wrap or hard-wrap the egregious items by hand. Tracked upstream at [Canop/termimad#75](https://github.com/Canop/termimad/issues/75).
+The renderer only recognizes `* `-prefixed bullets (with 0–3 leading spaces for nesting) as list items. Ordered/numbered lists (`1.`) and `-`/`+` bullets are treated as ordinary paragraphs, so when one of their items wraps on the terminal, the continuation lines fall back to the left margin instead of indenting under the item text. Prefer `* ` bullets where a hanging indent matters. Tracked upstream at [Canop/termimad#75](https://github.com/Canop/termimad/issues/75).
 
 ## Search
 
