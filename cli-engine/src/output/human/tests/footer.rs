@@ -90,3 +90,20 @@ fn error_output_appends_fix_line() {
     let out = render_human(&envelope);
     assert_eq!(out, "Error: not logged in\nFix: Run auth login\n");
 }
+
+#[test]
+fn human_output_lists_warnings_before_next_steps() {
+    let mut envelope = Envelope::success(json!({ "domain": "example.com" }), "domain")
+        .with_next_actions(vec![NextAction::new("domain info", "Show details")]);
+    envelope.add_warning("quote expires soon");
+    let out = render_human(&envelope);
+    let warnings = out.find("\nWarnings:\n  quote expires soon\n").expect(&out);
+    let next_steps = out.find("\nNext steps:\n").expect(&out);
+    assert!(warnings < next_steps, "{out}");
+}
+
+#[test]
+fn human_output_has_no_warnings_block_without_warnings() {
+    let out = render_human(&Envelope::success(json!({ "id": 1 }), "x"));
+    assert!(!out.contains("Warnings:"), "{out}");
+}

@@ -517,6 +517,15 @@ Ok(CommandResult::new(json!({ "id": "app-1", "name": "my-app" }))
 `description` fields. This is the primary mechanism for agent-first CLIs to tell callers what
 command to run next.
 
+### warnings
+
+A handler that succeeds but wants the caller to know something (a partial result, a deprecated flag, a skipped item) chains `CommandResult::with_warning` once per message. The messages land in the envelope's `warnings` array in JSON and TOON output (absent when there are none) and render as a "Warnings:" block ahead of the "Next steps:" footer in human output.
+
+```rust
+Ok(CommandResult::new(json!({ "id": "app-1" }))
+    .with_warning("2 of 5 regions were unreachable; results may be incomplete"))
+```
+
 ### pagination
 
 A command that opted into `--limit`/`--offset` pagination via `CommandSpec::with_pagination` gets
