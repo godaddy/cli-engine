@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.3...cli-engine-v0.10.4) (2026-11-02)
+
+
+### Features
+
+* **auth:** default human views and default fields for auth status/login ([#129](https://github.com/godaddy/cli-engine/issues/129)) ([cb717db](https://github.com/godaddy/cli-engine/commit/cb717db9d2ecf0c120664f4a1b058ec95e2f9911))
+* **command:** let handlers attach warnings to the result envelope ([#131](https://github.com/godaddy/cli-engine/issues/131)) ([7d5fb15](https://github.com/godaddy/cli-engine/commit/7d5fb153d5cebacf7c98944aa20139069d53cb56))
+
 ## [0.10.3](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.2...cli-engine-v0.10.3) (2026-10-20)
 
 
