@@ -149,7 +149,7 @@ pub fn register_global_flags(command: Command) -> Command {
                 .action(ArgAction::SetTrue)
                 .conflicts_with("non-interactive")
                 .display_order(global_flag_order::INTERACTIVE)
-                .help("Force interactive prompts for missing inputs (default when TTY is detected)"),
+                .help("Force interactive prompts for missing inputs"),
         )
         .arg(
             Arg::new("non-interactive")

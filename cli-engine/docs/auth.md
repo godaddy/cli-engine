@@ -316,6 +316,18 @@ When a CLI registers auth providers or configures a default provider, `cli_engin
 These commands are implemented with the same `CommandSpec`, middleware, output envelope, and renderers
 as application commands.
 
+### Human views
+
+`auth status` and `auth login` render their human output through the views `auth:status` and `auth:login` (`AUTH_STATUS_VIEW_ID`, `AUTH_LOGIN_VIEW_ID`). The engine registers `default_auth_status_view()` and `default_auth_login_view()` under those ids: identity first, then expiry, environment, provider, and the remaining fields.
+
+To change which columns show by default, set the command's default fields with `CliConfig::with_auth_status_default_fields` / `with_auth_login_default_fields`. 
+
+```rust
+let config = config.with_auth_status_default_fields("identity,expires_at,env,expired,refreshable,scopes");
+```
+
+To change the columns themselves, register a `HumanViewDef` under the same id with `CliConfig::with_view` (or `register_global_human_view`). The built-in group is kept, and a consumer view always wins over the default. `default_auth_status_view().columns` is a convenient starting point.
+
 ## Transport Injectors
 
 Transport injectors implement [`AuthInjector`](../src/transport/injector.rs) and mutate outbound

@@ -124,8 +124,9 @@ pub use auth::storage::{
     CredentialKey, CredentialStorage, FileStorage, default_storage, storage_for,
 };
 pub use auth::{
-    AuthLoginResult, AuthProvider, AuthStatusEntry, CACHE_TTL, Credential, CredentialRequest,
-    Dispatcher, SingleProvider, StatusEntry, auth_command_group, login_and_build,
+    AUTH_LOGIN_VIEW_ID, AUTH_STATUS_VIEW_ID, AuthLoginResult, AuthProvider, AuthStatusEntry,
+    CACHE_TTL, Credential, CredentialRequest, Dispatcher, SingleProvider, StatusEntry,
+    auth_command_group, default_auth_login_view, default_auth_status_view, login_and_build,
     login_and_build_with_scopes, logout_result, status_result, to_status_entry,
 };
 pub use cli::{

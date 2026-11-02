@@ -136,3 +136,26 @@ async fn interactive_and_non_interactive_conflict() {
         output.rendered
     );
 }
+
+/// The `--interactive` help line from `--help` output.
+async fn interactive_help(config: CliConfig) -> String {
+    let output = Cli::new(config).run(["test-cli", "tree", "--help"]).await;
+    output
+        .rendered
+        .lines()
+        .find(|line| line.contains("--interactive"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn interactive_help_claims_tty_default_only_when_auto_interactive() {
+    let base = || CliConfig::new("test-cli", "Test CLI", "test-cli");
+
+    let manual = interactive_help(base()).await;
+    assert!(manual.contains("Force interactive prompts"), "{manual}");
+    assert!(!manual.contains("default"), "{manual}");
+
+    let auto = interactive_help(base().with_auto_interactive(true)).await;
+    assert!(auto.contains("default when a TTY is detected"), "{auto}");
+}

@@ -6,7 +6,7 @@ use clap::builder::PossibleValuesParser;
 
 use super::{
     Cli,
-    config::{BUILTIN_COMMAND_NAMES, DEFAULT_ADMIN_CATEGORY},
+    config::{BUILTIN_COMMAND_NAMES, CliConfig, DEFAULT_ADMIN_CATEGORY},
     help::{ModuleHelpEntry, build_root_long},
     lookup::has_subcommand,
     schema_tree::{
@@ -14,7 +14,11 @@ use super::{
         runtime_group_clap_command_with_schema_help,
     },
 };
-use crate::{FeatureFlag, RuntimeGroupSpec, auth::commands::auth_command_group};
+use crate::auth::commands::{
+    auth_command_group, default_auth_login_view, default_auth_status_view,
+};
+use crate::output::HumanViewRegistry;
+use crate::{FeatureFlag, RuntimeGroupSpec};
 
 /// Lists the auto-registered `auth` command under the admin help category so
 /// it is never uncategorized once clap's auto subcommand list is suppressed.
@@ -182,6 +186,7 @@ pub(super) fn ensure_auth_command(cli: &mut Cli) {
         return;
     }
     let mut group = auth_command_group(&default_provider, &registered_names);
+    apply_auth_default_fields(&mut group, &cli.config);
     let mut seen_names: std::collections::HashSet<String> =
         group.commands.iter().map(|c| c.spec.name.clone()).collect();
     for extra in cli.config.auth_extra_commands.clone() {
@@ -202,6 +207,7 @@ pub(super) fn ensure_auth_command(cli: &mut Cli) {
         &mut cli.middleware.schema_registry,
         &mut cli.middleware.human_views,
     );
+    register_default_auth_views(&mut cli.middleware.human_views);
     let mut prefix = Vec::new();
     group.register_commands(&mut prefix, &mut cli.commands);
     let mut prefix = Vec::new();
@@ -219,6 +225,29 @@ pub(super) fn ensure_auth_command(cli: &mut Cli) {
     // `register_auth_provider`), so it never falls into the generic
     // "Commands" bucket. Idempotent via the `already_listed` guard.
     register_auth_help_entry(cli);
+}
+
+/// Applies the consumer's default `--fields` to the built-in auth commands.
+fn apply_auth_default_fields(group: &mut RuntimeGroupSpec, config: &CliConfig) {
+    for command in &mut group.commands {
+        let fields = match command.spec.name.as_str() {
+            "status" => config.auth_status_default_fields.as_ref(),
+            "login" => config.auth_login_default_fields.as_ref(),
+            _ => None,
+        };
+        if let Some(fields) = fields {
+            command.spec = command.spec.clone().with_default_fields(fields.clone());
+        }
+    }
+}
+
+/// Registers the engine's default `auth status`/`auth login` views.
+fn register_default_auth_views(views: &mut HumanViewRegistry) {
+    for default in [default_auth_status_view(), default_auth_login_view()] {
+        if !views.has_view(&default.schema_id) {
+            views.register(default);
+        }
+    }
 }
 
 /// Mounts the built-in `config` command group and files it under the admin

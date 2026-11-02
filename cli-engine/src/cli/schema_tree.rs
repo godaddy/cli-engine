@@ -362,6 +362,11 @@ fn apply_fields_arg(
     let mut help = String::from(
         "Comma-separated fields to include in output (use 'all' or '*' for everything)",
     );
+    // Clap appends its own `[default: ...]` after the last line of help, which
+    // lands on the end of the field table's final row; render it up front instead.
+    if let Some(default_value) = default_value {
+        help.push_str(&format!(" [default: {default_value}]"));
+    }
     if let Some(table) = &table {
         help.push_str("\n\n");
         help.push_str(table.trim_end());
@@ -377,7 +382,9 @@ fn apply_fields_arg(
         .display_order(crate::flags::global_flag_order::FIELDS)
         .help(help);
     if let Some(default_value) = default_value {
-        arg = arg.default_value(default_value.to_owned());
+        arg = arg
+            .default_value(default_value.to_owned())
+            .hide_default_value(true);
     }
     command.arg(arg)
 }
