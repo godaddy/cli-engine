@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 use serde_json::Value;
 
 use super::TableColumn;
-use super::value_format::{format_value, resolve_field_path};
+use super::value_format::resolve_field_path;
 
 /// Space between adjacent rendered columns. Must match the gutter
 /// `render_table` actually writes, since width-fitting math (how much room
@@ -54,14 +54,21 @@ pub(crate) fn dynamic_columns(
         .collect()
 }
 
-/// True when at least one item has something to display at `field` — a value
-/// that renders as non-empty text. Missing keys, `null`, empty strings and empty
-/// lists are not values; `0` and `false` are.
+/// True when at least one item has a value at `field`. Missing keys, `null`,
+/// empty strings and empty lists are not values; everything else is, including
+/// `0`, `false` and a list that has items. This looks at the value itself, not at
+/// the text it renders as, so a list holding only blanks (`[null]`, `[""]`) is
+/// still a list with items.
 pub(crate) fn column_has_value(items: &[Value], field: &str) -> bool {
     items.iter().any(|item| {
         item.as_object()
             .and_then(|map| resolve_field_path(map, field))
-            .is_some_and(|value| !format_value(value).is_empty())
+            .is_some_and(|value| match value {
+                Value::Null => false,
+                Value::String(text) => !text.is_empty(),
+                Value::Array(list) => !list.is_empty(),
+                _ => true,
+            })
     })
 }
 

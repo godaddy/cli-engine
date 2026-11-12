@@ -53,7 +53,16 @@ fn a_flagged_column_is_shown_when_any_row_has_a_value() {
 
 #[test]
 fn zero_false_and_non_empty_lists_count_as_values() {
-    for value in [json!(0), json!(false), json!(["x"])] {
+    // A list with items is a value even when the items render as blanks.
+    for value in [
+        json!(0),
+        json!(false),
+        json!(["x"]),
+        json!([null]),
+        json!([""]),
+        json!([[]]),
+        json!([null, null]),
+    ] {
         let items = vec![json!({ "type": "A", "name": "n", "port": value })];
         let out = render(&items, &columns(), false);
         assert!(out.contains("PORT"), "{value} is a value: {out}");

@@ -124,7 +124,8 @@ impl TableColumn {
     /// add an empty column to a listing that has none of them.
     ///
     /// "No value" means the field is missing, `null`, an empty string, or an
-    /// empty list in every row; `0` and `false` are values. If any row has one,
+    /// empty list in every row; `0` and `false` are values, and so is any list
+    /// with items, even one holding only blanks such as `[null]`. If any row has one,
     /// the column is shown and the other rows' cells are blank.
     ///
     /// This only trims a default view. An explicit `--fields` that names the
