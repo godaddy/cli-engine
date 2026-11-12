@@ -155,3 +155,28 @@ fn column_has_value_ignores_missing_null_and_blank() {
     let items = vec![json!({ "a": null }), json!({ "a": "x" })];
     assert!(column_has_value(&items, "a"));
 }
+
+#[test]
+fn a_nested_table_inside_an_object_is_trimmed_too() {
+    use crate::output::human::body::render_object_with_columns;
+    let map = json!({
+        "name": "zone",
+        "records": [{ "type": "A", "name": "www" }]
+    });
+    let columns = vec![
+        TableColumn::new("name", "Name"),
+        TableColumn::new("records", "Records").nested(vec![
+            TableColumn::new("type", "Type"),
+            TableColumn::new("name", "Name"),
+            TableColumn::new("port", "Port").hide_when_empty(true),
+        ]),
+    ];
+
+    let (out, _) = render_object_with_columns(map.as_object().expect("object"), &columns, 80);
+
+    assert!(out.contains("TYPE"), "{out}");
+    assert!(
+        !out.contains("PORT"),
+        "nested empty column is omitted: {out}"
+    );
+}
