@@ -1220,6 +1220,42 @@ async fn cli_runtime_guide_command_lists_topics_and_renders_content() {
 }
 
 #[tokio::test]
+async fn cli_runtime_guide_human_joins_hard_wrapped_paragraphs_but_json_stays_raw() {
+    use std::io::IsTerminal;
+
+    let content = "# Deploy\n\nPush the build to the\nstaging cluster before\nrunning smoke tests.\n\n```sh\nmy-cli deploy \\\n  --env staging\n```\n";
+
+    let mut cli = Cli::new(CliConfig {
+        name: "my-cli".to_owned(),
+        short: "Developer tooling".to_owned(),
+        ..CliConfig::default()
+    });
+    cli.add_guides([GuideEntry::new("deploy", "Deploy safely", content)]);
+
+    let raw = cli
+        .run(["my-cli", "guide", "deploy", "--output", "json"])
+        .await;
+    assert_eq!(raw.rendered, content, "json output must stay verbatim");
+
+    let human = cli.run(["my-cli", "guide", "deploy", "--human"]).await;
+    assert_eq!(human.exit_code, 0);
+    if std::io::stdout().is_terminal() {
+        return;
+    }
+    assert!(
+        human.rendered.lines().any(|line| line
+            .contains("Push the build to the staging cluster before running smoke tests.")),
+        "authored line breaks should be joined: {:?}",
+        human.rendered,
+    );
+    assert!(
+        human.rendered.contains("my-cli deploy \\\n") && human.rendered.contains("--env staging"),
+        "code block line breaks must survive: {:?}",
+        human.rendered,
+    );
+}
+
+#[tokio::test]
 async fn cli_runtime_guide_human_reflows_long_lines_but_other_formats_stay_raw() {
     use std::io::IsTerminal;
 
