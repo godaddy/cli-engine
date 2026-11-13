@@ -78,6 +78,9 @@ pub struct TableColumn {
     pub nested: Option<Vec<TableColumn>>,
     /// Header and cell text alignment — see [`TableColumn::align`].
     pub align: Alignment,
+    /// When true, a default view leaves this column out if no row has a value
+    /// for it — see [`TableColumn::hide_when_empty`].
+    pub hide_when_empty: bool,
 }
 
 impl TableColumn {
@@ -91,6 +94,7 @@ impl TableColumn {
             essential: false,
             nested: None,
             align: Alignment::Left,
+            hide_when_empty: false,
         }
     }
 
@@ -112,6 +116,29 @@ impl TableColumn {
     #[must_use]
     pub fn essential(mut self, value: bool) -> Self {
         self.essential = value;
+        self
+    }
+
+    /// Leaves this column out of a table when no row has a value for it, so a
+    /// column that only some kinds of record use (a port, a priority) does not
+    /// add an empty column to a listing that has none of them.
+    ///
+    /// "No value" means the field is missing, `null`, an empty string, or an
+    /// empty list in every row; `0` and `false` are values, and so is any list
+    /// with items, even one holding only blanks such as `[null]`. If any row has one,
+    /// the column is shown and the other rows' cells are blank.
+    ///
+    /// This only trims a default view. An explicit `--fields` that names the
+    /// column shows it even when it is empty, since the user asked for it, and
+    /// a column left out for being empty is not counted among the columns
+    /// "hidden" for lack of width. It applies to tables of rows, not to the
+    /// one-value-per-line layout used for a single object.
+    ///
+    /// If every column of a view is both flagged and empty, the view is left
+    /// as declared rather than rendering nothing.
+    #[must_use]
+    pub fn hide_when_empty(mut self, value: bool) -> Self {
+        self.hide_when_empty = value;
         self
     }
 

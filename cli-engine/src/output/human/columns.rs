@@ -54,6 +54,41 @@ pub(crate) fn dynamic_columns(
         .collect()
 }
 
+/// True when at least one item has a value at `field`. Missing keys, `null`,
+/// empty strings and empty lists are not values; everything else is, including
+/// `0`, `false` and a list that has items. This looks at the value itself, not at
+/// the text it renders as, so a list holding only blanks (`[null]`, `[""]`) is
+/// still a list with items.
+pub(crate) fn column_has_value(items: &[Value], field: &str) -> bool {
+    items.iter().any(|item| {
+        item.as_object()
+            .and_then(|map| resolve_field_path(map, field))
+            .is_some_and(|value| match value {
+                Value::Null => false,
+                Value::String(text) => !text.is_empty(),
+                Value::Array(list) => !list.is_empty(),
+                _ => true,
+            })
+    })
+}
+
+/// The columns of a default view that are worth showing for `items`: every
+/// column, except those marked [`TableColumn::hide_when_empty`] that no row has
+/// a value for. Never returns an empty list — a view whose every column is
+/// empty keeps its declared columns.
+pub(crate) fn columns_with_values(items: &[Value], columns: &[TableColumn]) -> Vec<TableColumn> {
+    let kept: Vec<TableColumn> = columns
+        .iter()
+        .filter(|column| !column.hide_when_empty || column_has_value(items, &column.field))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        columns.to_vec()
+    } else {
+        kept
+    }
+}
+
 /// True when at least one item has a JSON number at `field`, and no item
 /// with a present, non-null value at `field` holds anything else.
 pub(crate) fn column_is_all_numeric(items: &[Value], field: &str) -> bool {

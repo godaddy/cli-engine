@@ -1,7 +1,8 @@
 use serde_json::Value;
 
 use super::columns::{
-    column_is_all_numeric, columns_fitting_width, dynamic_columns, fit_column_widths,
+    column_is_all_numeric, columns_fitting_width, columns_with_values, dynamic_columns,
+    fit_column_widths,
 };
 use super::footer::{SummaryStyle, cursor_summary_text, pagination_summary_text};
 use super::value_format::{
@@ -95,6 +96,17 @@ pub(crate) fn render_array_with_columns(
     if !items.iter().all(Value::is_object) {
         return (render_array_lines(items), RenderNotes::default());
     }
+    // A column marked `hide_when_empty` that no row has a value for is left out
+    // of a default view before any width math, so it neither takes up room nor
+    // shows up in the "hidden columns" footer. An explicit `--fields` keeps it:
+    // the user named it.
+    let trimmed;
+    let columns: &[TableColumn] = if !fields_explicit && columns.iter().any(|c| c.hide_when_empty) {
+        trimmed = columns_with_values(items, columns);
+        &trimmed
+    } else {
+        columns
+    };
     // Natural widths (and rows) are computed for every original column
     // before deciding what to hide: a protected column (see `protected_all`
     // below) never shrinks below its natural width, so the hiding decision
