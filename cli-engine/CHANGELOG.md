@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.4...cli-engine-v0.10.5) (2026-11-13)
+
+
+### Features
+
+* **output:** let a table column be omitted when no row has a value ([#135](https://github.com/godaddy/cli-engine/issues/135)) ([84e94a7](https://github.com/godaddy/cli-engine/commit/84e94a7721492b268d244211ddce7ea0736e27ca))
+
 ## [0.10.4](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.3...cli-engine-v0.10.4) (2026-11-02)
 
 
