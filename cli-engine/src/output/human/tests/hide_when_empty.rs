@@ -189,3 +189,157 @@ fn a_nested_table_inside_an_object_is_trimmed_too() {
         "nested empty column is omitted: {out}"
     );
 }
+
+fn object_columns() -> Vec<TableColumn> {
+    vec![
+        TableColumn::new("name", "Name"),
+        TableColumn::new("records", "Records")
+            .hide_when_empty(true)
+            .nested(vec![
+                TableColumn::new("type", "Type"),
+                TableColumn::new("data", "Data"),
+            ]),
+        TableColumn::new("plan", "Plan")
+            .hide_when_empty(true)
+            .nested(vec![TableColumn::new("action", "Action")]),
+    ]
+}
+
+fn render_object(map: &serde_json::Value, cols: &[TableColumn], explicit: bool) -> String {
+    let envelope = Envelope::success(map.clone(), "");
+    let columns = Some(cols);
+    // `fields_explicit` only matters when the user typed `--fields`.
+    crate::output::human::body::render_data_body(
+        envelope.data.as_ref().expect("data"),
+        columns,
+        "",
+        80,
+        None,
+        explicit,
+        None,
+    )
+    .0
+}
+
+#[test]
+fn an_object_view_leaves_out_a_flagged_nested_column_it_has_no_value_for() {
+    let result = json!({
+        "name": "set",
+        "records": [{ "type": "A", "data": "1.2.3.4" }]
+    });
+
+    let out = render_object(&result, &object_columns(), false);
+
+    assert!(out.contains("Records:"), "{out}");
+    assert!(out.contains("1.2.3.4"), "{out}");
+    assert!(
+        !out.contains("Plan"),
+        "absent flagged column must not print: {out}"
+    );
+}
+
+#[test]
+fn an_object_view_still_shows_a_flagged_column_that_has_a_value() {
+    let result = json!({
+        "name": "dry-run",
+        "plan": [{ "action": "unchanged" }]
+    });
+
+    let out = render_object(&result, &object_columns(), false);
+
+    assert!(out.contains("Plan:") && out.contains("unchanged"), "{out}");
+    assert!(!out.contains("Records"), "{out}");
+}
+
+#[test]
+fn null_empty_string_and_empty_list_leave_a_flagged_object_column_out() {
+    for empty in [json!(null), json!(""), json!([])] {
+        let result = json!({ "name": "x", "records": empty });
+        let out = render_object(&result, &object_columns(), false);
+        assert!(!out.contains("Records"), "{empty} is no value: {out}");
+    }
+}
+
+#[test]
+fn zero_and_false_keep_a_flagged_object_column() {
+    let cols = vec![
+        TableColumn::new("name", "Name"),
+        TableColumn::new("deleted", "Deleted").hide_when_empty(true),
+        TableColumn::new("dry", "Dry").hide_when_empty(true),
+    ];
+    let result = json!({ "name": "x", "deleted": 0, "dry": false });
+
+    let out = render_object(&result, &cols, false);
+
+    assert!(out.contains("Deleted: 0"), "{out}");
+    assert!(out.contains("Dry: no"), "{out}");
+}
+
+#[test]
+fn an_unflagged_absent_object_column_still_prints_its_blank_line() {
+    let cols = vec![
+        TableColumn::new("name", "Name"),
+        TableColumn::new("note", "Note"),
+    ];
+    let result = json!({ "name": "x" });
+
+    let out = render_object(&result, &cols, false);
+
+    assert!(
+        out.contains("Note: "),
+        "only flagged columns are trimmed: {out}"
+    );
+}
+
+#[test]
+fn an_explicit_fields_selection_keeps_an_absent_flagged_object_column() {
+    let result = json!({ "name": "set" });
+
+    let out = render_object(&result, &object_columns(), true);
+
+    assert!(out.contains("Records:") && out.contains("Plan:"), "{out}");
+}
+
+#[test]
+fn an_object_whose_every_column_is_flagged_and_empty_keeps_them() {
+    let cols = vec![
+        TableColumn::new("a", "A").hide_when_empty(true),
+        TableColumn::new("b", "B").hide_when_empty(true),
+    ];
+    let result = json!({ "other": 1 });
+
+    let out = render_object(&result, &cols, false);
+
+    assert!(out.contains("A:") && out.contains("B:"), "{out}");
+}
+
+#[test]
+fn a_nested_object_block_trims_its_own_flagged_columns() {
+    let cols = vec![
+        TableColumn::new("name", "Name"),
+        TableColumn::new("detail", "Detail").nested(vec![
+            TableColumn::new("kind", "Kind"),
+            TableColumn::new("port", "Port").hide_when_empty(true),
+        ]),
+    ];
+    let result = json!({ "name": "x", "detail": { "kind": "srv" } });
+
+    let out = render_object(&result, &cols, false);
+
+    assert!(out.contains("Kind: srv"), "{out}");
+    assert!(!out.contains("Port"), "{out}");
+}
+
+#[test]
+fn the_object_renderer_reports_no_hidden_columns_for_an_omitted_one() {
+    use crate::output::human::body::render_data_body;
+    let result = json!({ "name": "set" });
+
+    let (_, notes) = render_data_body(&result, Some(&object_columns()), "", 80, None, false, None);
+
+    assert!(
+        notes.hidden_columns.is_empty(),
+        "{:?}",
+        notes.hidden_columns
+    );
+}

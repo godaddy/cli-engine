@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::columns::{
     column_is_all_numeric, columns_fitting_width, columns_with_values, dynamic_columns,
-    fit_column_widths,
+    fit_column_widths, object_columns_with_values,
 };
 use super::footer::{SummaryStyle, cursor_summary_text, pagination_summary_text};
 use super::value_format::{
@@ -51,7 +51,16 @@ pub(super) fn render_data_body(
                 fields_explicit,
                 cursor,
             ),
-            Value::Object(map) => render_object_with_columns(map, columns, available_width),
+            Value::Object(map) => {
+                // Same rule as for a table of rows: an empty flagged column is
+                // left out of a default view, but kept when the user named it.
+                if !fields_explicit && columns.iter().any(|c| c.hide_when_empty) {
+                    let trimmed = object_columns_with_values(map, columns);
+                    render_object_with_columns(map, &trimmed, available_width)
+                } else {
+                    render_object_with_columns(map, columns, available_width)
+                }
+            }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
                 (format!("{}\n", format_value(data)), RenderNotes::default())
             }
@@ -439,7 +448,12 @@ fn render_nested_value(
             false,
             cursor,
         ),
-        Value::Object(map) => render_object_with_columns(map, nested_columns, available_width),
+        Value::Object(map) => {
+            // A nested block's columns are authored by the view, never by a
+            // `--fields` selection, so a flagged column is trimmed here too.
+            let trimmed = object_columns_with_values(map, nested_columns);
+            render_object_with_columns(map, &trimmed, available_width)
+        }
         other => (format!("{}\n", format_value(other)), RenderNotes::default()),
     }
 }
