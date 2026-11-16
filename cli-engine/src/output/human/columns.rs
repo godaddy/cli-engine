@@ -54,21 +54,25 @@ pub(crate) fn dynamic_columns(
         .collect()
 }
 
-/// True when at least one item has a value at `field`. Missing keys, `null`,
-/// empty strings and empty lists are not values; everything else is, including
-/// `0`, `false` and a list that has items. This looks at the value itself, not at
-/// the text it renders as, so a list holding only blanks (`[null]`, `[""]`) is
-/// still a list with items.
+/// Whether `value` is something to display. Missing keys, `null`, empty strings
+/// and empty lists are not; everything else is, including `0`, `false` and a list
+/// that has items. This looks at the value itself, not at the text it renders as,
+/// so a list holding only blanks (`[null]`, `[""]`) is still a list with items.
+fn counts_as_value(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(list) => !list.is_empty(),
+        _ => true,
+    }
+}
+
+/// True when at least one item has a value at `field` (see [`counts_as_value`]).
 pub(crate) fn column_has_value(items: &[Value], field: &str) -> bool {
     items.iter().any(|item| {
         item.as_object()
             .and_then(|map| resolve_field_path(map, field))
-            .is_some_and(|value| match value {
-                Value::Null => false,
-                Value::String(text) => !text.is_empty(),
-                Value::Array(list) => !list.is_empty(),
-                _ => true,
-            })
+            .is_some_and(counts_as_value)
     })
 }
 
@@ -77,9 +81,30 @@ pub(crate) fn column_has_value(items: &[Value], field: &str) -> bool {
 /// a value for. Never returns an empty list — a view whose every column is
 /// empty keeps its declared columns.
 pub(crate) fn columns_with_values(items: &[Value], columns: &[TableColumn]) -> Vec<TableColumn> {
+    keep_columns_where(columns, |column| column_has_value(items, &column.field))
+}
+
+/// Like [`columns_with_values`], for the one-value-per-line layout of a single
+/// object: a flagged column the object has no value for is left out instead of
+/// printing `Header: ` with nothing after it.
+pub(crate) fn object_columns_with_values(
+    map: &serde_json::Map<String, Value>,
+    columns: &[TableColumn],
+) -> Vec<TableColumn> {
+    keep_columns_where(columns, |column| {
+        resolve_field_path(map, &column.field).is_some_and(counts_as_value)
+    })
+}
+
+/// Drops the `hide_when_empty` columns `has_value` rejects, keeping every column
+/// if that would leave none.
+fn keep_columns_where(
+    columns: &[TableColumn],
+    has_value: impl Fn(&TableColumn) -> bool,
+) -> Vec<TableColumn> {
     let kept: Vec<TableColumn> = columns
         .iter()
-        .filter(|column| !column.hide_when_empty || column_has_value(items, &column.field))
+        .filter(|column| !column.hide_when_empty || has_value(column))
         .cloned()
         .collect();
     if kept.is_empty() {
