@@ -6173,7 +6173,8 @@ async fn execute_from_publishes_the_personality_identity_not_the_dispatchers() {
     );
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
 
-    cli.execute_from(["inner", "--version"], &mut stdout, &mut stderr)
+    let _ = cli
+        .execute_from(["inner", "--version"], &mut stdout, &mut stderr)
         .await
         .expect("personality run completes");
 
