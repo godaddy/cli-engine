@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.5...cli-engine-v0.10.6) (2026-11-16)
+
+
+### Bug Fixes
+
+* **output:** apply hide_when_empty to single-object views ([#139](https://github.com/godaddy/cli-engine/issues/139)) ([9b3b478](https://github.com/godaddy/cli-engine/commit/9b3b4784ee628e163e25f80ce51cfb175e0822ab))
+
+
+### Miscellaneous
+
+* **rust:** bump pinned toolchain to 1.100.0 ([#137](https://github.com/godaddy/cli-engine/issues/137)) ([09a8e52](https://github.com/godaddy/cli-engine/commit/09a8e522419efb5b2b9a5291bcdd3122057917d5))
+
 ## [0.10.5](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.4...cli-engine-v0.10.5) (2026-11-13)
 
 
