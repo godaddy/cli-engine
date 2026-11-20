@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod reflow;
+
 /// Parsed guide document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GuideEntry {
@@ -125,15 +127,14 @@ pub fn parse_front_matter(content: &str) -> (String, String) {
 
 /// Renders guide markdown into a terminal-friendly string.
 ///
-/// Each source line is individually wrapped to `width` columns, breaking
-/// between words rather than mid-word. (A single token longer than `width` —
-/// a long URL, say — can still overflow, since it has no interior break
-/// point.) The
-/// underlying parser is line-oriented and **preserves every source newline**:
-/// it does not join soft-wrapped lines into flowing paragraphs. Author guide
-/// markdown with each paragraph on a single physical line so it reflows to the
-/// terminal width; a paragraph that is hard-wrapped in the source stays wrapped
-/// at its authored breaks. See `docs/concepts.md` ("Guides") for authoring
+/// Hard-wrapped paragraphs and list items are first joined into single lines,
+/// so authors may wrap source at any column and the text still fills the
+/// terminal. Code blocks, tables, headings, block quotes, HTML blocks and
+/// explicit hard breaks (a trailing backslash or two spaces) keep their
+/// authored line breaks. Each resulting line is then wrapped to `width`
+/// columns, breaking between words rather than mid-word. (A single token
+/// longer than `width` — a long URL, say — can still overflow, since it has
+/// no interior break point.) See `docs/concepts.md` ("Guides") for authoring
 /// guidance.
 ///
 /// `color` selects a styled skin (`true`, for an interactive terminal) or a
@@ -149,7 +150,8 @@ pub fn render_guide_human(content: &str, width: usize, color: bool) -> String {
         // no_style emits no ANSI escapes — deterministic for pipes and tests.
         termimad::MadSkin::no_style()
     };
-    skin.text(content, Some(width)).to_string()
+    skin.text(&reflow::reflow_markdown(content), Some(width))
+        .to_string()
 }
 
 /// Renders the guide topic list.
