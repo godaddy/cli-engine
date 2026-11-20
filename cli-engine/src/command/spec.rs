@@ -77,6 +77,12 @@ pub struct CommandSpec {
     pub handles_dry_run: bool,
     /// Forces this command's successful output to print verbatim to stdout.
     pub raw_output: bool,
+    /// Ids of optional args to ask for when the command runs interactively.
+    ///
+    /// Set with [`with_prompted_args`](CommandSpec::with_prompted_args).
+    /// Empty by default: the engine only prompts for *required* args unless a
+    /// command names optional ones here.
+    pub prompted_args: Vec<String>,
     /// Whether this command runs interactively by default on a terminal.
     ///
     /// Set with [`with_interactivity`](CommandSpec::with_interactivity).
@@ -575,6 +581,29 @@ impl CommandSpec {
     #[must_use]
     pub fn raw_output(mut self, raw_output: bool) -> Self {
         self.raw_output = raw_output;
+        self
+    }
+
+    /// Names optional args the engine should ask for when the command runs
+    /// interactively and the user did not supply them.
+    ///
+    /// The engine already prompts for missing *required* args. Use this for
+    /// an optional arg that is worth a question in a guided run, such as a
+    /// description. Each id is the arg's clap id (the field name under
+    /// `#[derive(clap::Args)]`). A blank answer leaves the arg unset, and an
+    /// arg given on the command line or through its environment variable is
+    /// never asked for. Nothing is asked under `--non-interactive` or without
+    /// a terminal. The answer is checked against the arg's own value parser
+    /// and asked again when clap would reject it.
+    ///
+    /// Registration debug-asserts that every id names an arg of this command.
+    #[must_use]
+    pub fn with_prompted_args<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.prompted_args = ids.into_iter().map(Into::into).collect();
         self
     }
 

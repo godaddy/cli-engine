@@ -417,4 +417,220 @@ mod prompting {
         assert_eq!(output.exit_code, 130, "{}", output.rendered);
         assert!(output.rendered.contains("Resume"), "{}", output.rendered);
     }
+
+    /// A command with optional args, some opted into prompting.
+    fn optional_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("make", "Make a thing")
+                                .no_auth(true)
+                                .with_arg(Arg::new("name").long("name").required(true))
+                                .with_arg(
+                                    Arg::new("note")
+                                        .long("note")
+                                        .help("A short note")
+                                        .value_name("TEXT"),
+                                )
+                                .with_arg(
+                                    Arg::new("retries")
+                                        .long("retries")
+                                        .value_parser(clap::value_parser!(u8)),
+                                )
+                                .with_arg(
+                                    Arg::new("quiet")
+                                        .long("quiet")
+                                        .action(clap::ArgAction::SetTrue),
+                                )
+                                .with_arg(Arg::new("unprompted").long("unprompted"))
+                                .with_prompted_args(["note", "retries", "quiet"]),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "note": args.get("note"),
+                                    "retries": args.get("retries"),
+                                    "quiet": args.get("quiet"),
+                                    "unprompted": args.get("unprompted"),
+                                })))
+                            },
+                        ),
+                    )
+                })]),
+        )
+    }
+
+    async fn run_optional(
+        answers: impl IntoIterator<Item = Answer>,
+        flags: &[&str],
+    ) -> (serde_json::Value, Arc<ScriptedPrompter>, i32, String) {
+        let prompter = Arc::new(ScriptedPrompter::new(answers));
+        let mut args = vec!["test-cli", "tool", "make", "--name", "x", "--json"];
+        args.extend_from_slice(flags);
+        let output = optional_cli(Arc::clone(&prompter)).run(args).await;
+        let value = serde_json::from_str(&output.rendered).unwrap_or(json!(null));
+        (value, prompter, output.exit_code, output.rendered)
+    }
+
+    #[tokio::test]
+    async fn prompted_optional_args_are_asked_and_applied() {
+        let (value, prompter, code, rendered) = run_optional(
+            [
+                Answer::text("hello"),
+                Answer::text("3"),
+                Answer::Confirm(true),
+            ],
+            &["--interactive"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["note"], json!("hello"));
+        assert_eq!(value["data"]["retries"], json!(3));
+        assert_eq!(value["data"]["quiet"], json!(true));
+        assert_eq!(value["data"]["unprompted"], json!(null));
+        assert_eq!(prompter.remaining(), 0);
+        let asked = prompter.transcript().join("\n");
+        assert!(asked.contains("(optional)"), "{asked}");
+        assert!(
+            !asked.contains("unprompted"),
+            "an arg not opted in is never asked: {asked}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_answer_skips_an_optional_arg() {
+        let (value, _, code, rendered) = run_optional(
+            [Answer::text(""), Answer::text(""), Answer::Confirm(false)],
+            &["--interactive"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["note"], json!(null));
+        assert_eq!(value["data"]["retries"], json!(null));
+        assert_eq!(value["data"]["quiet"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn an_optional_arg_already_supplied_is_not_asked_again() {
+        let (value, prompter, code, rendered) = run_optional(
+            [Answer::text("3"), Answer::Confirm(false)],
+            &["--interactive", "--note", "given"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["note"], json!("given"));
+        assert_eq!(prompter.remaining(), 0);
+        assert!(
+            !prompter
+                .transcript()
+                .iter()
+                .any(|line| line.contains("note")),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_optional_answer_is_explained_and_asked_again() {
+        let (value, prompter, code, rendered) = run_optional(
+            [
+                Answer::text(""),
+                Answer::text("many"),
+                Answer::text("2"),
+                Answer::Confirm(false),
+            ],
+            &["--interactive"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["retries"], json!(2));
+        assert!(
+            prompter
+                .transcript()
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
+
+    #[tokio::test]
+    async fn optional_args_are_not_asked_when_prompting_is_off() {
+        let (value, prompter, code, rendered) =
+            run_optional([Answer::text("unused")], &["--non-interactive"]).await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["note"], json!(null));
+        assert_eq!(prompter.remaining(), 1, "nothing may be asked");
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_optional_prompt_exits_130_with_a_resume_command() {
+        let (_, _, code, rendered) = run_optional([Answer::Cancel], &["--interactive"]).await;
+
+        assert_eq!(code, 130, "{rendered}");
+        assert!(rendered.contains("Resume"), "{rendered}");
+        assert!(rendered.contains("--name x"), "{rendered}");
+    }
+
+    #[test]
+    fn prompt_repeat_asks_again_until_the_user_declines() {
+        let prompter = ScriptedPrompter::new([
+            Answer::Confirm(true),
+            Answer::Confirm(true),
+            Answer::Confirm(false),
+        ]);
+        let mut seen = 0;
+        let rounds =
+            cli_engine::prompt::prompt_repeat(&prompter, "Add one?", "Add another?", |_| {
+                seen += 1;
+                Ok(())
+            })
+            .expect("repeat");
+
+        assert_eq!((rounds, seen), (2, 2));
+        assert_eq!(
+            prompter.transcript(),
+            ["Add one?", "Add another?", "Add another?"]
+        );
+    }
+
+    #[test]
+    fn prompt_repeat_stops_with_the_error_from_a_round() {
+        let prompter = ScriptedPrompter::new([Answer::Confirm(true), Answer::Confirm(true)]);
+        let err = cli_engine::prompt::prompt_repeat(&prompter, "Add one?", "Again?", |_| {
+            Err(cli_engine::CliCoreError::message("round failed"))
+        })
+        .expect_err("round error");
+
+        assert!(err.to_string().contains("round failed"), "{err}");
+        assert_eq!(prompter.remaining(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_required_args_are_asked_before_the_optional_ones() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("widget"),
+            Answer::text("a note"),
+            Answer::text(""),
+            Answer::Confirm(false),
+        ]));
+        let output = optional_cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "make", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["note"], json!("a note"));
+        assert_eq!(prompter.remaining(), 0);
+        let asked = prompter.transcript();
+        let name_at = asked.iter().position(|line| line.contains("name"));
+        let note_at = asked.iter().position(|line| line.contains("note"));
+        assert!(name_at < note_at, "required first: {asked:?}");
+    }
 }

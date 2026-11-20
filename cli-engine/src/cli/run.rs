@@ -241,8 +241,8 @@ where
         }
     }
 
-    let matches = match cli.root.clone().try_get_matches_from(&clap_args) {
-        Ok(matches) => matches,
+    let (matches, parsed_args) = match cli.root.clone().try_get_matches_from(&clap_args) {
+        Ok(matches) => (matches, clap_args.clone()),
         Err(err) => {
             // Attempt interactive recovery for missing required arguments.
             let target = command_prefix_path(
@@ -264,8 +264,8 @@ where
             ) {
                 match recovery {
                     crate::prompt::RecoveryResult::Recovered { args } => {
-                        match cli.root.clone().try_get_matches_from(args) {
-                            Ok(m) => m,
+                        match cli.root.clone().try_get_matches_from(args.clone()) {
+                            Ok(m) => (m, args),
                             Err(retry_err) => {
                                 return finish_run(
                                     cli,
@@ -297,6 +297,11 @@ where
                 );
             }
         }
+    };
+
+    let matches = match prompt_for_optional_args(cli, matches, parsed_args) {
+        Ok(matches) => matches,
+        Err(output) => return finish_run(cli, output),
     };
 
     let default_format = resolve_run_output_format(cli);
@@ -646,6 +651,70 @@ pub(super) fn resolve_run_output_format(cli: &Cli) -> String {
         engine_config.output.format.as_deref(),
         std::io::stdout().is_terminal(),
     )
+}
+
+/// Asks for the optional args the command named with
+/// [`CommandSpec::with_prompted_args`](crate::CommandSpec::with_prompted_args),
+/// then re-parses with the answers added. Returns the matches unchanged when
+/// the command names none, prompting is off, or everything was supplied.
+fn prompt_for_optional_args(
+    cli: &Cli,
+    matches: ArgMatches,
+    parsed_args: Vec<String>,
+) -> std::result::Result<ArgMatches, CliRunOutput> {
+    let command_path = command_path_from_matches(&cli.config.name, &matches);
+    let Some(command) = cli.commands.get(&command_path) else {
+        return Ok(matches);
+    };
+    if command.spec.prompted_args.is_empty() {
+        return Ok(matches);
+    }
+    let default_format = resolve_run_output_format(cli);
+    let interactive = global_flags_from_matches(
+        &matches,
+        &default_format,
+        auto_interactive_for(cli, &command_path),
+    )
+    .interactive;
+    if !interactive {
+        return Ok(matches);
+    }
+    let Some(leaf) = find_command_by_colon_path(&cli.root, &command_path) else {
+        return Ok(matches);
+    };
+
+    let terminal = crate::prompt::TerminalPrompter;
+    let prompter: &dyn crate::prompt::Prompter = match &cli.middleware.prompter {
+        Some(prompter) => prompter.as_ref(),
+        None => &terminal,
+    };
+    let result = crate::prompt::prompt_optional_args(
+        prompter,
+        &cli.root,
+        leaf,
+        leaf_matches(&matches),
+        &command.spec.prompted_args,
+        &parsed_args,
+        &cli.config.name,
+    );
+    match result {
+        crate::prompt::OptionalPromptResult::Done { args } if args.is_empty() => Ok(matches),
+        crate::prompt::OptionalPromptResult::Done { args } => {
+            let mut augmented = parsed_args;
+            augmented.extend(args);
+            cli.root
+                .clone()
+                .try_get_matches_from(augmented)
+                .map_err(|err| CliRunOutput {
+                    exit_code: err.exit_code(),
+                    rendered: err.to_string(),
+                })
+        }
+        crate::prompt::OptionalPromptResult::Cancelled { resume } => Err(CliRunOutput {
+            exit_code: crate::prompt::CANCELLED_EXIT_CODE,
+            rendered: format!("Cancelled. Resume with:\n  {resume}\n"),
+        }),
+    }
 }
 
 fn initialized_middleware(cli: &Cli) -> Result<crate::Middleware> {

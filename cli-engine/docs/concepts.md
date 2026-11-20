@@ -474,6 +474,10 @@ A handler that has to ask questions starts with `ctx.require_interactive("pass -
 
 The default prompter uses the terminal. In a test, `CliConfig::with_prompter` installs a `prompt::ScriptedPrompter` that replays a list of `prompt::Answer` values, so a prompting command runs end to end with no terminal. A prompt it has no matching answer for fails the run with a message naming the prompt, and `transcript()` returns every question asked, including the answers a validator rejected.
 
+The engine already asks for a missing *required* arg. To also ask for an optional one in a guided run, name it with `CommandSpec::with_prompted_args(["description"])` (the arg's clap id). After a successful parse the engine asks for each named arg the user did not supply, on the command line or by environment variable, then re-parses with the answers added. A blank answer skips the arg, a flag arg is a yes/no that defaults to no, and an arg with possible values is a menu with a skip choice. Answers are checked against the arg's own value parser and asked again when clap would reject them. Nothing is asked under `--non-interactive` or without a terminal, and only args named this way are ever asked for, so a command with many optional flags is not turned into a questionnaire.
+
+For "add another" flows, `prompt::prompt_repeat(prompter, "Add a record?", "Add another?", |prompter| ...)` asks the first question, runs the closure on yes, then asks the second question until the user declines. Both questions default to no, and an error from the closure ends the loop.
+
 ## Feature Flags & Stages
 
 Feature flags classify command readiness rather than risk. `Stage` orders `Experimental < Beta < Ga`; the default is `Ga`, so gating is opt-in — a command with no flag declaration is fully visible under every policy.
