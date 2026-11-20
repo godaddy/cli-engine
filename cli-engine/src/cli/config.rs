@@ -233,6 +233,11 @@ pub struct CliConfig {
     /// a TTY (stdin + stderr) and defaults to interactive mode — meaning
     /// missing required arguments will be prompted for instead of erroring.
     ///
+    /// A single command can override this either way with
+    /// [`CommandSpec::with_interactivity`](crate::CommandSpec::with_interactivity),
+    /// so a guided command can be interactive by default without flipping the
+    /// whole CLI.
+    ///
     /// Set via [`CliConfig::with_auto_interactive`]. Start with `false` for
     /// backwards compatibility; flip to `true` once the CLI's commands have
     /// been tested under interactive prompting.

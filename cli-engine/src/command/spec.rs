@@ -4,8 +4,8 @@ use clap::{Arg, ArgGroup, Command};
 use schemars::JsonSchema;
 
 use crate::{
-    AuthRequirement, CommandMeta, FeatureFlag, OutputSchema, SchemaInfo, Stage, Tier,
-    output::TableColumn,
+    AuthRequirement, CommandMeta, FeatureFlag, InteractivityPolicy, OutputSchema, SchemaInfo,
+    Stage, Tier, output::TableColumn,
 };
 
 /// Declarative leaf command metadata and parser arguments.
@@ -77,6 +77,13 @@ pub struct CommandSpec {
     pub handles_dry_run: bool,
     /// Forces this command's successful output to print verbatim to stdout.
     pub raw_output: bool,
+    /// Whether this command runs interactively by default on a terminal.
+    ///
+    /// Set with [`with_interactivity`](CommandSpec::with_interactivity).
+    /// Defaults to [`InteractivityPolicy::Inherit`], which follows the
+    /// CLI-wide [`CliConfig::with_auto_interactive`](crate::CliConfig::with_auto_interactive)
+    /// setting.
+    pub interactivity: InteractivityPolicy,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// Command-specific `clap` arguments.
@@ -571,6 +578,26 @@ impl CommandSpec {
         self
     }
 
+    /// Sets whether this command runs interactively by default.
+    ///
+    /// [`InteractivityPolicy::DefaultOnTty`] makes a guided command (an `init`
+    /// wizard, say) prompt whenever stdin and stderr are terminals, without
+    /// the whole CLI opting into
+    /// [`with_auto_interactive`](crate::CliConfig::with_auto_interactive).
+    /// [`InteractivityPolicy::OnRequest`] does the opposite for a command that
+    /// should only prompt under `--interactive`.
+    ///
+    /// The policy only picks the default. `--interactive` and
+    /// `--non-interactive` always win, and with no TTY the command is
+    /// non-interactive. Read the outcome with
+    /// [`CommandContext::is_interactive`](crate::CommandContext::is_interactive).
+    /// A `DefaultOnTty` command also gets a line in its long help saying so.
+    #[must_use]
+    pub fn with_interactivity(mut self, policy: InteractivityPolicy) -> Self {
+        self.interactivity = policy;
+        self
+    }
+
     /// Builds middleware metadata from the spec.
     #[must_use]
     pub fn metadata(&self) -> CommandMeta {
@@ -628,6 +655,12 @@ impl CommandSpec {
         }
         for group in &self.arg_groups {
             command = command.group(group.clone());
+        }
+        if self.interactivity == InteractivityPolicy::DefaultOnTty {
+            command = command.after_long_help(
+                "Interactive by default in a terminal: this command asks for missing values. \
+                 Pass --non-interactive to supply every value as a flag instead.",
+            );
         }
         command
     }

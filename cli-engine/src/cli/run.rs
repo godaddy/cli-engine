@@ -20,8 +20,8 @@ use super::{
         install_debug_transport_logger, parse_command_timeout,
     },
     lookup::{
-        find_command_by_colon_path, has_root_version_flag,
-        normalize_optional_global_flags_before_command,
+        auto_interactive_for, command_prefix_path, find_command_by_colon_path,
+        has_root_version_flag, normalize_optional_global_flags_before_command,
     },
     render::{
         render_bare_group_discovery, render_cli_error, render_completion_print, render_guide,
@@ -245,12 +245,16 @@ where
         Ok(matches) => matches,
         Err(err) => {
             // Attempt interactive recovery for missing required arguments.
+            let target = command_prefix_path(
+                &cli.root,
+                &positional_command_tokens(&clap_args, &cli.config.name, &bool_flags, &value_flags),
+            );
             if let Some(recovery) = crate::prompt::try_recover_missing_args(
                 &err,
                 &clap_args,
                 &cli.root,
                 &cli.config.name,
-                cli.config.auto_interactive,
+                auto_interactive_for(cli, &target),
             ) {
                 match recovery {
                     crate::prompt::RecoveryResult::Recovered { args } => {
@@ -290,7 +294,9 @@ where
     };
 
     let default_format = resolve_run_output_format(cli);
-    let flags = global_flags_from_matches(&matches, &default_format, cli.config.auto_interactive);
+    let auto_interactive =
+        auto_interactive_for(cli, &command_path_from_matches(&cli.config.name, &matches));
+    let flags = global_flags_from_matches(&matches, &default_format, auto_interactive);
     // Publish the --credential-store override so auth providers resolving
     // their storage backend see it at the top of the precedence chain.
     crate::config::set_credential_store_flag(flags.credential_store);

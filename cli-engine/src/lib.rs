@@ -155,11 +155,11 @@ pub use error::{
 };
 pub use feature_flags::{FeatureFlag, FlagEntry, FlagPolicy, FlagRegistry, Stage};
 pub use flags::{
-    GlobalFlags, InteractivityMode, app_id_env_prefix, debug_component_enabled,
-    default_output_format, derive_bool_flags, derive_value_flags, detect_interactive,
-    extract_command_path, extract_output_format, global_flags_from_matches, has_true_schema_flag,
-    min_stage_env_var, output_env_var, register_global_flags, register_reason_flag,
-    resolve_default_output_format,
+    GlobalFlags, InteractivityMode, InteractivityPolicy, app_id_env_prefix,
+    debug_component_enabled, default_output_format, derive_bool_flags, derive_value_flags,
+    detect_interactive, extract_command_path, extract_output_format, global_flags_from_matches,
+    has_true_schema_flag, min_stage_env_var, output_env_var, register_global_flags,
+    register_reason_flag, resolve_default_output_format,
 };
 pub use guide::{GuideEntry, parse_guides, parse_guides_from_markdown};
 pub use middleware::{

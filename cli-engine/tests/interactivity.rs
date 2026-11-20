@@ -159,3 +159,84 @@ async fn interactive_help_claims_tty_default_only_when_auto_interactive() {
     let auto = interactive_help(base().with_auto_interactive(true)).await;
     assert!(auto.contains("default when a TTY is detected"), "{auto}");
 }
+
+/// A CLI with one command per policy; each reports `ctx.is_interactive()`.
+fn policy_cli() -> Cli {
+    use cli_engine::InteractivityPolicy;
+
+    let command = |name: &'static str, policy: InteractivityPolicy| {
+        RuntimeCommandSpec::new_with_context(
+            CommandSpec::new(name, "Report interactivity")
+                .no_auth(true)
+                .with_interactivity(policy),
+            async |ctx| {
+                Ok(CommandResult::new(
+                    json!({ "interactive": ctx.is_interactive() }),
+                ))
+            },
+        )
+    };
+    Cli::new(
+        CliConfig::new("test-cli", "Test CLI", "test-cli").with_modules(vec![Module::new(
+            "Test",
+            move |_ctx| {
+                RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools"))
+                    .with_command(command("inherit", InteractivityPolicy::Inherit))
+                    .with_command(command("wizard", InteractivityPolicy::DefaultOnTty))
+                    .with_command(command("manual", InteractivityPolicy::OnRequest))
+            },
+        )]),
+    )
+}
+
+async fn reports_interactive(command: &str, flags: &[&str]) -> bool {
+    let mut args = vec!["test-cli", "tool", command, "--json"];
+    args.extend_from_slice(flags);
+    let output = policy_cli().run(args).await;
+    assert_eq!(output.exit_code, 0, "{}", output.rendered);
+    let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json output");
+    assert!(
+        value["data"]["interactive"].is_boolean(),
+        "no interactive field in {value}"
+    );
+    value["data"]["interactive"] == json!(true)
+}
+
+#[tokio::test]
+async fn explicit_flags_win_over_every_policy() {
+    for command in ["inherit", "wizard", "manual"] {
+        assert!(
+            reports_interactive(command, &["--interactive"]).await,
+            "{command} --interactive"
+        );
+        assert!(
+            !reports_interactive(command, &["--non-interactive"]).await,
+            "{command} --non-interactive"
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_policy_is_interactive_without_a_tty() {
+    // The test harness has no TTY on stdin, so even a DefaultOnTty command
+    // must not turn prompts on by itself.
+    for command in ["inherit", "wizard", "manual"] {
+        assert!(!reports_interactive(command, &[]).await, "{command}");
+    }
+}
+
+#[tokio::test]
+async fn default_on_tty_command_says_so_in_its_help() {
+    let help = async |command: &'static str| {
+        policy_cli()
+            .run(["test-cli", "tool", command, "--help"])
+            .await
+            .rendered
+    };
+    assert!(
+        help("wizard").await.contains("Interactive by default"),
+        "wizard help should mention the default"
+    );
+    assert!(!help("inherit").await.contains("Interactive by default"));
+    assert!(!help("manual").await.contains("Interactive by default"));
+}

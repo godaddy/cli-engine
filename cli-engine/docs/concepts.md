@@ -464,6 +464,12 @@ By default, a dry-run-promptable command is short-circuited generically: the han
 
 If the dry-run branch never needs a credential (no live API call to build the preview), prefer `CommandSpec::auth_optional()` over the default `Required` and check `dry_run()` before calling `credential()`/`credential_with_scopes()` — otherwise `Required` resolves the credential (and may trigger an interactive login) before the handler even runs, purely to render a preview that never uses it. If the preview itself needs a live call to build an accurate diff, `Required` and `Optional` behave identically, so the simpler fail-closed `Required` is fine.
 
+## Interactivity
+
+Whether a command prompts is resolved per invocation and read in the handler with `CommandContext::is_interactive()`. Precedence is: an explicit `--interactive` or `--non-interactive` flag, then the command's `InteractivityPolicy`, then the TTY check (stdin and stderr must both be terminals). With no TTY a command is never interactive by default.
+
+`CommandSpec::with_interactivity` sets the policy: `Inherit` (the default) follows `CliConfig::with_auto_interactive`; `DefaultOnTty` makes the command interactive by default on a terminal even when the CLI as a whole has not opted in, which suits a guided flow such as an `init` wizard; `OnRequest` makes it prompt only under `--interactive`, even when the CLI auto-detects. A `DefaultOnTty` command also gets a line in its long help saying it is interactive by default and that `--non-interactive` turns that off. The policy governs both the handler's `is_interactive()` and the engine's missing-required-argument recovery for that command.
+
 ## Feature Flags & Stages
 
 Feature flags classify command readiness rather than risk. `Stage` orders `Experimental < Beta < Ga`; the default is `Ga`, so gating is opt-in — a command with no flag declaration is fully visible under every policy.
