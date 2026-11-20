@@ -470,6 +470,10 @@ Whether a command prompts is resolved per invocation and read in the handler wit
 
 `CommandSpec::with_interactivity` sets the policy: `Inherit` (the default) follows `CliConfig::with_auto_interactive`; `DefaultOnTty` makes the command interactive by default on a terminal even when the CLI as a whole has not opted in, which suits a guided flow such as an `init` wizard; `OnRequest` makes it prompt only under `--interactive`, even when the CLI auto-detects. A `DefaultOnTty` command also gets a line in its long help saying it is interactive by default and that `--non-interactive` turns that off. The policy governs both the handler's `is_interactive()` and the engine's missing-required-argument recovery for that command.
 
+A handler that has to ask questions starts with `ctx.require_interactive("pass --name and --env")`, which fails with a fix hint when prompting is off (no terminal, or `--non-interactive`), then asks through `ctx.prompter()`. The `Prompter` trait offers `text` (with an optional validator that re-asks on a rejected answer), `select`, `confirm` and `multi_select`. A cancelled prompt exits with code 130, the same as the engine's own missing-argument recovery.
+
+The default prompter uses the terminal. In a test, `CliConfig::with_prompter` installs a `prompt::ScriptedPrompter` that replays a list of `prompt::Answer` values, so a prompting command runs end to end with no terminal. A prompt it has no matching answer for fails the run with a message naming the prompt, and `transcript()` returns every question asked, including the answers a validator rejected.
+
 ## Feature Flags & Stages
 
 Feature flags classify command readiness rather than risk. `Stage` orders `Experimental < Beta < Ga`; the default is `Ga`, so gating is opt-in — a command with no flag declaration is fully visible under every policy.

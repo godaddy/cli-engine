@@ -240,3 +240,113 @@ async fn default_on_tty_command_says_so_in_its_help() {
     assert!(!help("inherit").await.contains("Interactive by default"));
     assert!(!help("manual").await.contains("Interactive by default"));
 }
+
+mod prompting {
+    use std::sync::Arc;
+
+    use cli_engine::prompt::{Answer, Prompter, ScriptedPrompter, TextValidator};
+
+    use super::*;
+
+    /// A wizard that asks for a name (must be lowercase) and a confirmation.
+    fn wizard_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new_with_context(
+                            CommandSpec::new("init", "Ask questions")
+                                .no_auth(true)
+                                .with_interactivity(cli_engine::InteractivityPolicy::DefaultOnTty),
+                            async |ctx| {
+                                ctx.require_interactive("pass --name")?;
+                                let prompter = ctx.prompter();
+                                let lowercase: TextValidator = Arc::new(|input: &str| {
+                                    if !input.is_empty() && input == input.to_lowercase() {
+                                        Ok(())
+                                    } else {
+                                        Err("use lowercase".to_owned())
+                                    }
+                                });
+                                let name = prompter.text("Name", None, Some(lowercase))?;
+                                let sure = prompter.confirm("Create it?", true)?;
+                                Ok(CommandResult::new(json!({ "name": name, "sure": sure })))
+                            },
+                        ),
+                    )
+                })]),
+        )
+    }
+
+    #[tokio::test]
+    async fn scripted_answers_drive_a_command_and_a_bad_answer_is_asked_again() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("Acme"),
+            Answer::text("acme"),
+            Answer::Confirm(false),
+        ]));
+        let output = wizard_cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "init", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"], json!({ "name": "acme", "sure": false }));
+        assert_eq!(prompter.remaining(), 0);
+        assert_eq!(
+            prompter.transcript(),
+            ["Name", "  rejected: use lowercase", "Name", "Create it?"]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_interactive_stops_before_any_prompt_with_a_fix() {
+        let prompter = Arc::new(ScriptedPrompter::new([Answer::text("acme")]));
+        let output = wizard_cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "init", "--non-interactive", "--json"])
+            .await;
+
+        assert_ne!(output.exit_code, 0);
+        assert!(
+            output.rendered.contains("pass --name"),
+            "{}",
+            output.rendered
+        );
+        assert!(
+            output.rendered.contains("--non-interactive"),
+            "{}",
+            output.rendered
+        );
+        assert_eq!(prompter.remaining(), 1, "no prompt may have been asked");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_prompt_exits_130() {
+        let prompter = Arc::new(ScriptedPrompter::new([Answer::Cancel]));
+        let output = wizard_cli(prompter)
+            .run(["test-cli", "tool", "init", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 130, "{}", output.rendered);
+        assert!(output.rendered.contains("cancelled"), "{}", output.rendered);
+    }
+
+    #[test]
+    fn the_scripted_prompter_refuses_a_prompt_it_has_no_answer_for() {
+        let prompter = ScriptedPrompter::new([Answer::Confirm(true)]);
+        let err = prompter.text("Name", None, None).expect_err("wrong kind");
+        assert!(err.to_string().contains("wanted text"), "{err}");
+        let err = prompter.confirm("Sure?", true).expect_err("out of answers");
+        assert!(err.to_string().contains("ran out"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_text_answer_takes_the_default() {
+        let prompter = ScriptedPrompter::new([Answer::text("")]);
+        assert_eq!(
+            prompter.text("TTL", Some("3600"), None).expect("text"),
+            "3600"
+        );
+    }
+}

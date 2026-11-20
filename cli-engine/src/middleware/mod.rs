@@ -530,6 +530,11 @@ pub struct Middleware {
     pub debug: String,
     /// Whether the invocation is running in interactive mode.
     pub interactive: bool,
+    /// How handlers ask the user questions; `None` means the terminal.
+    ///
+    /// Set from [`CliConfig::with_prompter`](crate::CliConfig::with_prompter).
+    /// Handlers use [`CommandContext::prompter`](crate::CommandContext::prompter).
+    pub prompter: Option<Arc<dyn crate::prompt::Prompter>>,
     /// Output schema registry.
     pub schema_registry: SchemaRegistry,
     /// Human output view registry.

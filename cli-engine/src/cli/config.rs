@@ -242,6 +242,10 @@ pub struct CliConfig {
     /// backwards compatibility; flip to `true` once the CLI's commands have
     /// been tested under interactive prompting.
     pub auto_interactive: bool,
+    /// How commands ask questions. `None` uses the terminal.
+    ///
+    /// Set via [`CliConfig::with_prompter`]; mainly for tests.
+    pub prompter: Option<Arc<dyn crate::prompt::Prompter>>,
 }
 
 impl CliConfig {
@@ -371,6 +375,19 @@ impl CliConfig {
     #[must_use]
     pub fn with_auto_interactive(mut self, enabled: bool) -> Self {
         self.auto_interactive = enabled;
+        self
+    }
+
+    /// Replaces how commands ask questions.
+    ///
+    /// Commands reach it through
+    /// [`CommandContext::prompter`](crate::CommandContext::prompter). The
+    /// default asks on the terminal; install a
+    /// [`ScriptedPrompter`](crate::prompt::ScriptedPrompter) to run a
+    /// prompting command in a test without one.
+    #[must_use]
+    pub fn with_prompter(mut self, prompter: Arc<dyn crate::prompt::Prompter>) -> Self {
+        self.prompter = Some(prompter);
         self
     }
 
@@ -814,6 +831,7 @@ impl std::fmt::Debug for CliConfig {
             .field("has_on_shutdown", &self.on_shutdown.is_some())
             .field("has_extra_search_docs", &self.extra_search_docs.is_some())
             .field("has_root_next_actions", &self.root_next_actions.is_some())
+            .field("has_prompter", &self.prompter.is_some())
             .field("admin_category", &self.admin_category)
             .field("config_schema", &self.config_schema)
             .field(
