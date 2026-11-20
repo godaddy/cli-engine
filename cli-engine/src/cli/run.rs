@@ -249,7 +249,13 @@ where
                 &cli.root,
                 &positional_command_tokens(&clap_args, &cli.config.name, &bool_flags, &value_flags),
             );
-            if let Some(recovery) = crate::prompt::try_recover_missing_args(
+            let terminal = crate::prompt::TerminalPrompter;
+            let prompter: &dyn crate::prompt::Prompter = match &cli.middleware.prompter {
+                Some(prompter) => prompter.as_ref(),
+                None => &terminal,
+            };
+            if let Some(recovery) = crate::prompt::try_recover_missing_args_with(
+                prompter,
                 &err,
                 &clap_args,
                 &cli.root,

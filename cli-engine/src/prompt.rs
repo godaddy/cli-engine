@@ -398,6 +398,31 @@ pub fn try_recover_missing_args(
     app_name: &str,
     auto_interactive: bool,
 ) -> Option<RecoveryResult> {
+    try_recover_missing_args_with(
+        &TerminalPrompter,
+        err,
+        original_args,
+        command,
+        app_name,
+        auto_interactive,
+    )
+}
+
+/// Like [`try_recover_missing_args`], asking through `prompter` instead of the
+/// terminal.
+///
+/// A text answer is checked against the argument's own value parser, so a
+/// value clap would reject is explained and asked again instead of failing
+/// the re-parse. The CLI passes the prompter set with
+/// [`CliConfig::with_prompter`](crate::CliConfig::with_prompter).
+pub fn try_recover_missing_args_with(
+    prompter: &dyn Prompter,
+    err: &clap::error::Error,
+    original_args: &[String],
+    command: &clap::Command,
+    app_name: &str,
+    auto_interactive: bool,
+) -> Option<RecoveryResult> {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
 
     if err.kind() != ErrorKind::MissingRequiredArgument {
@@ -447,7 +472,7 @@ pub fn try_recover_missing_args(
                 .iter()
                 .map(|alt| format_missing_arg_label(alt, find_arg_def(leaf_command, alt)))
                 .collect();
-            match prompt_select("Choose one of the required options:", &labels) {
+            match prompter.select("Choose one of the required options:", &labels) {
                 Ok(idx) => alternatives[idx].clone(),
                 Err(_) => {
                     let resume = build_resume_command(app_name, &already_supplied[1..]);
@@ -476,7 +501,13 @@ pub fn try_recover_missing_args(
         }
 
         let prompt_message = format_prompt_message(&selected_raw, arg_def);
-        let value = match infer_and_prompt(&prompt_message, arg_def) {
+        let value = match infer_and_prompt(
+            prompter,
+            &prompt_message,
+            arg_def,
+            command,
+            &already_supplied,
+        ) {
             Ok(v) => v,
             Err(_) => {
                 // User cancelled — build a resume command hint.
@@ -587,8 +618,14 @@ fn resolve_leaf_command<'cmd>(
 ///
 /// - If the arg has `possible_values`, use a Select prompt.
 /// - If the arg is boolean-like (action is SetTrue/SetFalse), use Confirm.
-/// - Otherwise, use a Text prompt.
-fn infer_and_prompt(message: &str, arg_def: Option<&clap::Arg>) -> crate::Result<String> {
+/// - Otherwise, use a Text prompt that rejects values clap would reject.
+fn infer_and_prompt(
+    prompter: &dyn Prompter,
+    message: &str,
+    arg_def: Option<&clap::Arg>,
+    root: &clap::Command,
+    supplied: &[String],
+) -> crate::Result<String> {
     if let Some(arg) = arg_def {
         // Check for possible values (enum-like).
         let possible: Vec<String> = arg
@@ -599,7 +636,7 @@ fn infer_and_prompt(message: &str, arg_def: Option<&clap::Arg>) -> crate::Result
             .collect();
 
         if !possible.is_empty() {
-            let idx = prompt_select(message, &possible)?;
+            let idx = prompter.select(message, &possible)?;
             return Ok(possible[idx].clone());
         }
 
@@ -608,13 +645,52 @@ fn infer_and_prompt(message: &str, arg_def: Option<&clap::Arg>) -> crate::Result
             arg.get_action(),
             clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
         ) {
-            let confirmed = prompt_confirm(message, true)?;
+            let confirmed = prompter.confirm(message, true)?;
             return Ok(confirmed.to_string());
         }
+
+        let validator = value_validator(arg.clone(), root.clone(), supplied.to_vec());
+        return prompter.text(message, None, Some(validator));
     }
 
     // Default: free text input.
-    prompt_text(message, None)
+    prompter.text(message, None, None)
+}
+
+/// Builds a validator that asks clap whether `arg` accepts the typed value.
+///
+/// It re-parses the supplied arguments plus the candidate and keeps only the
+/// errors about the candidate itself. Other errors, such as further required
+/// arguments still missing, are not the user's mistake in this answer.
+fn value_validator(arg: clap::Arg, root: clap::Command, supplied: Vec<String>) -> TextValidator {
+    use clap::error::ErrorKind;
+
+    std::sync::Arc::new(move |input: &str| {
+        if input.is_empty() {
+            return Err("A value is required.".to_owned());
+        }
+        let mut tokens = Vec::new();
+        append_prompted_arg(&mut tokens, &arg, input);
+        let mut args = supplied.clone();
+        args.extend(tokens);
+        match root.clone().try_get_matches_from(args) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ValueValidation | ErrorKind::InvalidValue | ErrorKind::InvalidUtf8
+                ) =>
+            {
+                Err(first_line(&error.render().to_string()))
+            }
+            _ => Ok(()),
+        }
+    })
+}
+
+/// The first line of a clap error, without its `error:` prefix.
+fn first_line(rendered: &str) -> String {
+    let line = rendered.lines().next().unwrap_or_default();
+    line.trim_start_matches("error:").trim().to_owned()
 }
 
 /// Strip clap decoration from a single token (`--team-name` → `team-name`,
@@ -638,17 +714,26 @@ fn missing_arg_lookup_key(raw: &str) -> &str {
 
 fn find_arg_def<'cmd>(command: &'cmd clap::Command, raw_name: &str) -> Option<&'cmd clap::Arg> {
     let clean_name = missing_arg_lookup_key(raw_name);
-    command.get_arguments().find(|a| {
-        a.get_id().as_str() == clean_name
-            || a.get_long().is_some_and(|l| l == clean_name)
-            || a.get_value_names().is_some_and(|vn| {
-                vn.iter().any(|v| {
-                    v.eq_ignore_ascii_case(strip_arg_decoration(
-                        raw_name.split_whitespace().nth(1).unwrap_or(raw_name),
-                    ))
+    // An exact id or long-name match wins. Matching on the value name is only
+    // a fallback, because unrelated flags often share one (`--provider-name
+    // <NAME>` and `--service-name <NAME>`), and taking the first such flag
+    // would prompt for, and set, the wrong one.
+    command
+        .get_arguments()
+        .find(|a| {
+            a.get_id().as_str() == clean_name || a.get_long().is_some_and(|l| l == clean_name)
+        })
+        .or_else(|| {
+            command.get_arguments().find(|a| {
+                a.get_value_names().is_some_and(|vn| {
+                    vn.iter().any(|v| {
+                        v.eq_ignore_ascii_case(strip_arg_decoration(
+                            raw_name.split_whitespace().nth(1).unwrap_or(raw_name),
+                        ))
+                    })
                 })
             })
-    })
+        })
 }
 
 fn format_missing_arg_label(raw_name: &str, arg_def: Option<&clap::Arg>) -> String {
@@ -753,7 +838,6 @@ pub fn build_resume_command(app_name: &str, supplied_args: &[String]) -> String 
     parts.join(" ")
 }
 
-/// Convert an `inquire` error into a CLI-engine error.
 /// The error for a command that needs answers it cannot ask for.
 ///
 /// `instead` finishes "Instead, ..." in the fix hint. See
@@ -773,6 +857,7 @@ pub fn needs_interactive(instead: &str) -> CliCoreError {
 /// the engine's own missing-argument recovery exits with.
 pub const CANCELLED_EXIT_CODE: i32 = 130;
 
+/// Convert an `inquire` error into a CLI-engine error.
 fn inquire_error_to_cli(err: inquire::InquireError) -> CliCoreError {
     match err {
         inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted => {
@@ -1057,6 +1142,27 @@ mod tests {
             .help("Enter domain:");
         let msg = format_prompt_message("--domain", Some(&arg));
         assert_eq!(msg, "Enter domain:");
+    }
+
+    #[test]
+    fn find_arg_def_prefers_the_exact_flag_over_one_sharing_its_value_name() {
+        let cmd = clap::Command::new("test")
+            .arg(
+                clap::Arg::new("provider-name")
+                    .long("provider-name")
+                    .value_name("NAME")
+                    .required(true),
+            )
+            .arg(
+                clap::Arg::new("service-name")
+                    .long("service-name")
+                    .value_name("NAME")
+                    .required(true),
+            );
+        let found = find_arg_def(&cmd, "--service-name <NAME>").expect("arg");
+        assert_eq!(found.get_id().as_str(), "service-name");
+        let found = find_arg_def(&cmd, "--provider-name <NAME>").expect("arg");
+        assert_eq!(found.get_id().as_str(), "provider-name");
     }
 
     #[test]

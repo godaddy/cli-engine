@@ -349,4 +349,72 @@ mod prompting {
             "3600"
         );
     }
+
+    /// A command whose required args the engine's recovery asks for.
+    fn recovery_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("deploy", "Deploy")
+                                .no_auth(true)
+                                .with_arg(
+                                    Arg::new("port")
+                                        .long("port")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(u16)),
+                                )
+                                .with_arg(
+                                    Arg::new("env")
+                                        .long("env")
+                                        .required(true)
+                                        .value_parser(["dev", "prod"]),
+                                ),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "port": args.get("port"),
+                                    "env": args.get("env"),
+                                })))
+                            },
+                        ),
+                    )
+                })]),
+        )
+    }
+
+    #[tokio::test]
+    async fn missing_arg_recovery_asks_through_the_prompter_and_reasks_a_bad_value() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("eighty"),
+            Answer::text("8080"),
+            Answer::Select(1),
+        ]));
+        let output = recovery_cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "deploy", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["port"], json!(8080));
+        assert_eq!(value["data"]["env"], json!("prod"));
+        assert_eq!(prompter.remaining(), 0);
+        let asked = prompter.transcript();
+        assert!(
+            asked.iter().any(|line| line.starts_with("  rejected:")),
+            "the bad port should have been rejected and re-asked: {asked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_missing_arg_recovery_prints_a_resume_command() {
+        let prompter = Arc::new(ScriptedPrompter::new([Answer::Cancel]));
+        let output = recovery_cli(prompter)
+            .run(["test-cli", "tool", "deploy", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 130, "{}", output.rendered);
+        assert!(output.rendered.contains("Resume"), "{}", output.rendered);
+    }
 }
