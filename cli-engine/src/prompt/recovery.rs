@@ -431,6 +431,9 @@ pub(super) fn answer_problem(
 ) -> Option<String> {
     use clap::error::ErrorKind;
 
+    if smuggles_option(arg, input) {
+        return Some("A value cannot start with '-' here.".to_owned());
+    }
     let mut tokens = PromptedTokens::after_leaf(root, supplied);
     tokens.push(Some(arg), input);
     match root.clone().try_get_matches_from(tokens.applied(supplied)) {
@@ -662,6 +665,21 @@ pub(super) fn append_prompted_arg(prompted_args: &mut Vec<String>, arg: &clap::A
         prompted_args.push(flag);
         prompted_args.push(value.to_owned());
     }
+}
+
+/// Whether splitting `input` for a multi-value `arg` would let a token read as
+/// another option, such as answering `1 --force` and switching `--force` on.
+///
+/// clap only treats a leading-hyphen token as a value when the argument says
+/// so, so the same rule applies here: every token must be a value of `arg`.
+fn smuggles_option(arg: &clap::Arg, input: &str) -> bool {
+    if !takes_many(arg) || arg.is_allow_hyphen_values_set() {
+        return false;
+    }
+    let negative_ok = arg.is_allow_negative_numbers_set();
+    input.split_whitespace().any(|token| {
+        token.len() > 1 && token.starts_with('-') && !(negative_ok && token.parse::<f64>().is_ok())
+    })
 }
 
 /// Whether `arg` takes several separate values on the command line, so one

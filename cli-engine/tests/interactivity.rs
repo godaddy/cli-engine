@@ -1283,4 +1283,63 @@ mod prompting {
             prompter.transcript()
         );
     }
+
+    #[tokio::test]
+    async fn an_answer_cannot_carry_another_option_into_the_command() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("1 --force"),
+            Answer::text("1 2"),
+        ]));
+        let shared: Arc<dyn Prompter> = prompter.clone();
+        let cli = Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(shared)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("sum", "Numbers and a switch")
+                                .no_auth(true)
+                                .with_arg(
+                                    Arg::new("numbers")
+                                        .long("numbers")
+                                        .num_args(1..)
+                                        .value_parser(clap::value_parser!(u32))
+                                        .required(true),
+                                )
+                                .with_arg(
+                                    Arg::new("force")
+                                        .long("force")
+                                        .action(clap::ArgAction::SetTrue),
+                                ),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "numbers": args.get("numbers"),
+                                    "force": args.get("force"),
+                                })))
+                            },
+                        ),
+                    )
+                })]),
+        );
+        let output = cli
+            .run(["test-cli", "tool", "sum", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["numbers"], json!([1, 2]));
+        assert_eq!(
+            value["data"]["force"],
+            json!(false),
+            "the answer must not switch --force on"
+        );
+        assert!(
+            prompter
+                .transcript()
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
 }
