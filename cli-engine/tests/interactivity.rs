@@ -988,4 +988,142 @@ mod prompting {
         assert_eq!(value["data"]["provider"], json!("Acme"));
         assert_eq!(value["data"]["service"], json!("Email"));
     }
+
+    /// Options with requirements, for the answer-introduces-a-requirement cases.
+    fn requires_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("ship", "Ship it")
+                                .no_auth(true)
+                                .with_arg(Arg::new("destination").long("destination"))
+                                .with_arg(
+                                    Arg::new("publish").long("publish").requires("destination"),
+                                )
+                                .with_prompted_args(["publish", "destination"]),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "publish": args.get("publish"),
+                                    "destination": args.get("destination"),
+                                })))
+                            },
+                        ),
+                    )
+                })]),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_introduces_a_new_requirement_is_not_accepted() {
+        // `--publish` needs `--destination`, which has not been given.
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("now"),
+            Answer::text("prod"),
+        ]));
+        let output = requires_cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "ship", "--interactive", "--json"])
+            .await;
+
+        let transcript = prompter.transcript();
+        assert!(
+            transcript
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "an answer that leaves the command invalid must be re-asked: {transcript:?}"
+        );
+        assert_ne!(output.exit_code, 0, "{}", output.rendered);
+    }
+
+    #[tokio::test]
+    async fn options_go_before_a_variadic_list_that_accepts_hyphenated_values() {
+        let (value, _, code, rendered) = run_edge(
+            [
+                Answer::text("hello"),
+                Answer::Confirm(false),
+                Answer::text(""),
+                Answer::text(""),
+            ],
+            &["file.json"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["description"], json!("hello"));
+        assert!(
+            value["data"]["files"].to_string().contains("file.json")
+                && !value["data"]["files"].to_string().contains("hello"),
+            "the answer must not be swallowed by the variadic list: {value}"
+        );
+    }
+
+    #[test]
+    fn a_resume_command_keeps_an_answer_with_spaces_as_one_argument() {
+        let resume = cli_engine::prompt::build_resume_command(
+            "my cli",
+            &[
+                "--note".to_owned(),
+                "hello world".to_owned(),
+                "plain".to_owned(),
+            ],
+        );
+        assert_eq!(resume, "\"my cli\" --note \"hello world\" plain");
+    }
+
+    #[tokio::test]
+    async fn cancelling_after_a_spaced_answer_prints_a_copyable_resume_command() {
+        let (_, _, code, rendered) = run_optional(
+            [Answer::text("hello world"), Answer::Cancel],
+            &["--interactive"],
+        )
+        .await;
+
+        assert_eq!(code, 130, "{rendered}");
+        assert!(rendered.contains("--note \"hello world\""), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_failure_uses_the_requested_output_format() {
+        let prompter = Arc::new(ScriptedPrompter::new([]));
+        let output = optional_cli(prompter)
+            .run([
+                "test-cli",
+                "tool",
+                "make",
+                "--name",
+                "x",
+                "--interactive",
+                "--toon",
+            ])
+            .await;
+
+        assert_ne!(output.exit_code, 0, "{}", output.rendered);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&output.rendered).is_err(),
+            "--toon must not produce a JSON diagnostic: {}",
+            output.rendered
+        );
+        assert!(
+            output.rendered.contains("ran out of answers"),
+            "{}",
+            output.rendered
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovery_failure_uses_the_requested_output_format() {
+        let prompter = Arc::new(ScriptedPrompter::new([]));
+        let output = recovery_cli(prompter)
+            .run(["test-cli", "tool", "deploy", "--interactive", "--toon"])
+            .await;
+
+        assert_ne!(output.exit_code, 0, "{}", output.rendered);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&output.rendered).is_err(),
+            "--toon must not produce a JSON diagnostic: {}",
+            output.rendered
+        );
+    }
 }

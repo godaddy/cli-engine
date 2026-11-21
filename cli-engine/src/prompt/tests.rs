@@ -83,6 +83,27 @@ fn build_resume_command_with_partial_args() {
 }
 
 #[test]
+fn whitespace_only_input_is_empty_for_the_scripted_prompter() {
+    use super::{Answer, Prompter, ScriptedPrompter};
+    use std::sync::Arc;
+
+    let required: super::TextValidator = Arc::new(|input: &str| {
+        if input.is_empty() {
+            Err("A value is required.".to_owned())
+        } else {
+            Ok(())
+        }
+    });
+    let prompter = ScriptedPrompter::new([Answer::text("   "), Answer::text("ok")]);
+    let answer = prompter.text("Name", None, Some(required)).expect("answer");
+    assert_eq!(answer, "ok");
+    assert_eq!(
+        prompter.transcript(),
+        ["Name", "  rejected: A value is required.", "Name"]
+    );
+}
+
+#[test]
 fn resolve_leaf_command_walks_subcommands() {
     let root = clap::Command::new("my-cli").subcommand(
         clap::Command::new("project")

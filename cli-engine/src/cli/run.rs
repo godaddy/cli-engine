@@ -287,10 +287,11 @@ where
                         );
                     }
                     crate::prompt::RecoveryResult::Failed { error } => {
-                        return finish_run(
-                            cli,
-                            render_cli_error(&cli.middleware, &error, &cli.config.app_id),
-                        );
+                        // The run has not parsed its flags yet, so read the
+                        // requested format from the raw arguments.
+                        let format =
+                            extract_output_format(&clap_args, &resolve_run_output_format(cli));
+                        return finish_run(cli, render_prompt_failure(cli, &format, &error));
                     }
                 }
             } else {
@@ -659,6 +660,13 @@ pub(super) fn resolve_run_output_format(cli: &Cli) -> String {
     )
 }
 
+/// Renders a prompt failure in the output format the invocation asked for.
+fn render_prompt_failure(cli: &Cli, output_format: &str, error: &CliCoreError) -> CliRunOutput {
+    let mut middleware = cli.middleware.clone();
+    middleware.output_format = output_format.to_owned();
+    render_cli_error(&middleware, error, &cli.config.app_id)
+}
+
 /// Asks for the optional args the command named with
 /// [`CommandSpec::with_prompted_args`](crate::CommandSpec::with_prompted_args),
 /// then re-parses with the answers added. Returns the matches unchanged when
@@ -676,13 +684,12 @@ fn prompt_for_optional_args(
         return Ok(matches);
     }
     let default_format = resolve_run_output_format(cli);
-    let interactive = global_flags_from_matches(
+    let flags = global_flags_from_matches(
         &matches,
         &default_format,
         auto_interactive_for(cli, &command_path),
-    )
-    .interactive;
-    if !interactive {
+    );
+    if !flags.interactive {
         return Ok(matches);
     }
     let Some(leaf) = find_command_by_colon_path(&cli.root, &command_path) else {
@@ -717,11 +724,9 @@ fn prompt_for_optional_args(
             exit_code: crate::prompt::CANCELLED_EXIT_CODE,
             rendered: format!("Cancelled. Resume with:\n  {resume}\n"),
         }),
-        crate::prompt::OptionalPromptResult::Failed { error } => Err(render_cli_error(
-            &cli.middleware,
-            &error,
-            &cli.config.app_id,
-        )),
+        crate::prompt::OptionalPromptResult::Failed { error } => {
+            Err(render_prompt_failure(cli, &flags.output_format, &error))
+        }
     }
 }
 

@@ -95,7 +95,7 @@ pub fn try_recover_missing_args_with(
     ));
 
     // Collect prompted values, respecting arg declaration order.
-    let mut prompted = PromptedTokens::default();
+    let mut prompted = PromptedTokens::after_leaf(command, original_args);
 
     for raw_name in &missing_names {
         let selected_raw = if raw_name.contains('|') {
@@ -172,13 +172,27 @@ pub(super) fn is_cancelled(err: &CliCoreError) -> bool {
 /// Tokens gathered from prompts, kept apart so options can be placed before a
 /// `--` separator while positional answers stay after it. Appending an option
 /// after `--` would hand it to the command as positional input.
+///
+/// Options are inserted right after the leaf command's name rather than at the
+/// end, so a variadic value list that accepts hyphenated values cannot swallow
+/// them.
 #[derive(Debug, Default)]
 pub(super) struct PromptedTokens {
     options: Vec<String>,
     positionals: Vec<String>,
+    anchor: Option<usize>,
 }
 
 impl PromptedTokens {
+    /// Starts an empty set whose options will be inserted after the leaf
+    /// command named in `args`.
+    pub(super) fn after_leaf(root: &clap::Command, args: &[String]) -> Self {
+        Self {
+            anchor: leaf_end_index(root, args),
+            ..Self::default()
+        }
+    }
+
     /// Records `value` as the answer for `arg` (`None` is a bare positional).
     pub(super) fn push(&mut self, arg: Option<&clap::Arg>, value: &str) {
         match arg {
@@ -189,14 +203,37 @@ impl PromptedTokens {
         }
     }
 
-    /// `args` with these tokens added: options before any `--`, positionals last.
+    /// `args` with these tokens added: options after the leaf command name
+    /// and before any `--`, positionals last.
     pub(super) fn applied(&self, args: &[String]) -> Vec<String> {
         let mut out = args.to_vec();
-        let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
+        let separator = out.iter().position(|a| a == "--").unwrap_or(out.len());
+        let at = self
+            .anchor
+            .map_or(separator, |anchor| anchor.min(separator));
         out.splice(at..at, self.options.iter().cloned());
         out.extend(self.positionals.iter().cloned());
         out
     }
+}
+
+/// Index just past the leaf command's name in `args`, if one is named.
+fn leaf_end_index(root: &clap::Command, args: &[String]) -> Option<usize> {
+    let mut current = root;
+    let mut end = None;
+    for (index, arg) in args.iter().enumerate().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if let Some(sub) = current.find_subcommand(arg) {
+            current = sub;
+            end = Some(index + 1);
+        }
+    }
+    end
 }
 
 /// Outcome of a "did you mean X?" correction prompt.
@@ -358,10 +395,12 @@ pub(super) fn value_validator(
 /// Why clap would refuse `input` as the answer for `arg`, or `None` when it
 /// would accept it.
 ///
-/// Re-parses `supplied` plus the answer. Only a missing required argument is
-/// tolerated, since other arguments may simply not have been asked for yet;
-/// every other failure, including an answer that reads as a flag or `--help`,
-/// is the answer's fault.
+/// Re-parses `supplied` plus the answer. Required arguments that were already
+/// missing before the answer are tolerated, since they may simply not have
+/// been asked for yet. Anything else is the answer's fault: a parse failure
+/// (including an answer that reads as a flag or `--help`), a requirement the
+/// answer introduces, the answered argument still being unset, or the answer
+/// landing in a different argument than the one asked about.
 pub(super) fn answer_problem(
     arg: &clap::Arg,
     root: &clap::Command,
@@ -370,18 +409,77 @@ pub(super) fn answer_problem(
 ) -> Option<String> {
     use clap::error::ErrorKind;
 
-    let mut tokens = PromptedTokens::default();
+    let mut tokens = PromptedTokens::after_leaf(root, supplied);
     tokens.push(Some(arg), input);
     match root.clone().try_get_matches_from(tokens.applied(supplied)) {
-        Ok(_) => None,
+        Ok(matches) => {
+            (!populated(&matches, arg)).then(|| "That value could not be applied.".to_owned())
+        }
         Err(error) => match error.kind() {
-            ErrorKind::MissingRequiredArgument => None,
+            ErrorKind::MissingRequiredArgument => missing_problem(&error, arg, root, supplied),
             ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
                 Some("That is not a valid value.".to_owned())
             }
             _ => Some(first_line(&error.render().to_string())),
         },
     }
+}
+
+/// Whether `arg` was set from the command line in a successful parse.
+fn populated(matches: &clap::ArgMatches, arg: &clap::Arg) -> bool {
+    let leaf = crate::command::leaf_matches(matches);
+    match leaf.try_contains_id(arg.get_id().as_str()) {
+        Ok(present) => {
+            present
+                && leaf.value_source(arg.get_id().as_str())
+                    == Some(clap::parser::ValueSource::CommandLine)
+        }
+        // Not an argument of the matched command, so nothing to check.
+        Err(_) => true,
+    }
+}
+
+/// Judges a missing-required-argument failure after an answer: only
+/// requirements that were already pending are the user's to fill in later.
+fn missing_problem(
+    error: &clap::error::Error,
+    arg: &clap::Arg,
+    root: &clap::Command,
+    supplied: &[String],
+) -> Option<String> {
+    let leaf = resolve_leaf_command(root, supplied, root.get_name())?;
+    let after = missing_ids(error, leaf);
+    let before = root
+        .clone()
+        .try_get_matches_from(supplied)
+        .err()
+        .map(|error| missing_ids(&error, leaf))
+        .unwrap_or_default();
+
+    if after.iter().any(|id| id == arg.get_id().as_str()) {
+        return Some("A value is required.".to_owned());
+    }
+    after
+        .iter()
+        .any(|id| !before.contains(id))
+        .then(|| "That answer also needs other options to be given.".to_owned())
+}
+
+/// Ids of the arguments a missing-required-argument error names.
+fn missing_ids(error: &clap::error::Error, leaf: &clap::Command) -> Vec<String> {
+    use clap::error::{ContextKind, ContextValue};
+
+    let names = match error.get(ContextKind::InvalidArg) {
+        Some(ContextValue::Strings(names)) => names.clone(),
+        Some(ContextValue::String(name)) => vec![name.clone()],
+        _ => return Vec::new(),
+    };
+    names
+        .iter()
+        .map(|name| {
+            find_arg_def(leaf, name).map_or_else(|| name.clone(), |arg| arg.get_id().to_string())
+        })
+        .collect()
 }
 
 /// The first line of a clap error, without its `error:` prefix.
@@ -555,9 +653,13 @@ pub(super) fn format_prompt_message(raw_name: &str, arg_def: Option<&clap::Arg>)
 
 /// Build a resume command string from the already-supplied args.
 ///
-/// Shows the user what to run to continue where they left off.
+/// Shows the user what to run to continue where they left off. Each word is
+/// shell-quoted, so an answer such as `hello world` stays one argument when the
+/// command is copied.
 pub fn build_resume_command(app_name: &str, supplied_args: &[String]) -> String {
-    let mut parts = vec![app_name.to_owned()];
-    parts.extend(supplied_args.iter().cloned());
-    parts.join(" ")
+    std::iter::once(app_name)
+        .chain(supplied_args.iter().map(String::as_str))
+        .map(crate::cli::quote_pagination_value)
+        .collect::<Vec<_>>()
+        .join(" ")
 }

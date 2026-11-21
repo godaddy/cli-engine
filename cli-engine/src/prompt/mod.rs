@@ -60,8 +60,10 @@ pub fn prompt_text_with_validation(
     if let Some(d) = default {
         prompt = prompt.with_default(d);
     }
+    // The returned answer is trimmed, so validate what will actually be
+    // returned. Otherwise whitespace alone would pass a non-empty check.
     prompt = prompt.with_validator(move |input: &str| {
-        Ok(match (validator)(input) {
+        Ok(match (validator)(input.trim()) {
             Ok(()) => inquire::validator::Validation::Valid,
             Err(msg) => inquire::validator::Validation::Invalid(msg.into()),
         })

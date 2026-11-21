@@ -48,7 +48,7 @@ pub fn prompt_optional_args(
 ) -> OptionalPromptResult {
     use clap::parser::ValueSource;
 
-    let mut prompted = PromptedTokens::default();
+    let mut prompted = PromptedTokens::after_leaf(root, supplied);
 
     for id in prompted_ids {
         let Some(arg) = leaf.get_arguments().find(|a| a.get_id().as_str() == id) else {
