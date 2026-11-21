@@ -52,6 +52,48 @@ impl InteractivityMode {
     }
 }
 
+/// How a single command decides whether it runs interactively when the user
+/// passes neither `--interactive` nor `--non-interactive`.
+///
+/// Set per command with
+/// [`CommandSpec::with_interactivity`](crate::CommandSpec::with_interactivity).
+/// An explicit `--interactive` or `--non-interactive` always wins over the
+/// policy, and a process without a TTY (stdin and stderr) is never interactive
+/// by default, whatever the policy says.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InteractivityPolicy {
+    /// Follow the CLI-wide setting
+    /// ([`CliConfig::with_auto_interactive`](crate::CliConfig::with_auto_interactive)).
+    /// This is the default.
+    #[default]
+    Inherit,
+    /// Interactive by default when a TTY is detected, even if the CLI as a
+    /// whole has not opted into auto-interactive mode.
+    ///
+    /// For commands that are a guided flow, such as an `init` wizard, and are
+    /// useless without answers.
+    DefaultOnTty,
+    /// Interactive only when the user passes `--interactive`, even if the CLI
+    /// as a whole auto-detects a TTY.
+    ///
+    /// For commands where a surprise prompt would be harmful, such as ones
+    /// that are routinely run from scripts attached to a terminal.
+    OnRequest,
+}
+
+impl InteractivityPolicy {
+    /// Resolves the policy against the CLI-wide `auto_interactive` setting,
+    /// returning whether TTY auto-detection applies to the command.
+    #[must_use]
+    pub fn auto_interactive(self, cli_auto_interactive: bool) -> bool {
+        match self {
+            Self::Inherit => cli_auto_interactive,
+            Self::DefaultOnTty => true,
+            Self::OnRequest => false,
+        }
+    }
+}
+
 impl From<bool> for InteractivityMode {
     fn from(interactive: bool) -> Self {
         if interactive {
@@ -315,6 +357,18 @@ mod tests {
             help_text(&["testcli", "sub", "-h"]),
             help_text(&["testcli", "sub", "--help"])
         );
+    }
+
+    #[test]
+    fn interactivity_policy_resolves_against_the_cli_setting() {
+        use super::InteractivityPolicy::{DefaultOnTty, Inherit, OnRequest};
+        assert!(!Inherit.auto_interactive(false));
+        assert!(Inherit.auto_interactive(true));
+        assert!(DefaultOnTty.auto_interactive(false));
+        assert!(DefaultOnTty.auto_interactive(true));
+        assert!(!OnRequest.auto_interactive(false));
+        assert!(!OnRequest.auto_interactive(true));
+        assert_eq!(super::InteractivityPolicy::default(), Inherit);
     }
 
     #[test]

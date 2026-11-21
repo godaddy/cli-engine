@@ -291,6 +291,40 @@ impl CommandContext {
         self.middleware.interactive
     }
 
+    /// Returns how this invocation asks the user questions.
+    ///
+    /// The terminal unless the CLI was built with
+    /// [`CliConfig::with_prompter`](crate::CliConfig::with_prompter). Call
+    /// this only after [`is_interactive`](Self::is_interactive) or
+    /// [`require_interactive`](Self::require_interactive) says prompting is
+    /// appropriate.
+    #[must_use]
+    pub fn prompter(&self) -> Arc<dyn crate::prompt::Prompter> {
+        self.middleware
+            .prompter
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::prompt::TerminalPrompter))
+    }
+
+    /// Fails unless this invocation is interactive, so a handler that has to
+    /// ask questions can stop with a message that tells the caller what to do
+    /// instead.
+    ///
+    /// `instead` finishes the sentence "Instead, ..." in the fix hint, for
+    /// example `"pass --provider-id and --service-id"`. The engine adds the
+    /// reason, which is either `--non-interactive` or the lack of a terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CliCoreError`](crate::CliCoreError) with a fix hint when
+    /// [`is_interactive`](Self::is_interactive) is `false`.
+    pub fn require_interactive(&self, instead: &str) -> Result<()> {
+        if self.is_interactive() {
+            return Ok(());
+        }
+        Err(crate::prompt::needs_interactive(instead))
+    }
+
     /// Returns the resolved [`InteractivityMode`](crate::InteractivityMode).
     ///
     /// Equivalent to [`is_interactive`](Self::is_interactive) but returns the

@@ -20,8 +20,8 @@ use super::{
         install_debug_transport_logger, parse_command_timeout,
     },
     lookup::{
-        find_command_by_colon_path, has_root_version_flag,
-        normalize_optional_global_flags_before_command,
+        auto_interactive_for, command_prefix_path, find_command_by_colon_path,
+        has_root_version_flag, normalize_optional_global_flags_before_command,
     },
     render::{
         render_bare_group_discovery, render_cli_error, render_completion_print, render_guide,
@@ -241,21 +241,31 @@ where
         }
     }
 
-    let matches = match cli.root.clone().try_get_matches_from(&clap_args) {
-        Ok(matches) => matches,
+    let (matches, parsed_args) = match cli.root.clone().try_get_matches_from(&clap_args) {
+        Ok(matches) => (matches, clap_args.clone()),
         Err(err) => {
             // Attempt interactive recovery for missing required arguments.
-            if let Some(recovery) = crate::prompt::try_recover_missing_args(
+            let target = command_prefix_path(
+                &cli.root,
+                &positional_command_tokens(&clap_args, &cli.config.name, &bool_flags, &value_flags),
+            );
+            let terminal = crate::prompt::TerminalPrompter;
+            let prompter: &dyn crate::prompt::Prompter = match &cli.middleware.prompter {
+                Some(prompter) => prompter.as_ref(),
+                None => &terminal,
+            };
+            if let Some(recovery) = crate::prompt::try_recover_missing_args_with(
+                prompter,
                 &err,
                 &clap_args,
                 &cli.root,
                 &cli.config.name,
-                cli.config.auto_interactive,
+                auto_interactive_for(cli, &target),
             ) {
                 match recovery {
                     crate::prompt::RecoveryResult::Recovered { args } => {
-                        match cli.root.clone().try_get_matches_from(args) {
-                            Ok(m) => m,
+                        match cli.root.clone().try_get_matches_from(args.clone()) {
+                            Ok(m) => (m, args),
                             Err(retry_err) => {
                                 return finish_run(
                                     cli,
@@ -276,6 +286,13 @@ where
                             },
                         );
                     }
+                    crate::prompt::RecoveryResult::Failed { error } => {
+                        // The run has not parsed its flags yet, so read the
+                        // requested format from the raw arguments.
+                        let format =
+                            extract_output_format(&clap_args, &resolve_run_output_format(cli));
+                        return finish_run(cli, render_prompt_failure(cli, &format, &error));
+                    }
                 }
             } else {
                 return finish_run(
@@ -289,8 +306,15 @@ where
         }
     };
 
+    let matches = match prompt_for_optional_args(cli, matches, parsed_args) {
+        Ok(matches) => matches,
+        Err(output) => return finish_run(cli, output),
+    };
+
     let default_format = resolve_run_output_format(cli);
-    let flags = global_flags_from_matches(&matches, &default_format, cli.config.auto_interactive);
+    let auto_interactive =
+        auto_interactive_for(cli, &command_path_from_matches(&cli.config.name, &matches));
+    let flags = global_flags_from_matches(&matches, &default_format, auto_interactive);
     // Publish the --credential-store override so auth providers resolving
     // their storage backend see it at the top of the precedence chain.
     crate::config::set_credential_store_flag(flags.credential_store);
@@ -634,6 +658,76 @@ pub(super) fn resolve_run_output_format(cli: &Cli) -> String {
         engine_config.output.format.as_deref(),
         std::io::stdout().is_terminal(),
     )
+}
+
+/// Renders a prompt failure in the output format the invocation asked for.
+fn render_prompt_failure(cli: &Cli, output_format: &str, error: &CliCoreError) -> CliRunOutput {
+    let mut middleware = cli.middleware.clone();
+    middleware.output_format = output_format.to_owned();
+    render_cli_error(&middleware, error, &cli.config.app_id)
+}
+
+/// Asks for the optional args the command named with
+/// [`CommandSpec::with_prompted_args`](crate::CommandSpec::with_prompted_args),
+/// then re-parses with the answers added. Returns the matches unchanged when
+/// the command names none, prompting is off, or everything was supplied.
+fn prompt_for_optional_args(
+    cli: &Cli,
+    matches: ArgMatches,
+    parsed_args: Vec<String>,
+) -> std::result::Result<ArgMatches, CliRunOutput> {
+    let command_path = command_path_from_matches(&cli.config.name, &matches);
+    let Some(command) = cli.commands.get(&command_path) else {
+        return Ok(matches);
+    };
+    if command.spec.prompted_args.is_empty() {
+        return Ok(matches);
+    }
+    let default_format = resolve_run_output_format(cli);
+    let flags = global_flags_from_matches(
+        &matches,
+        &default_format,
+        auto_interactive_for(cli, &command_path),
+    );
+    if !flags.interactive {
+        return Ok(matches);
+    }
+    let Some(leaf) = find_command_by_colon_path(&cli.root, &command_path) else {
+        return Ok(matches);
+    };
+
+    let terminal = crate::prompt::TerminalPrompter;
+    let prompter: &dyn crate::prompt::Prompter = match &cli.middleware.prompter {
+        Some(prompter) => prompter.as_ref(),
+        None => &terminal,
+    };
+    let result = crate::prompt::prompt_optional_args(
+        prompter,
+        &cli.root,
+        leaf,
+        leaf_matches(&matches),
+        &command.spec.prompted_args,
+        &parsed_args,
+        &cli.config.name,
+    );
+    match result {
+        crate::prompt::OptionalPromptResult::Done { args } if args == parsed_args => Ok(matches),
+        crate::prompt::OptionalPromptResult::Done { args } => cli
+            .root
+            .clone()
+            .try_get_matches_from(args)
+            .map_err(|err| CliRunOutput {
+                exit_code: err.exit_code(),
+                rendered: err.to_string(),
+            }),
+        crate::prompt::OptionalPromptResult::Cancelled { resume } => Err(CliRunOutput {
+            exit_code: crate::prompt::CANCELLED_EXIT_CODE,
+            rendered: format!("Cancelled. Resume with:\n  {resume}\n"),
+        }),
+        crate::prompt::OptionalPromptResult::Failed { error } => {
+            Err(render_prompt_failure(cli, &flags.output_format, &error))
+        }
+    }
 }
 
 fn initialized_middleware(cli: &Cli) -> Result<crate::Middleware> {

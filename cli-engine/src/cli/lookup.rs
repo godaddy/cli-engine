@@ -47,6 +47,37 @@ fn find_command_and_canonical_path_by_colon_path<'command>(
     Some((current, canonical))
 }
 
+/// Whether TTY auto-detection applies to the command at `command_path`
+/// (colon-separated, canonical names), after its
+/// [`InteractivityPolicy`](crate::InteractivityPolicy) is applied to the CLI-wide
+/// `auto_interactive` setting. A path that is not a registered command (a
+/// group, built-in or unknown name) follows the CLI-wide setting.
+pub(super) fn auto_interactive_for(cli: &Cli, command_path: &str) -> bool {
+    cli.commands
+        .get(command_path)
+        .map_or(crate::InteractivityPolicy::Inherit, |command| {
+            command.spec.interactivity
+        })
+        .auto_interactive(cli.config.auto_interactive)
+}
+
+/// Canonical colon-separated path of the longest run of leading `tokens` that
+/// name nested subcommands. Stops at the first token that is not a
+/// subcommand, so trailing positional values (`domain available acme.com`) do
+/// not hide the command.
+pub(super) fn command_prefix_path(root: &Command, tokens: &[String]) -> String {
+    let mut current = root;
+    let mut canonical = Vec::new();
+    for token in tokens {
+        let Some(next) = current.find_subcommand(token) else {
+            break;
+        };
+        canonical.push(next.get_name().to_owned());
+        current = next;
+    }
+    canonical.join(":")
+}
+
 fn canonical_path_from_parts(root: &Command, parts: &[String]) -> Option<String> {
     if parts.is_empty() {
         return Some(String::new());

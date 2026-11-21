@@ -223,6 +223,7 @@ impl Cli {
 
         let mut middleware = Middleware::new();
         middleware.app_id = config.app_id.clone();
+        middleware.prompter = config.prompter.clone();
         // One-time, macOS-only: move any pre-existing $HOME/.config/<app_id>
         // contents to $HOME/Library/Application Support/<app_id> before the
         // config file below is loaded from its (possibly new) location.
