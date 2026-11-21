@@ -1235,4 +1235,52 @@ mod prompting {
             prompter.transcript()
         );
     }
+
+    #[tokio::test]
+    async fn a_multi_value_positional_is_validated_and_asked_again() {
+        let cli = |prompter: Arc<ScriptedPrompter>| {
+            Cli::new(
+                CliConfig::new("test-cli", "Test CLI", "test-cli")
+                    .with_prompter(prompter)
+                    .with_modules(vec![Module::new("Test", |_ctx| {
+                        RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                            RuntimeCommandSpec::new(
+                                CommandSpec::new("span", "A range").no_auth(true).with_arg(
+                                    Arg::new("range")
+                                        .value_names(["START", "END"])
+                                        .num_args(2)
+                                        .value_delimiter(',')
+                                        .value_parser(clap::value_parser!(u16))
+                                        .required(true),
+                                ),
+                                async |_credential, args| {
+                                    Ok(CommandResult::new(json!({ "range": args.get("range") })))
+                                },
+                            ),
+                        )
+                    })]),
+            )
+        };
+        // One answer supplies every value, separated by spaces.
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("a b"),
+            Answer::text("1"),
+            Answer::text("1 5"),
+        ]));
+        let output = cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "span", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["range"], json!([1, 5]));
+        assert!(
+            prompter
+                .transcript()
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "the invalid answer must be explained and asked again: {:?}",
+            prompter.transcript()
+        );
+    }
 }

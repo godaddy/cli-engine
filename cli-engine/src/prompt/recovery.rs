@@ -199,6 +199,9 @@ impl PromptedTokens {
             Some(arg) if arg.get_long().is_some() || arg.get_short().is_some() => {
                 append_prompted_arg(&mut self.options, arg, value);
             }
+            Some(arg) if takes_many(arg) => self
+                .positionals
+                .extend(value.split_whitespace().map(str::to_owned)),
             _ => self.positionals.push(value.to_owned()),
         }
     }
@@ -370,7 +373,15 @@ pub(super) fn infer_and_prompt(
         }
 
         let validator = value_validator(arg.clone(), root.clone(), supplied.to_vec(), false);
-        return prompter.text(message, None, Some(validator));
+        let message = if takes_many(arg) {
+            format!(
+                "{} (separate values with spaces):",
+                message.trim_end_matches(':')
+            )
+        } else {
+            message.to_owned()
+        };
+        return prompter.text(&message, None, Some(validator));
     }
 
     // Default: free text input.
@@ -522,14 +533,19 @@ pub(super) fn find_arg_def<'cmd>(
     command: &'cmd clap::Command,
     raw_name: &str,
 ) -> Option<&'cmd clap::Arg> {
+    // A variadic positional is labelled `<files>...`; drop the marker so it
+    // resolves like any other positional.
+    let raw_name = raw_name.trim_end_matches("...");
     let clean_name = missing_arg_lookup_key(raw_name);
-    // clap writes a positional as `<name>` and an option as `--name <VALUE>`
-    // (or `-n <VALUE>`), so the shape of the label says which kind it is. Look
-    // only among that kind, or a positional whose value name matches an
-    // unrelated option's id would be mistaken for the option.
+    // clap writes a positional as `<name>` (`<START> <END>` when it takes
+    // several values), an option as `--name <VALUE>` or `-n <VALUE>`, and a
+    // required group with its members joined by `|`. So a label that opens with
+    // `<` and has no `|` is a positional. Look only among that kind, or a
+    // positional whose value name matches an unrelated option's id would be
+    // mistaken for the option.
     let positional = {
         let trimmed = raw_name.trim();
-        trimmed.starts_with('<') && trimmed.ends_with('>') && !trimmed.contains(' ')
+        trimmed.starts_with('<') && !trimmed.contains('|')
     };
     let candidates = || {
         command
@@ -638,10 +654,21 @@ pub(super) fn append_prompted_arg(prompted_args: &mut Vec<String>, arg: &clap::A
     } else if arg.is_require_equals_set() {
         // `--opt value` is rejected for these; they must be written `--opt=value`.
         prompted_args.push(format!("{flag}={value}"));
+    } else if takes_many(arg) {
+        // One answer supplies every value, separated by spaces.
+        prompted_args.push(flag);
+        prompted_args.extend(value.split_whitespace().map(str::to_owned));
     } else {
         prompted_args.push(flag);
         prompted_args.push(value.to_owned());
     }
+}
+
+/// Whether `arg` takes several separate values on the command line, so one
+/// typed answer has to be split into several tokens to satisfy it.
+pub(super) fn takes_many(arg: &clap::Arg) -> bool {
+    arg.get_num_args()
+        .is_some_and(|range| range.max_values() > 1)
 }
 
 /// Normalize prompt/help text and append a single trailing colon.

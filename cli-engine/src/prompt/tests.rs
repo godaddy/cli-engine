@@ -393,3 +393,23 @@ fn only_options_are_prompted_never_positionals() {
         "expected nothing to be asked, got {result:?}"
     );
 }
+
+#[test]
+fn multi_value_and_variadic_positionals_resolve_as_positionals() {
+    let cmd = clap::Command::new("t")
+        .arg(
+            clap::Arg::new("range")
+                .value_names(["START", "END"])
+                .num_args(2)
+                .required(true),
+        )
+        .arg(clap::Arg::new("files").num_args(1..).required(true))
+        // Options that would win if the label were read as an option.
+        .arg(clap::Arg::new("START").long("START"))
+        .arg(clap::Arg::new("files-opt").long("files"));
+
+    let range = find_arg_def(&cmd, "<START> <END>").expect("multi-value positional");
+    assert_eq!(range.get_id().as_str(), "range");
+    let files = find_arg_def(&cmd, "<files>...").expect("variadic positional");
+    assert_eq!(files.get_id().as_str(), "files");
+}
