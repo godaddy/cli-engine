@@ -13,19 +13,19 @@ pub type TextValidator = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Sen
 /// Handlers get the invocation's prompter from
 /// [`CommandContext::prompter`](crate::command::CommandContext::prompter).
 /// The default talks to the terminal through `inquire`. Tests install a
-/// [`ScriptedPrompter`] with
+/// [`ScriptedPrompter`](crate::prompt::ScriptedPrompter) with
 /// [`CliConfig::with_prompter`](crate::CliConfig::with_prompter) so a prompting
 /// command can be run without a terminal.
 ///
 /// Every method fails with a user-cancelled error (exit code
-/// [`CANCELLED_EXIT_CODE`]) when the user gives up.
+/// [`CANCELLED_EXIT_CODE`](crate::prompt::CANCELLED_EXIT_CODE)) when the user gives up.
 pub trait Prompter: std::fmt::Debug + Send + Sync {
     /// Asks for free text. An empty answer returns an empty string unless a
     /// `validator` rejects it.
     ///
     /// # Errors
     ///
-    /// Returns [`CliCoreError`] if the prompt is cancelled or cannot be shown.
+    /// Returns [`CliCoreError`](crate::CliCoreError) if the prompt is cancelled or cannot be shown.
     fn text(
         &self,
         message: &str,
@@ -37,21 +37,21 @@ pub trait Prompter: std::fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`CliCoreError`] if the prompt is cancelled or cannot be shown.
+    /// Returns [`CliCoreError`](crate::CliCoreError) if the prompt is cancelled or cannot be shown.
     fn select(&self, message: &str, options: &[String]) -> crate::Result<usize>;
 
     /// Asks a yes/no question.
     ///
     /// # Errors
     ///
-    /// Returns [`CliCoreError`] if the prompt is cancelled or cannot be shown.
+    /// Returns [`CliCoreError`](crate::CliCoreError) if the prompt is cancelled or cannot be shown.
     fn confirm(&self, message: &str, default: bool) -> crate::Result<bool>;
 
     /// Asks the user to pick any number of options and returns their indices.
     ///
     /// # Errors
     ///
-    /// Returns [`CliCoreError`] if the prompt is cancelled or cannot be shown.
+    /// Returns [`CliCoreError`](crate::CliCoreError) if the prompt is cancelled or cannot be shown.
     fn multi_select(
         &self,
         message: &str,

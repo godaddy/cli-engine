@@ -286,6 +286,12 @@ where
                             },
                         );
                     }
+                    crate::prompt::RecoveryResult::Failed { error } => {
+                        return finish_run(
+                            cli,
+                            render_cli_error(&cli.middleware, &error, &cli.config.app_id),
+                        );
+                    }
                 }
             } else {
                 return finish_run(
@@ -698,22 +704,24 @@ fn prompt_for_optional_args(
         &cli.config.name,
     );
     match result {
-        crate::prompt::OptionalPromptResult::Done { args } if args.is_empty() => Ok(matches),
-        crate::prompt::OptionalPromptResult::Done { args } => {
-            let mut augmented = parsed_args;
-            augmented.extend(args);
-            cli.root
-                .clone()
-                .try_get_matches_from(augmented)
-                .map_err(|err| CliRunOutput {
-                    exit_code: err.exit_code(),
-                    rendered: err.to_string(),
-                })
-        }
+        crate::prompt::OptionalPromptResult::Done { args } if args == parsed_args => Ok(matches),
+        crate::prompt::OptionalPromptResult::Done { args } => cli
+            .root
+            .clone()
+            .try_get_matches_from(args)
+            .map_err(|err| CliRunOutput {
+                exit_code: err.exit_code(),
+                rendered: err.to_string(),
+            }),
         crate::prompt::OptionalPromptResult::Cancelled { resume } => Err(CliRunOutput {
             exit_code: crate::prompt::CANCELLED_EXIT_CODE,
             rendered: format!("Cancelled. Resume with:\n  {resume}\n"),
         }),
+        crate::prompt::OptionalPromptResult::Failed { error } => Err(render_cli_error(
+            &cli.middleware,
+            &error,
+            &cli.config.app_id,
+        )),
     }
 }
 

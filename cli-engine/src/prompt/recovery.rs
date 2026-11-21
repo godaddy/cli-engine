@@ -3,7 +3,8 @@
 
 use std::io::Write as _;
 
-use super::{Prompter, TerminalPrompter, TextValidator, prompt_confirm};
+use super::{CANCELLED_EXIT_CODE, Prompter, TerminalPrompter, TextValidator, prompt_confirm};
+use crate::error::CliCoreError;
 
 /// Attempt to interactively recover from a clap `MissingRequiredArgument` error.
 ///
@@ -94,8 +95,7 @@ pub fn try_recover_missing_args_with(
     ));
 
     // Collect prompted values, respecting arg declaration order.
-    let mut prompted_args: Vec<String> = Vec::new();
-    let mut already_supplied: Vec<String> = original_args.to_vec();
+    let mut prompted = PromptedTokens::default();
 
     for raw_name in &missing_names {
         let selected_raw = if raw_name.contains('|') {
@@ -106,9 +106,8 @@ pub fn try_recover_missing_args_with(
                 .collect();
             match prompter.select("Choose one of the required options:", &labels) {
                 Ok(idx) => alternatives[idx].clone(),
-                Err(_) => {
-                    let resume = build_resume_command(app_name, &already_supplied[1..]);
-                    return Some(RecoveryResult::Cancelled { resume });
+                Err(err) => {
+                    return Some(interrupted(err, app_name, &prompted.applied(original_args)));
                 }
             }
         } else {
@@ -124,11 +123,7 @@ pub fn try_recover_missing_args_with(
             )
         {
             // Boolean flag chosen from a required group — no value prompt needed.
-            let start = prompted_args.len();
-            if let Some(long) = arg.get_long() {
-                prompted_args.push(format!("--{long}"));
-            }
-            already_supplied.extend_from_slice(&prompted_args[start..]);
+            prompted.push(Some(arg), "true");
             continue;
         }
 
@@ -138,31 +133,70 @@ pub fn try_recover_missing_args_with(
             &prompt_message,
             arg_def,
             command,
-            &already_supplied,
+            &prompted.applied(original_args),
         ) {
             Ok(v) => v,
-            Err(_) => {
-                // User cancelled — build a resume command hint.
-                let resume = build_resume_command(app_name, &already_supplied[1..]);
-                return Some(RecoveryResult::Cancelled { resume });
+            Err(err) => {
+                return Some(interrupted(err, app_name, &prompted.applied(original_args)));
             }
         };
-
-        // Append the prompted value to args.
-        let start = prompted_args.len();
-        if let Some(arg) = arg_def {
-            append_prompted_arg(&mut prompted_args, arg, &value);
-        } else {
-            prompted_args.push(value.clone());
-        }
-
-        // Track all tokens added this iteration for the resume command.
-        already_supplied.extend_from_slice(&prompted_args[start..]);
+        prompted.push(arg_def, &value);
     }
 
-    let mut augmented = original_args.to_vec();
-    augmented.extend(prompted_args);
-    Some(RecoveryResult::Recovered { args: augmented })
+    Some(RecoveryResult::Recovered {
+        args: prompted.applied(original_args),
+    })
+}
+
+/// Maps a prompt error to a result: a cancel carries the resume command, any
+/// other failure (no terminal, an exhausted script) keeps its diagnostic.
+pub(super) fn interrupted(
+    err: CliCoreError,
+    app_name: &str,
+    supplied: &[String],
+) -> RecoveryResult {
+    if is_cancelled(&err) {
+        RecoveryResult::Cancelled {
+            resume: build_resume_command(app_name, supplied.get(1..).unwrap_or_default()),
+        }
+    } else {
+        RecoveryResult::Failed { error: err }
+    }
+}
+
+/// Whether a prompt error is the user giving up (Escape or Ctrl+C).
+pub(super) fn is_cancelled(err: &CliCoreError) -> bool {
+    crate::error::exit_code_for_error(err) == CANCELLED_EXIT_CODE
+}
+
+/// Tokens gathered from prompts, kept apart so options can be placed before a
+/// `--` separator while positional answers stay after it. Appending an option
+/// after `--` would hand it to the command as positional input.
+#[derive(Debug, Default)]
+pub(super) struct PromptedTokens {
+    options: Vec<String>,
+    positionals: Vec<String>,
+}
+
+impl PromptedTokens {
+    /// Records `value` as the answer for `arg` (`None` is a bare positional).
+    pub(super) fn push(&mut self, arg: Option<&clap::Arg>, value: &str) {
+        match arg {
+            Some(arg) if arg.get_long().is_some() || arg.get_short().is_some() => {
+                append_prompted_arg(&mut self.options, arg, value);
+            }
+            _ => self.positionals.push(value.to_owned()),
+        }
+    }
+
+    /// `args` with these tokens added: options before any `--`, positionals last.
+    pub(super) fn applied(&self, args: &[String]) -> Vec<String> {
+        let mut out = args.to_vec();
+        let at = out.iter().position(|a| a == "--").unwrap_or(out.len());
+        out.splice(at..at, self.options.iter().cloned());
+        out.extend(self.positionals.iter().cloned());
+        out
+    }
 }
 
 /// Outcome of a "did you mean X?" correction prompt.
@@ -206,6 +240,12 @@ pub enum RecoveryResult {
     Cancelled {
         /// The command to resume with, including already-supplied flags.
         resume: String,
+    },
+    /// A prompt failed for a reason other than the user cancelling, such as
+    /// there being no terminal; `error` is the original diagnostic.
+    Failed {
+        /// The error to render.
+        error: CliCoreError,
     },
 }
 
@@ -310,15 +350,21 @@ pub(super) fn value_validator(
                 Err("A value is required.".to_owned())
             };
         }
-        let mut tokens = Vec::new();
-        append_prompted_arg(&mut tokens, &arg, input);
-        let mut args = supplied.clone();
-        args.extend(tokens);
-        match root.clone().try_get_matches_from(args) {
+        let mut tokens = PromptedTokens::default();
+        tokens.push(Some(&arg), input);
+        match root.clone().try_get_matches_from(tokens.applied(&supplied)) {
+            // Errors about this answer. Anything else, such as other required
+            // args still missing, is not the user's mistake in this answer.
             Err(error)
                 if matches!(
                     error.kind(),
-                    ErrorKind::ValueValidation | ErrorKind::InvalidValue | ErrorKind::InvalidUtf8
+                    ErrorKind::ValueValidation
+                        | ErrorKind::InvalidValue
+                        | ErrorKind::InvalidUtf8
+                        | ErrorKind::WrongNumberOfValues
+                        | ErrorKind::TooManyValues
+                        | ErrorKind::TooFewValues
+                        | ErrorKind::ArgumentConflict
                 ) =>
             {
                 Err(first_line(&error.render().to_string()))
@@ -431,20 +477,26 @@ pub(super) fn format_missing_group_label(raw_name: &str, command: &clap::Command
 }
 
 pub(super) fn append_prompted_arg(prompted_args: &mut Vec<String>, arg: &clap::Arg, value: &str) {
-    if let Some(long) = arg.get_long() {
-        if matches!(
-            arg.get_action(),
-            clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
-        ) {
-            // Boolean flags: clap expects `--flag` alone, no value.
-            if value == "true" {
-                prompted_args.push(format!("--{long}"));
-            }
-        } else {
-            prompted_args.push(format!("--{long}"));
-            prompted_args.push(value.to_owned());
+    // A short-only option is addressed as `-d`, a positional by its value alone.
+    let flag = match (arg.get_long(), arg.get_short()) {
+        (Some(long), _) => Some(format!("--{long}")),
+        (None, Some(short)) => Some(format!("-{short}")),
+        (None, None) => None,
+    };
+    let Some(flag) = flag else {
+        prompted_args.push(value.to_owned());
+        return;
+    };
+    if matches!(
+        arg.get_action(),
+        clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+    ) {
+        // Boolean flags: clap expects the flag alone, no value.
+        if value == "true" {
+            prompted_args.push(flag);
         }
     } else {
+        prompted_args.push(flag);
         prompted_args.push(value.to_owned());
     }
 }

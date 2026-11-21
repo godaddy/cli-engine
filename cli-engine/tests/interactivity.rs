@@ -633,4 +633,182 @@ mod prompting {
         let note_at = asked.iter().position(|line| line.contains("note"));
         assert!(name_at < note_at, "required first: {asked:?}");
     }
+
+    /// A command with a positional, a short-only option, a repeated option
+    /// and an option that conflicts with another, for the review regressions.
+    fn edge_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("edge", "Edge cases")
+                                .no_auth(true)
+                                .with_arg(Arg::new("files").num_args(0..).allow_hyphen_values(true))
+                                .with_arg(Arg::new("description").short('d'))
+                                .with_arg(
+                                    Arg::new("quiet")
+                                        .short('q')
+                                        .action(clap::ArgAction::SetTrue),
+                                )
+                                .with_arg(
+                                    Arg::new("pair")
+                                        .long("pair")
+                                        .value_delimiter(',')
+                                        .num_args(2),
+                                )
+                                .with_arg(Arg::new("mode").long("mode").conflicts_with("pair"))
+                                .with_prompted_args(["description", "quiet", "pair", "mode"]),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "files": args.get("files"),
+                                    "description": args.get("description"),
+                                    "quiet": args.get("quiet"),
+                                    "pair": args.get("pair"),
+                                    "mode": args.get("mode"),
+                                })))
+                            },
+                        ),
+                    )
+                })]),
+        )
+    }
+
+    async fn run_edge(
+        answers: impl IntoIterator<Item = Answer>,
+        extra: &[&str],
+    ) -> (serde_json::Value, Arc<ScriptedPrompter>, i32, String) {
+        let prompter = Arc::new(ScriptedPrompter::new(answers));
+        let mut args = vec!["test-cli", "tool", "edge", "--interactive", "--json"];
+        args.extend_from_slice(extra);
+        let output = edge_cli(Arc::clone(&prompter)).run(args).await;
+        let value = serde_json::from_str(&output.rendered).unwrap_or(json!(null));
+        (value, prompter, output.exit_code, output.rendered)
+    }
+
+    #[tokio::test]
+    async fn a_short_only_option_is_prompted_and_applied() {
+        let (value, _, code, rendered) = run_edge(
+            [
+                Answer::text("hello"),
+                Answer::Confirm(true),
+                Answer::text(""),
+                Answer::text(""),
+            ],
+            &[],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["description"], json!("hello"));
+        assert_eq!(value["data"]["quiet"], json!(true));
+        assert_eq!(
+            value["data"]["files"],
+            json!(null),
+            "no positional may be populated"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompted_options_go_before_the_double_dash_separator() {
+        let (value, _, code, rendered) = run_edge(
+            [
+                Answer::text("hello"),
+                Answer::Confirm(false),
+                Answer::text(""),
+                Answer::text(""),
+            ],
+            &["--", "-file.json"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["description"], json!("hello"));
+        assert!(
+            value["data"]["files"].to_string().contains("-file.json"),
+            "the positional after -- must stay positional: {value}"
+        );
+        assert_eq!(value["data"]["quiet"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn an_answer_with_the_wrong_number_of_values_is_asked_again_not_aborted() {
+        // `--pair` needs two values, so no single typed answer can satisfy it.
+        // The point is that the wrong count is explained and asked again,
+        // instead of the final parse aborting the run; a blank answer skips.
+        let (value, prompter, code, rendered) = run_edge(
+            [
+                Answer::text(""),
+                Answer::Confirm(false),
+                Answer::text("one"),
+                Answer::text(""),
+                Answer::text(""),
+            ],
+            &[],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["pair"], json!(null));
+        let transcript = prompter.transcript();
+        assert!(
+            transcript
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "{transcript:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_conflicting_with_a_supplied_option_is_asked_again() {
+        let (value, prompter, code, rendered) = run_edge(
+            [
+                Answer::text(""),
+                Answer::Confirm(false),
+                Answer::text("a,b"),
+                Answer::text(""),
+            ],
+            &["--mode", "fast"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["pair"], json!(null));
+        assert!(
+            prompter
+                .transcript()
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "the conflicting answer should have been rejected: {:?}",
+            prompter.transcript()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_failure_keeps_its_diagnostic_instead_of_reading_as_a_cancel() {
+        // The script runs out at the first prompt: that is a failure, not a cancel.
+        let (_, _, code, rendered) = run_edge([], &[]).await;
+
+        assert_ne!(code, 130, "{rendered}");
+        assert_ne!(code, 0, "{rendered}");
+        assert!(rendered.contains("ran out of answers"), "{rendered}");
+        assert!(!rendered.contains("Resume"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_arg_recovery_failure_keeps_its_diagnostic() {
+        let prompter = Arc::new(ScriptedPrompter::new([]));
+        let output = recovery_cli(prompter)
+            .run(["test-cli", "tool", "deploy", "--interactive", "--json"])
+            .await;
+
+        assert_ne!(output.exit_code, 130, "{}", output.rendered);
+        assert_ne!(output.exit_code, 0, "{}", output.rendered);
+        assert!(
+            output.rendered.contains("ran out of answers"),
+            "{}",
+            output.rendered
+        );
+    }
 }

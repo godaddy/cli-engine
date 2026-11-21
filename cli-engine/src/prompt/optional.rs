@@ -2,22 +2,29 @@
 
 use super::Prompter;
 use super::recovery::{
-    append_prompted_arg, build_resume_command, format_prompt_message, value_validator,
+    PromptedTokens, build_resume_command, format_prompt_message, is_cancelled, value_validator,
 };
+use crate::error::CliCoreError;
 
-/// Result of asking for optional args: the args to append, or a cancel.
+/// Result of asking for optional args.
 #[derive(Debug)]
 pub enum OptionalPromptResult {
-    /// Prompting finished; `args` are the tokens to append to the command line
-    /// (empty when the user skipped everything).
+    /// Prompting finished; `args` is the full argument list with the answers
+    /// added, equal to the input when the user skipped everything.
     Done {
-        /// Tokens to append, such as `["--description", "Mail setup"]`.
+        /// The command line to parse again.
         args: Vec<String>,
     },
     /// The user cancelled; `resume` is the command to resume with.
     Cancelled {
         /// The command to resume with, including already-supplied flags.
         resume: String,
+    },
+    /// A prompt failed for a reason other than the user cancelling, such as
+    /// there being no terminal; `error` is the original diagnostic.
+    Failed {
+        /// The error to render.
+        error: CliCoreError,
     },
 }
 
@@ -40,8 +47,7 @@ pub fn prompt_optional_args(
 ) -> OptionalPromptResult {
     use clap::parser::ValueSource;
 
-    let mut appended: Vec<String> = Vec::new();
-    let mut so_far: Vec<String> = supplied.to_vec();
+    let mut prompted = PromptedTokens::default();
 
     for id in prompted_ids {
         let Some(arg) = leaf.get_arguments().find(|a| a.get_id().as_str() == id) else {
@@ -55,20 +61,20 @@ pub fn prompt_optional_args(
         }
 
         let message = optional_prompt_message(id, arg);
-        let answer = match ask_optional(prompter, &message, arg, root, &so_far) {
-            Ok(answer) => answer,
-            Err(_) => {
-                let resume = build_resume_command(app_name, &so_far[1..]);
+        let so_far = prompted.applied(supplied);
+        match ask_optional(prompter, &message, arg, root, &so_far) {
+            Ok(Some(value)) => prompted.push(Some(arg), &value),
+            Ok(None) => {}
+            Err(error) if is_cancelled(&error) => {
+                let resume = build_resume_command(app_name, so_far.get(1..).unwrap_or_default());
                 return OptionalPromptResult::Cancelled { resume };
             }
-        };
-        let Some(value) = answer else { continue };
-
-        let start = appended.len();
-        append_prompted_arg(&mut appended, arg, &value);
-        so_far.extend_from_slice(&appended[start..]);
+            Err(error) => return OptionalPromptResult::Failed { error },
+        }
     }
-    OptionalPromptResult::Done { args: appended }
+    OptionalPromptResult::Done {
+        args: prompted.applied(supplied),
+    }
 }
 
 /// The prompt text for an optional arg: its help, marked optional.
