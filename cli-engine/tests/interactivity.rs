@@ -1126,4 +1126,113 @@ mod prompting {
             output.rendered
         );
     }
+
+    /// Nested groups and a global value option, so the leaf is not the first
+    /// word after the program name.
+    fn nested_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        let make = |name: &'static str| {
+            RuntimeCommandSpec::new(
+                CommandSpec::new(name, "Make")
+                    .no_auth(true)
+                    .with_arg(Arg::new("note").long("note"))
+                    .with_prompted_args(["note"]),
+                async |_credential, args| {
+                    Ok(CommandResult::new(json!({ "note": args.get("note") })))
+                },
+            )
+        };
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_register_flags(Arc::new(|command: clap::Command| {
+                    command.arg(
+                        Arg::new("region")
+                            .long("region")
+                            .global(true)
+                            .help("A global option that takes a value"),
+                    )
+                }))
+                .with_modules(vec![
+                    Module::new("Test", move |_ctx| {
+                        RuntimeGroupSpec::new(GroupSpec::new("project", "Projects"))
+                            .with_command(make("list"))
+                    }),
+                    Module::new("Test", move |_ctx| {
+                        RuntimeGroupSpec::new(GroupSpec::new("domain", "Domains"))
+                            .with_command(make("make"))
+                    }),
+                ]),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_leaf_is_found_after_an_option_whose_value_names_another_group() {
+        // `--region project` consumes `project`; the command is `domain make`.
+        let prompter = Arc::new(ScriptedPrompter::new([Answer::text("hello")]));
+        let output = nested_cli(Arc::clone(&prompter))
+            .run([
+                "test-cli",
+                "--region",
+                "project",
+                "domain",
+                "make",
+                "--interactive",
+                "--json",
+            ])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["note"], json!("hello"));
+        assert_eq!(prompter.remaining(), 0);
+    }
+
+    /// A required positional whose value name matches an unrelated option.
+    fn shaped_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(
+                            CommandSpec::new("shape", "Positional vs option")
+                                .no_auth(true)
+                                .with_arg(Arg::new("input").value_name("name").required(true))
+                                .with_arg(Arg::new("name").long("name")),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "input": args.get("input"),
+                                    "name": args.get("name"),
+                                })))
+                            },
+                        ),
+                    )
+                })]),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_missing_positional_is_not_mistaken_for_an_option_with_the_same_name() {
+        let prompter = Arc::new(ScriptedPrompter::new([Answer::text("value")]));
+        let output = shaped_cli(Arc::clone(&prompter))
+            .run(["test-cli", "tool", "shape", "--interactive", "--json"])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["input"], json!("value"));
+        assert_eq!(
+            value["data"]["name"],
+            json!(null),
+            "the option must stay unset"
+        );
+        assert!(
+            !prompter
+                .transcript()
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
 }

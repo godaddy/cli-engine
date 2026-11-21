@@ -218,20 +218,31 @@ impl PromptedTokens {
 }
 
 /// Index just past the leaf command's name in `args`, if one is named.
+///
+/// Walks the arguments the way the parser does: a value-taking option consumes
+/// the token after it, so `--env project domain make` finds `domain make`, not
+/// the `project` that is really `--env`'s value.
 fn leaf_end_index(root: &clap::Command, args: &[String]) -> Option<usize> {
+    let value_flags = crate::flags::derive_value_flags(root);
     let mut current = root;
     let mut end = None;
-    for (index, arg) in args.iter().enumerate().skip(1) {
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
         if arg == "--" {
             break;
         }
         if arg.starts_with('-') {
+            // `--opt=value` carries its value; `--opt value` consumes the next token.
+            let consumes_next = !arg.contains('=') && value_flags.contains(arg.as_str());
+            index += if consumes_next { 2 } else { 1 };
             continue;
         }
         if let Some(sub) = current.find_subcommand(arg) {
             current = sub;
             end = Some(index + 1);
         }
+        index += 1;
     }
     end
 }
@@ -512,6 +523,19 @@ pub(super) fn find_arg_def<'cmd>(
     raw_name: &str,
 ) -> Option<&'cmd clap::Arg> {
     let clean_name = missing_arg_lookup_key(raw_name);
+    // clap writes a positional as `<name>` and an option as `--name <VALUE>`
+    // (or `-n <VALUE>`), so the shape of the label says which kind it is. Look
+    // only among that kind, or a positional whose value name matches an
+    // unrelated option's id would be mistaken for the option.
+    let positional = {
+        let trimmed = raw_name.trim();
+        trimmed.starts_with('<') && trimmed.ends_with('>') && !trimmed.contains(' ')
+    };
+    let candidates = || {
+        command
+            .get_arguments()
+            .filter(move |a| a.is_positional() == positional)
+    };
     // Exact matches win, by id or long name and then by short flag. Matching
     // on the value name is only a fallback, because unrelated flags often
     // share one (`--provider-name <NAME>` and `--service-name <NAME>`, or
@@ -524,20 +548,13 @@ pub(super) fn find_arg_def<'cmd>(
             _ => None,
         }
     };
-    command
-        .get_arguments()
+    candidates()
         .find(|a| {
             a.get_id().as_str() == clean_name || a.get_long().is_some_and(|l| l == clean_name)
         })
+        .or_else(|| short.and_then(|short| candidates().find(|a| a.get_short() == Some(short))))
         .or_else(|| {
-            short.and_then(|short| {
-                command
-                    .get_arguments()
-                    .find(|a| a.get_short() == Some(short))
-            })
-        })
-        .or_else(|| {
-            command.get_arguments().find(|a| {
+            candidates().find(|a| {
                 a.get_value_names().is_some_and(|vn| {
                     vn.iter().any(|v| {
                         v.eq_ignore_ascii_case(strip_arg_decoration(
