@@ -340,8 +340,6 @@ pub(super) fn value_validator(
     supplied: Vec<String>,
     allow_blank: bool,
 ) -> TextValidator {
-    use clap::error::ErrorKind;
-
     std::sync::Arc::new(move |input: &str| {
         if input.is_empty() {
             return if allow_blank {
@@ -350,28 +348,40 @@ pub(super) fn value_validator(
                 Err("A value is required.".to_owned())
             };
         }
-        let mut tokens = PromptedTokens::default();
-        tokens.push(Some(&arg), input);
-        match root.clone().try_get_matches_from(tokens.applied(&supplied)) {
-            // Errors about this answer. Anything else, such as other required
-            // args still missing, is not the user's mistake in this answer.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::ValueValidation
-                        | ErrorKind::InvalidValue
-                        | ErrorKind::InvalidUtf8
-                        | ErrorKind::WrongNumberOfValues
-                        | ErrorKind::TooManyValues
-                        | ErrorKind::TooFewValues
-                        | ErrorKind::ArgumentConflict
-                ) =>
-            {
-                Err(first_line(&error.render().to_string()))
-            }
-            _ => Ok(()),
+        match answer_problem(&arg, &root, &supplied, input) {
+            Some(problem) => Err(problem),
+            None => Ok(()),
         }
     })
+}
+
+/// Why clap would refuse `input` as the answer for `arg`, or `None` when it
+/// would accept it.
+///
+/// Re-parses `supplied` plus the answer. Only a missing required argument is
+/// tolerated, since other arguments may simply not have been asked for yet;
+/// every other failure, including an answer that reads as a flag or `--help`,
+/// is the answer's fault.
+pub(super) fn answer_problem(
+    arg: &clap::Arg,
+    root: &clap::Command,
+    supplied: &[String],
+    input: &str,
+) -> Option<String> {
+    use clap::error::ErrorKind;
+
+    let mut tokens = PromptedTokens::default();
+    tokens.push(Some(arg), input);
+    match root.clone().try_get_matches_from(tokens.applied(supplied)) {
+        Ok(_) => None,
+        Err(error) => match error.kind() {
+            ErrorKind::MissingRequiredArgument => None,
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                Some("That is not a valid value.".to_owned())
+            }
+            _ => Some(first_line(&error.render().to_string())),
+        },
+    }
 }
 
 /// The first line of a clap error, without its `error:` prefix.
@@ -404,14 +414,29 @@ pub(super) fn find_arg_def<'cmd>(
     raw_name: &str,
 ) -> Option<&'cmd clap::Arg> {
     let clean_name = missing_arg_lookup_key(raw_name);
-    // An exact id or long-name match wins. Matching on the value name is only
-    // a fallback, because unrelated flags often share one (`--provider-name
-    // <NAME>` and `--service-name <NAME>`), and taking the first such flag
-    // would prompt for, and set, the wrong one.
+    // Exact matches win, by id or long name and then by short flag. Matching
+    // on the value name is only a fallback, because unrelated flags often
+    // share one (`--provider-name <NAME>` and `--service-name <NAME>`, or
+    // `-p <NAME>` and `-s <NAME>`), and taking the first such flag would
+    // prompt for, and set, the wrong one.
+    let short = {
+        let mut chars = clean_name.chars();
+        match (chars.next(), chars.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
+    };
     command
         .get_arguments()
         .find(|a| {
             a.get_id().as_str() == clean_name || a.get_long().is_some_and(|l| l == clean_name)
+        })
+        .or_else(|| {
+            short.and_then(|short| {
+                command
+                    .get_arguments()
+                    .find(|a| a.get_short() == Some(short))
+            })
         })
         .or_else(|| {
             command.get_arguments().find(|a| {
@@ -495,6 +520,9 @@ pub(super) fn append_prompted_arg(prompted_args: &mut Vec<String>, arg: &clap::A
         if value == "true" {
             prompted_args.push(flag);
         }
+    } else if arg.is_require_equals_set() {
+        // `--opt value` is rejected for these; they must be written `--opt=value`.
+        prompted_args.push(format!("{flag}={value}"));
     } else {
         prompted_args.push(flag);
         prompted_args.push(value.to_owned());

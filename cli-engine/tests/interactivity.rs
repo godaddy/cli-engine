@@ -811,4 +811,181 @@ mod prompting {
             output.rendered
         );
     }
+
+    /// Options that stress the answer plumbing: an option that must be written
+    /// `--opt=value`, a flag and an enum that conflict with another option, and
+    /// a required numeric positional for the recovery validator.
+    fn plumbing_cli(prompter: Arc<ScriptedPrompter>) -> Cli {
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(prompter)
+                .with_modules(vec![Module::new("Test", |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools"))
+                        .with_command(RuntimeCommandSpec::new(
+                            CommandSpec::new("plumb", "Plumbing")
+                                .no_auth(true)
+                                .with_arg(Arg::new("label").long("label").require_equals(true))
+                                .with_arg(
+                                    Arg::new("fast")
+                                        .long("fast")
+                                        .conflicts_with("level")
+                                        .action(clap::ArgAction::SetTrue),
+                                )
+                                .with_arg(
+                                    Arg::new("level")
+                                        .long("level")
+                                        .value_parser(["low", "high"])
+                                        .conflicts_with("fast"),
+                                )
+                                .with_prompted_args(["label", "fast", "level"]),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "label": args.get("label"),
+                                    "fast": args.get("fast"),
+                                    "level": args.get("level"),
+                                })))
+                            },
+                        ))
+                        .with_command(RuntimeCommandSpec::new(
+                            CommandSpec::new("count", "Needs a number")
+                                .no_auth(true)
+                                .with_arg(
+                                    Arg::new("n")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(u16)),
+                                ),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({ "n": args.get("n") })))
+                            },
+                        ))
+                        .with_command(RuntimeCommandSpec::new(
+                            CommandSpec::new("who", "Two short-only required options")
+                                .no_auth(true)
+                                .with_arg(
+                                    Arg::new("provider-name")
+                                        .short('p')
+                                        .value_name("NAME")
+                                        .required(true),
+                                )
+                                .with_arg(
+                                    Arg::new("service-name")
+                                        .short('s')
+                                        .value_name("NAME")
+                                        .required(true),
+                                ),
+                            async |_credential, args| {
+                                Ok(CommandResult::new(json!({
+                                    "provider": args.get("provider-name"),
+                                    "service": args.get("service-name"),
+                                })))
+                            },
+                        ))
+                })]),
+        )
+    }
+
+    async fn run_plumb(
+        command: &str,
+        answers: impl IntoIterator<Item = Answer>,
+        extra: &[&str],
+    ) -> (serde_json::Value, Arc<ScriptedPrompter>, i32, String) {
+        let prompter = Arc::new(ScriptedPrompter::new(answers));
+        let mut args = vec!["test-cli", "tool", command, "--interactive", "--json"];
+        args.extend_from_slice(extra);
+        let output = plumbing_cli(Arc::clone(&prompter)).run(args).await;
+        let value = serde_json::from_str(&output.rendered).unwrap_or(json!(null));
+        (value, prompter, output.exit_code, output.rendered)
+    }
+
+    #[tokio::test]
+    async fn an_option_that_requires_equals_is_written_attached() {
+        let (value, _, code, rendered) = run_plumb(
+            "plumb",
+            [
+                Answer::text("hello"),
+                Answer::Confirm(false),
+                Answer::Select(2),
+            ],
+            &[],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["label"], json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn a_flag_that_conflicts_with_a_supplied_option_is_not_offered() {
+        // `--level high` is supplied, so asking about `--fast` would abort the
+        // run: it is skipped without consuming an answer.
+        let (value, prompter, code, rendered) =
+            run_plumb("plumb", [Answer::text("")], &["--level", "high"]).await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["fast"], json!(false));
+        assert_eq!(prompter.remaining(), 0);
+        assert!(
+            !prompter
+                .transcript()
+                .iter()
+                .any(|line| line.contains("fast")),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_menu_choice_that_conflicts_with_a_supplied_option_is_not_offered() {
+        let (value, prompter, code, rendered) = run_plumb(
+            "plumb",
+            [Answer::text(""), Answer::Confirm(true)],
+            &["--fast"],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["level"], json!(null));
+        assert!(
+            !prompter
+                .transcript()
+                .iter()
+                .any(|line| line.contains("level")),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_reads_as_a_flag_is_rejected_not_accepted() {
+        // `--bogus` and `--help` would be parsed as options, not as the value.
+        let (value, prompter, code, rendered) = run_plumb(
+            "count",
+            [
+                Answer::text("--bogus"),
+                Answer::text("--help"),
+                Answer::text("7"),
+            ],
+            &[],
+        )
+        .await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["n"], json!(7));
+        let rejected = prompter
+            .transcript()
+            .iter()
+            .filter(|line| line.starts_with("  rejected:"))
+            .count();
+        assert_eq!(rejected, 2, "{:?}", prompter.transcript());
+    }
+
+    #[tokio::test]
+    async fn recovery_finds_the_right_short_only_option_among_shared_value_names() {
+        let (value, _, code, rendered) =
+            run_plumb("who", [Answer::text("Acme"), Answer::text("Email")], &[]).await;
+
+        assert_eq!(code, 0, "{rendered}");
+        assert_eq!(value["data"]["provider"], json!("Acme"));
+        assert_eq!(value["data"]["service"], json!("Email"));
+    }
 }

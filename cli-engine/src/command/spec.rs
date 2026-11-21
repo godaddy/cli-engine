@@ -596,7 +596,10 @@ impl CommandSpec {
     /// a terminal. The answer is checked against the arg's own value parser
     /// and asked again when clap would reject it.
     ///
-    /// Registration debug-asserts that every id names an arg of this command.
+    /// Only options can be prompted, not positionals: an answer for one would
+    /// land in the first free positional slot. Registration debug-asserts that
+    /// every id names an option (an arg with a long or short flag) of this
+    /// command, and a positional is skipped at run time in release builds.
     #[must_use]
     pub fn with_prompted_args<I, S>(mut self, ids: I) -> Self
     where

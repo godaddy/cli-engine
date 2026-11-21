@@ -2,7 +2,8 @@
 
 use super::Prompter;
 use super::recovery::{
-    PromptedTokens, build_resume_command, format_prompt_message, is_cancelled, value_validator,
+    PromptedTokens, answer_problem, build_resume_command, format_prompt_message, is_cancelled,
+    value_validator,
 };
 use crate::error::CliCoreError;
 
@@ -53,6 +54,11 @@ pub fn prompt_optional_args(
         let Some(arg) = leaf.get_arguments().find(|a| a.get_id().as_str() == id) else {
             continue;
         };
+        // A positional's answer would land in the first free slot rather than
+        // its own, so only options can be prompted. Registration asserts this.
+        if arg.get_long().is_none() && arg.get_short().is_none() {
+            continue;
+        }
         if matches!(
             matches.value_source(id),
             Some(ValueSource::CommandLine | ValueSource::EnvVariable)
@@ -91,10 +97,18 @@ fn ask_optional(
     root: &clap::Command,
     supplied: &[String],
 ) -> crate::Result<Option<String>> {
+    // An answer that conflicts with what the user already supplied would only
+    // abort the final parse, so never offer one. When nothing valid is left the
+    // arg is simply not asked.
+    let offered = |value: &str| answer_problem(arg, root, supplied, value).is_none();
+
     if matches!(
         arg.get_action(),
         clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
     ) {
+        if !offered("true") {
+            return Ok(None);
+        }
         // A flag: only an explicit yes sets it.
         let yes = prompter.confirm(message, false)?;
         return Ok(yes.then(|| "true".to_owned()));
@@ -105,8 +119,13 @@ fn ask_optional(
         .iter()
         .filter(|pv| !pv.is_hide_set())
         .map(|pv| pv.get_name().to_owned())
+        .filter(|name| offered(name))
         .collect();
-    if !possible.is_empty() {
+    let has_menu = arg.get_possible_values().iter().any(|pv| !pv.is_hide_set());
+    if has_menu {
+        if possible.is_empty() {
+            return Ok(None);
+        }
         let mut options = possible.clone();
         options.push("(skip)".to_owned());
         let index = prompter.select(message, &options)?;

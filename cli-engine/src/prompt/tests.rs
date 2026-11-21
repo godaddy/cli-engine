@@ -340,3 +340,35 @@ fn derive_exclusive_group_reports_alternatives() {
     let alternatives = split_missing_group_alternatives(&names[0]);
     assert_eq!(alternatives, vec!["--one", "--two"]);
 }
+
+#[test]
+fn only_options_are_prompted_never_positionals() {
+    use super::optional::{OptionalPromptResult, prompt_optional_args};
+    use super::{Answer, ScriptedPrompter};
+
+    let root = clap::Command::new("app").subcommand(
+        clap::Command::new("go")
+            .arg(clap::Arg::new("source"))
+            .arg(clap::Arg::new("target")),
+    );
+    let argv: Vec<String> = ["app", "go"].iter().map(|s| (*s).to_owned()).collect();
+    let matches = root.clone().try_get_matches_from(&argv).expect("parses");
+    let leaf = root.find_subcommand("go").expect("leaf");
+    // No answers are scripted: a positional must not trigger a prompt.
+    let prompter = ScriptedPrompter::new(Vec::<Answer>::new());
+
+    let result = prompt_optional_args(
+        &prompter,
+        &root,
+        leaf,
+        matches.subcommand_matches("go").expect("leaf matches"),
+        &["target".to_owned()],
+        &argv,
+        "app",
+    );
+
+    assert!(
+        matches!(&result, OptionalPromptResult::Done { args } if *args == argv),
+        "expected nothing to be asked, got {result:?}"
+    );
+}
