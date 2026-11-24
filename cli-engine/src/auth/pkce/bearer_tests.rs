@@ -181,6 +181,60 @@ fn id_token_bearer_credential_fails_without_a_usable_id_token() {
     }
 }
 
+/// `exp` values chrono cannot represent. Parsed from text so the `f64` cases
+/// keep their exact magnitude.
+const OUT_OF_RANGE_EXP: [&str; 7] = [
+    "9223372036854775807",  // i64::MAX
+    "-9223372036854775808", // i64::MIN
+    "1000000000000000000",
+    "-1000000000000000000",
+    "1e100",
+    "-1e100",
+    "1.8446744073709552e19", // beyond i64::MAX as an f64
+];
+
+fn id_token_with_raw_exp(raw_exp: &str) -> String {
+    let claims: Value =
+        serde_json::from_str(&format!(r#"{{"exp": {raw_exp}, "sub": "subject-1"}}"#))
+            .expect("claims parse");
+    make_jwt(&claims)
+}
+
+#[test]
+fn out_of_range_exp_is_rejected_instead_of_saturating() {
+    let provider = id_token_provider();
+    for raw_exp in OUT_OF_RANGE_EXP {
+        let token = token_with_id_token(Some(id_token_with_raw_exp(raw_exp)));
+        assert!(
+            !token.is_valid_for(Bearer::IdToken),
+            "exp {raw_exp} must not count as a valid (or panic) expiry"
+        );
+        let err = provider
+            .bearer_credential("prod", &token)
+            .expect_err("unrepresentable exp");
+        assert!(
+            err.to_string().contains("no usable id_token"),
+            "exp {raw_exp}: {err}"
+        );
+        // The same check gates a fresh login before anything is stored.
+        assert!(
+            token.require_bearer(Bearer::IdToken, "dev").is_err(),
+            "exp {raw_exp} must fail the post-login check"
+        );
+    }
+}
+
+#[test]
+fn expiry_check_does_not_overflow_on_extreme_values() {
+    // The access-token path has no range check of its own (the value comes from
+    // the token response), so the shared expiry arithmetic must not overflow.
+    for expires_at in [i64::MIN, i64::MIN + 1, i64::MAX] {
+        let mut token = valid_token("access-token");
+        token.expires_at = expires_at;
+        let _ = token.is_valid_for(Bearer::AccessToken);
+    }
+}
+
 #[test]
 fn id_token_bearer_error_never_echoes_a_token() {
     let id_token = make_jwt(&json!({"email": "secret@example.com"}));

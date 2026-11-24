@@ -135,7 +135,8 @@ impl StoredToken {
     /// # Errors
     ///
     /// Returns an error when `bearer` is [`Bearer::IdToken`] and there is no
-    /// id_token, it does not decode, or it carries no `exp` claim.
+    /// id_token, it does not decode, or it carries no usable `exp` claim (absent,
+    /// not a number, or outside the representable date range).
     pub(super) fn require_bearer(&self, bearer: Bearer, env: &str) -> Result<(&str, i64)> {
         let selected = match bearer {
             Bearer::AccessToken => Some((self.access_token.as_str(), self.expires_at)),
@@ -150,19 +151,26 @@ impl StoredToken {
         })
     }
 
-    /// The id_token's `exp` claim in Unix seconds. RFC 7519 allows a fractional
-    /// `NumericDate`, so one is rounded down rather than rejected.
+    /// The id_token's `exp` claim in Unix seconds, or `None` when it is absent,
+    /// not a number, or outside the range [`chrono`] can represent.
+    ///
+    /// The range check matters because the id_token is untrusted input: an
+    /// unrepresentable `exp` would otherwise saturate the cast to an extreme
+    /// `i64`, which either overflows the expiry arithmetic or renders as an empty
+    /// (and so seemingly non-expiring) `Credential::expires_at`. RFC 7519 allows a
+    /// fractional `NumericDate`, so one is rounded down rather than rejected.
     fn id_token_expiry(&self) -> Option<i64> {
         let claims = decode_jwt_claims(self.id_token.as_deref()?)?;
         let exp = claims.get("exp")?;
-        exp.as_i64().or_else(|| {
+        let seconds = exp.as_i64().or_else(|| {
             exp.as_f64()
                 .filter(|seconds| seconds.is_finite())
                 .map(|seconds| seconds.floor() as i64)
-        })
+        })?;
+        chrono::DateTime::from_timestamp(seconds, 0).map(|_| seconds)
     }
 }
 
 fn outlives_expiry_buffer(expires_at: i64) -> bool {
-    expires_at - TOKEN_EXPIRY_BUFFER_SECS > chrono::Utc::now().timestamp()
+    expires_at.saturating_sub(TOKEN_EXPIRY_BUFFER_SECS) > chrono::Utc::now().timestamp()
 }
