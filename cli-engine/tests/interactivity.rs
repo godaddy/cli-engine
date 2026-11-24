@@ -1342,4 +1342,69 @@ mod prompting {
             prompter.transcript()
         );
     }
+
+    #[tokio::test]
+    async fn recovery_validates_an_answer_for_a_command_after_an_option_value() {
+        // `--region project` consumes `project`; the command is `domain make`,
+        // whose `--count` must parse as a number. Resolving the wrong command
+        // would skip that check and let `abc` through to the final parse.
+        let make = |name: &'static str| {
+            RuntimeCommandSpec::new(
+                CommandSpec::new(name, "Make").no_auth(true).with_arg(
+                    Arg::new("count")
+                        .long("count")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u16)),
+                ),
+                async |_credential, args| {
+                    Ok(CommandResult::new(json!({ "count": args.get("count") })))
+                },
+            )
+        };
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("abc"),
+            Answer::text("7"),
+        ]));
+        let shared: Arc<dyn Prompter> = prompter.clone();
+        let cli = Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(shared)
+                .with_register_flags(Arc::new(|command: clap::Command| {
+                    command.arg(Arg::new("region").long("region").global(true))
+                }))
+                .with_modules(vec![
+                    Module::new("Test", move |_ctx| {
+                        RuntimeGroupSpec::new(GroupSpec::new("project", "Projects"))
+                            .with_command(make("list"))
+                    }),
+                    Module::new("Test", move |_ctx| {
+                        RuntimeGroupSpec::new(GroupSpec::new("domain", "Domains"))
+                            .with_command(make("make"))
+                    }),
+                ]),
+        );
+        let output = cli
+            .run([
+                "test-cli",
+                "--region",
+                "project",
+                "domain",
+                "make",
+                "--interactive",
+                "--json",
+            ])
+            .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["count"], json!(7));
+        assert!(
+            prompter
+                .transcript()
+                .iter()
+                .any(|line| line.starts_with("  rejected:")),
+            "the non-numeric answer must be explained and asked again: {:?}",
+            prompter.transcript()
+        );
+    }
 }

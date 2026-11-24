@@ -221,33 +221,8 @@ impl PromptedTokens {
 }
 
 /// Index just past the leaf command's name in `args`, if one is named.
-///
-/// Walks the arguments the way the parser does: a value-taking option consumes
-/// the token after it, so `--env project domain make` finds `domain make`, not
-/// the `project` that is really `--env`'s value.
 fn leaf_end_index(root: &clap::Command, args: &[String]) -> Option<usize> {
-    let value_flags = crate::flags::derive_value_flags(root);
-    let mut current = root;
-    let mut end = None;
-    let mut index = 1;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--" {
-            break;
-        }
-        if arg.starts_with('-') {
-            // `--opt=value` carries its value; `--opt value` consumes the next token.
-            let consumes_next = !arg.contains('=') && value_flags.contains(arg.as_str());
-            index += if consumes_next { 2 } else { 1 };
-            continue;
-        }
-        if let Some(sub) = current.find_subcommand(arg) {
-            current = sub;
-            end = Some(index + 1);
-        }
-        index += 1;
-    }
-    end
+    walk_to_leaf(root, args, root.get_name()).1
 }
 
 /// Outcome of a "did you mean X?" correction prompt.
@@ -320,21 +295,50 @@ pub(super) fn resolve_leaf_command<'cmd>(
     args: &[String],
     app_name: &str,
 ) -> Option<&'cmd clap::Command> {
+    Some(walk_to_leaf(root, args, app_name).0)
+}
+
+/// Walks `args` down the command tree the way the parser does, returning the
+/// deepest command named and the index just past its name (`None` when no
+/// subcommand is named).
+///
+/// A value-taking option consumes the token after it, so `--region project
+/// domain make` finds `domain make`, not the `project` that is really
+/// `--region`'s value. Stops at `--` and at the first token that is not a
+/// subcommand of the command reached so far.
+fn walk_to_leaf<'cmd>(
+    root: &'cmd clap::Command,
+    args: &[String],
+    app_name: &str,
+) -> (&'cmd clap::Command, Option<usize>) {
+    let value_flags = crate::flags::derive_value_flags(root);
     let mut current = root;
-    for arg in args.iter().skip(1) {
+    let mut end = None;
+    let mut index = 1;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            break;
+        }
         if arg.starts_with('-') {
+            // `--opt=value` carries its value; `--opt value` consumes the next token.
+            let consumes_next = !arg.contains('=') && value_flags.contains(arg.as_str());
+            index += if consumes_next { 2 } else { 1 };
             continue;
         }
+        index += 1;
         if arg == app_name {
             continue;
         }
-        if let Some(sub) = current.find_subcommand(arg) {
-            current = sub;
-        } else {
-            break;
+        match current.find_subcommand(arg) {
+            Some(sub) => {
+                current = sub;
+                end = Some(index);
+            }
+            None => break,
         }
     }
-    Some(current)
+    (current, end)
 }
 
 /// Infer the prompt type from clap arg metadata and prompt accordingly.
@@ -451,17 +455,17 @@ pub(super) fn answer_problem(
 }
 
 /// Whether `arg` was set from the command line in a successful parse.
-fn populated(matches: &clap::ArgMatches, arg: &clap::Arg) -> bool {
+///
+/// An argument the matched command does not define counts as not populated.
+/// clap reports that case as an error in debug builds but as plain "absent" in
+/// release builds, so both are treated as absent here and the answer is
+/// refused the same way in either profile.
+pub(super) fn populated(matches: &clap::ArgMatches, arg: &clap::Arg) -> bool {
     let leaf = crate::command::leaf_matches(matches);
-    match leaf.try_contains_id(arg.get_id().as_str()) {
-        Ok(present) => {
-            present
-                && leaf.value_source(arg.get_id().as_str())
-                    == Some(clap::parser::ValueSource::CommandLine)
-        }
-        // Not an argument of the matched command, so nothing to check.
-        Err(_) => true,
-    }
+    let id = arg.get_id().as_str();
+    // Check presence first: `value_source` panics on an unknown id in debug builds.
+    matches!(leaf.try_contains_id(id), Ok(true))
+        && leaf.value_source(id) == Some(clap::parser::ValueSource::CommandLine)
 }
 
 /// Judges a missing-required-argument failure after an answer: only

@@ -413,3 +413,48 @@ fn multi_value_and_variadic_positionals_resolve_as_positionals() {
     let files = find_arg_def(&cmd, "<files>...").expect("variadic positional");
     assert_eq!(files.get_id().as_str(), "files");
 }
+
+#[test]
+fn the_leaf_is_found_past_the_value_of_a_global_option() {
+    let root = clap::Command::new("app")
+        .arg(clap::Arg::new("region").long("region").global(true))
+        .subcommand(clap::Command::new("project").subcommand(clap::Command::new("list")))
+        .subcommand(clap::Command::new("domain").subcommand(clap::Command::new("make")));
+    let args: Vec<String> = [
+        "app",
+        "--region",
+        "project",
+        "domain",
+        "make",
+        "--interactive",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+
+    let leaf = resolve_leaf_command(&root, &args, "app").expect("leaf");
+    assert_eq!(leaf.get_name(), "make");
+    // `--region=project` carries its own value, so it consumes nothing else.
+    let attached: Vec<String> = ["app", "--region=project", "domain", "make"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let leaf = resolve_leaf_command(&root, &attached, "app").expect("leaf");
+    assert_eq!(leaf.get_name(), "make");
+}
+
+#[test]
+fn an_argument_the_matched_command_lacks_is_not_populated_in_any_profile() {
+    let cmd = clap::Command::new("app").arg(clap::Arg::new("known").long("known"));
+    let matches = cmd
+        .clone()
+        .try_get_matches_from(["app", "--known", "x"])
+        .expect("parses");
+    let known = clap::Arg::new("known").long("known");
+    let stranger = clap::Arg::new("stranger").long("stranger");
+
+    assert!(populated(&matches, &known));
+    // Debug builds report an unknown id as an error and release builds as
+    // absent; both must read as not populated.
+    assert!(!populated(&matches, &stranger));
+}
