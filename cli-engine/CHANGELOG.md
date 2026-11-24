@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.7](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.6...cli-engine-v0.10.7) (2026-11-24)
+
+
+### Features
+
+* **interactivity:** per-command interactive defaults and a testable prompter ([#140](https://github.com/godaddy/cli-engine/issues/140)) ([a4e39e7](https://github.com/godaddy/cli-engine/commit/a4e39e7e8064ff855c5b8f5413f585f54cd23928))
+
 ## [0.10.6](https://github.com/godaddy/cli-engine/compare/cli-engine-v0.10.5...cli-engine-v0.10.6) (2026-11-16)
 
 
