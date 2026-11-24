@@ -217,6 +217,32 @@ redundant keychain reads. A 30-second expiry buffer triggers proactive refresh.
 
 The redirect port defaults to `7443`. Override it with `PkceAuthProvider::with_redirect_port`, or opt into an OS-assigned ephemeral port with `PkceAuthProvider::with_ephemeral_redirect_port` — only if the authorization server does RFC 8252 §7.3 port-agnostic loopback matching for this client; the default is unchanged until that's confirmed.
 
+### Using The id_token As The Bearer
+
+By default `Credential.token` is the OAuth access token. Some resource servers validate the OIDC id_token instead. `PkceAuthProvider::with_bearer(Bearer::IdToken)` makes the id_token the credential:
+
+```rust
+use cli_engine::auth::pkce::{Bearer, PkceAuthProvider};
+
+let provider = PkceAuthProvider::new(
+    "okta",
+    "https://idp.example.com/oauth2/v1/authorize",
+    "https://idp.example.com/oauth2/v1/token",
+    "my-client-id",
+    &["openid", "email"],
+)
+.with_bearer(Bearer::IdToken);
+```
+
+With the id_token as the bearer:
+
+- `Credential.token` is the id_token and `Credential.expires_at` is its `exp` claim. `exp` is read without verifying the signature, like every other claim this provider decodes; the resource server decides whether the token is acceptable.
+- A login must return an id_token that has an `exp` claim, so request the `openid` scope. One that does not fails and nothing is stored; the provider never falls back to the access token.
+- Reuse is judged by the id_token's expiry, not the access token's. An expired one is renewed with the refresh token only when the refresh response carries a fresh id_token. The previous id_token is never carried forward, so a refresh without one is discarded and the next command logs in interactively.
+- A stored token with no usable id_token, such as one written before this option was enabled, counts as not logged in: commands log in again and `auth status` reports an error for it.
+
+The default, `Bearer::AccessToken`, is unchanged, including carrying the previous id_token across a refresh so identity claims keep resolving.
+
 ### Environment Variable Overrides
 
 At runtime, the provider checks for environment variable overrides before using its compiled-in
