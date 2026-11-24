@@ -20,7 +20,7 @@ use crate::auth::storage::{CredentialKey, CredentialStorage};
 use crate::config::CredentialStore;
 use std::collections::HashMap;
 
-fn valid_token(access_token: &str) -> StoredToken {
+pub(super) fn valid_token(access_token: &str) -> StoredToken {
     StoredToken {
         access_token: access_token.to_owned(),
         expires_at: Utc::now().timestamp() + 3600,
@@ -499,7 +499,7 @@ async fn list_environments_returns_empty_without_cache() {
 
 /// Builds an unsigned-looking JWT (`header.payload.signature`) whose payload
 /// is the given claims object, base64url-encoded without padding.
-fn make_jwt(claims: &Value) -> String {
+pub(super) fn make_jwt(claims: &Value) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("serialize claims"));
     format!("{header}.{payload}.signature")
@@ -719,8 +719,8 @@ fn with_required_nonce_sets_flag() {
 /// In-memory [`CredentialStorage`] double: lets us assert the provider
 /// delegates load/save/delete without any real keychain or filesystem.
 #[derive(Debug, Default)]
-struct MemoryStorage {
-    entries: std::sync::Mutex<HashMap<String, String>>,
+pub(super) struct MemoryStorage {
+    pub(super) entries: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl MemoryStorage {

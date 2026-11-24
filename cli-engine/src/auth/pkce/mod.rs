@@ -56,10 +56,8 @@ use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::SecondsFormat;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     Credential, Result,
@@ -71,10 +69,13 @@ use crate::{
     error::CliCoreError,
 };
 
+#[cfg(test)]
+mod bearer_tests;
 mod callback_server;
 #[cfg(test)]
 mod redirect_tests;
 mod scopes;
+mod stored_token;
 #[cfg(test)]
 mod tests;
 
@@ -87,6 +88,8 @@ use scopes::{
     StepUp, decode_jwt_claims, ensure_granted, extract_identity, granted_scopes,
     parse_token_response, plan_step_up, union_scopes, verify_id_token_nonce,
 };
+pub use stored_token::Bearer;
+use stored_token::StoredToken;
 
 const REDIRECT_PORT_DEFAULT: u16 = 7443;
 
@@ -108,73 +111,6 @@ const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
 /// Default timeout applied to OAuth token-endpoint requests (exchange/refresh)
 /// so a stalled token server cannot hang the CLI indefinitely.
 const TOKEN_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
-
-/// Stored token with expiry tracking.
-///
-/// Token fields are zeroized on drop to limit in-memory exposure.
-#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-struct StoredToken {
-    access_token: String,
-    expires_at: i64,
-    refresh_token: Option<String>,
-    /// Scopes the token was obtained with (granted by the authorization server,
-    /// or the requested set when the server does not echo `scope`). Lets scope
-    /// coverage work for opaque access tokens and IdPs that do not expose scopes
-    /// in the access token itself. Not secret, so excluded from zeroization.
-    ///
-    /// `#[serde(default)]` keeps tokens written before this field was added
-    /// loadable from the keychain (they decode with an empty set, falling back to
-    /// the JWT `scope`/`scp` claim as before).
-    #[serde(default)]
-    #[zeroize(skip)]
-    scopes: Vec<String>,
-    /// OIDC ID token, present when `openid` is among the granted scopes. Many
-    /// IdPs (GoDaddy's included) leave profile claims (`email`/`name`/etc.) off
-    /// the access token even when `openid`/`profile` are granted — those claims
-    /// live here instead. [`PkceAuthProvider::build_credential`] merges this
-    /// token's claims over the access token's (winning on overlap) when
-    /// deriving `Credential.identity`/`sub`.
-    ///
-    /// `#[serde(default)]` keeps tokens cached before this field was added
-    /// loadable (they decode with `None`, falling back to the access token's
-    /// own claims exactly as before). Not `#[zeroize(skip)]`: like
-    /// `access_token`/`refresh_token`, it can carry sensitive claims.
-    #[serde(default)]
-    id_token: Option<String>,
-}
-
-impl std::fmt::Debug for StoredToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StoredToken")
-            .field("access_token", &"[redacted]")
-            .field("expires_at", &self.expires_at)
-            .field(
-                "refresh_token",
-                if self.refresh_token.is_some() {
-                    &"Some([redacted])"
-                } else {
-                    &"None"
-                },
-            )
-            .field(
-                "id_token",
-                if self.id_token.is_some() {
-                    &"Some([redacted])"
-                } else {
-                    &"None"
-                },
-            )
-            .field("scopes", &self.scopes)
-            .finish()
-    }
-}
-
-impl StoredToken {
-    fn is_valid(&self) -> bool {
-        let now = chrono::Utc::now().timestamp();
-        self.expires_at - TOKEN_EXPIRY_BUFFER_SECS > now
-    }
-}
 
 /// The effective OAuth values for an environment. No default on
 /// `client_id`/`auth_url`/`token_url`: a provider whose base config and
@@ -239,6 +175,15 @@ pub struct PkceAuthProvider {
     /// Whether an id_token with no `nonce` claim at all is rejected outright.
     /// `false` by default — see [`PkceAuthProvider::with_required_nonce`].
     require_nonce: bool,
+    /// Which stored token becomes `Credential::token` — see [`Bearer`].
+    bearer: Bearer,
+}
+
+/// Formats Unix seconds as RFC 3339, or an empty string when out of range.
+fn rfc3339_secs(unix_seconds: i64) -> String {
+    chrono::DateTime::from_timestamp(unix_seconds, 0)
+        .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+        .unwrap_or_default()
 }
 
 /// Default prioritized claim names for deriving a human-readable identity.
@@ -283,6 +228,7 @@ impl PkceAuthProvider {
             cache: Arc::new(RwLock::new(HashMap::new())),
             scope_hierarchy: ScopeHierarchy::new(),
             require_nonce: false,
+            bearer: Bearer::default(),
         }
     }
 
@@ -494,6 +440,31 @@ impl PkceAuthProvider {
         self
     }
 
+    /// Chooses which token becomes [`Credential::token`](crate::Credential::token).
+    ///
+    /// Defaults to [`Bearer::AccessToken`]. Use [`Bearer::IdToken`] for a
+    /// resource server that validates the OIDC id_token instead; see [`Bearer`]
+    /// for how that changes expiry, refresh and login.
+    #[must_use]
+    pub fn with_bearer(mut self, bearer: Bearer) -> Self {
+        self.bearer = bearer;
+        self
+    }
+
+    /// Builds the [`Credential`] handed to callers: [`build_credential`](Self::build_credential)
+    /// with the token and expiry this provider's [`Bearer`] selects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the id_token is the bearer and `token` has no usable one.
+    fn bearer_credential(&self, env: &str, token: &StoredToken) -> Result<Credential> {
+        let (bearer_token, expires_at) = token.require_bearer(self.bearer, env)?;
+        let mut credential = self.build_credential(env, token);
+        bearer_token.clone_into(&mut credential.token);
+        credential.expires_at = rfc3339_secs(expires_at);
+        Ok(credential)
+    }
+
     /// Builds a [`Credential`] from a stored token, deriving `identity` and `sub`
     /// from the access-token JWT claims when present.
     fn build_credential(&self, env: &str, token: &StoredToken) -> Credential {
@@ -515,9 +486,7 @@ impl PkceAuthProvider {
             token: token.access_token.clone(),
             env: env.to_owned(),
             provider: self.name.clone(),
-            expires_at: chrono::DateTime::from_timestamp(token.expires_at, 0)
-                .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
-                .unwrap_or_default(),
+            expires_at: rfc3339_secs(token.expires_at),
             identity,
             sub,
             scopes: granted_scopes(token),
@@ -730,7 +699,10 @@ impl PkceAuthProvider {
 
     async fn cached_token(&self, env: &str) -> Option<StoredToken> {
         let cache = self.cache.read().await;
-        cache.get(env).filter(|t| t.is_valid()).cloned()
+        cache
+            .get(env)
+            .filter(|t| t.is_valid_for(self.bearer))
+            .cloned()
     }
 
     async fn store_cached_token(&self, env: &str, token: StoredToken) {
@@ -755,7 +727,7 @@ impl PkceAuthProvider {
             return Ok(Some(token));
         }
         if let Some(token) = self.load_stored(env).await {
-            if token.is_valid() {
+            if token.is_valid_for(self.bearer) {
                 self.store_cached_token(env, token.clone()).await;
                 return Ok(Some(token));
             }
@@ -767,8 +739,21 @@ impl PkceAuthProvider {
                 if refreshed.refresh_token.is_none() {
                     refreshed.refresh_token = Some(refresh_token.to_owned());
                 }
-                if refreshed.id_token.is_none() {
-                    refreshed.id_token = token.id_token.clone();
+                match self.bearer {
+                    // Profile claims still come from the earlier id_token when a
+                    // refresh response omits one.
+                    Bearer::AccessToken => {
+                        if refreshed.id_token.is_none() {
+                            refreshed.id_token = token.id_token.clone();
+                        }
+                    }
+                    // The id_token is the credential, so a refresh that returns
+                    // no fresh one has nothing to hand out; log in again.
+                    Bearer::IdToken => {
+                        if !refreshed.is_valid_for(self.bearer) {
+                            return Ok(None);
+                        }
+                    }
                 }
                 self.save_stored(env, &refreshed).await?;
                 self.store_cached_token(env, refreshed.clone()).await;
@@ -782,6 +767,9 @@ impl PkceAuthProvider {
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         let token = self.run_pkce_flow_with(env, scopes).await?;
+        // Checked before anything is stored, so a login that cannot produce this
+        // provider's bearer leaves the previous token alone.
+        token.require_bearer(self.bearer, env)?;
         // Persist first — the keychain write overwrites the existing entry for
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails
@@ -919,7 +907,7 @@ impl AuthProvider for PkceAuthProvider {
 
     async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
         let token = self.resolve_token(env).await?;
-        Ok(self.build_credential(env, &token))
+        self.bearer_credential(env, &token)
     }
 
     async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
@@ -935,7 +923,7 @@ impl AuthProvider for PkceAuthProvider {
             // was obtained with).
             let granted = granted_scopes(&token);
             match plan_step_up(&granted, required, &self.scope_hierarchy) {
-                StepUp::Covered => return Ok(self.build_credential(env, &token)),
+                StepUp::Covered => return self.bearer_credential(env, &token),
                 // Step-up is re-consent: the authorization server has no silent
                 // scope-expansion grant, so acquire the missing scopes with a
                 // fresh login — the same browser flow the no-token path runs
@@ -947,7 +935,7 @@ impl AuthProvider for PkceAuthProvider {
                     let union = union_scopes(&self.effective_scopes(env)?, &granted, required);
                     let token = self.reauthenticate(env, &union).await?;
                     ensure_granted(env, &token, required, &self.scope_hierarchy)?;
-                    return Ok(self.build_credential(env, &token));
+                    return self.bearer_credential(env, &token);
                 }
             }
         }
@@ -956,7 +944,7 @@ impl AuthProvider for PkceAuthProvider {
         let union = union_scopes(&self.effective_scopes(env)?, &[], required);
         let token = self.reauthenticate(env, &union).await?;
         ensure_granted(env, &token, required, &self.scope_hierarchy)?;
-        Ok(self.build_credential(env, &token))
+        self.bearer_credential(env, &token)
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
@@ -965,7 +953,7 @@ impl AuthProvider for PkceAuthProvider {
                 "not logged in for environment {env:?}"
             )));
         };
-        Ok(self.build_credential(env, &token))
+        self.bearer_credential(env, &token)
     }
 
     async fn logout(&self, env: &str) -> Result<()> {
