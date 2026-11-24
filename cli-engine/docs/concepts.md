@@ -464,6 +464,20 @@ By default, a dry-run-promptable command is short-circuited generically: the han
 
 If the dry-run branch never needs a credential (no live API call to build the preview), prefer `CommandSpec::auth_optional()` over the default `Required` and check `dry_run()` before calling `credential()`/`credential_with_scopes()` — otherwise `Required` resolves the credential (and may trigger an interactive login) before the handler even runs, purely to render a preview that never uses it. If the preview itself needs a live call to build an accurate diff, `Required` and `Optional` behave identically, so the simpler fail-closed `Required` is fine.
 
+## Interactivity
+
+Whether a command prompts is resolved per invocation and read in the handler with `CommandContext::is_interactive()`. Precedence is: an explicit `--interactive` or `--non-interactive` flag, then the command's `InteractivityPolicy`, then the TTY check (stdin and stderr must both be terminals). With no TTY a command is never interactive by default.
+
+`CommandSpec::with_interactivity` sets the policy: `Inherit` (the default) follows `CliConfig::with_auto_interactive`; `DefaultOnTty` makes the command interactive by default on a terminal even when the CLI as a whole has not opted in, which suits a guided flow such as an `init` wizard; `OnRequest` makes it prompt only under `--interactive`, even when the CLI auto-detects. A `DefaultOnTty` command also gets a line in its long help saying it is interactive by default and that `--non-interactive` turns that off. The policy governs both the handler's `is_interactive()` and the engine's missing-required-argument recovery for that command.
+
+A handler that has to ask questions starts with `ctx.require_interactive("pass --name and --env")`, which fails with a fix hint when prompting is off (no terminal, or `--non-interactive`), then asks through `ctx.prompter()`. The `Prompter` trait offers `text` (with an optional validator that re-asks on a rejected answer), `select`, `confirm` and `multi_select`. A cancelled prompt exits with code 130, the same as the engine's own missing-argument recovery.
+
+The default prompter uses the terminal. In a test, `CliConfig::with_prompter` installs a `prompt::ScriptedPrompter` that replays a list of `prompt::Answer` values, so a prompting command runs end to end with no terminal. A prompt it has no matching answer for fails the run with a message naming the prompt, and `transcript()` returns every question asked, including the answers a validator rejected.
+
+The engine already asks for a missing *required* arg. To also ask for an optional one in a guided run, name it with `CommandSpec::with_prompted_args(["description"])` (the arg's clap id). After a successful parse the engine asks for each named arg the user did not supply, on the command line or by environment variable, then re-parses with the answers added. A blank answer skips the arg, a flag arg is a yes/no that defaults to no, and an arg with possible values is a menu with a skip choice. Answers are checked against the arg's own value parser and asked again when clap would reject them. Nothing is asked under `--non-interactive` or without a terminal, and only args named this way are ever asked for, so a command with many optional flags is not turned into a questionnaire.
+
+For "add another" flows, `prompt::prompt_repeat(prompter, "Add a record?", "Add another?", |prompter| ...)` asks the first question, runs the closure on yes, then asks the second question until the user declines. Both questions default to no, and an error from the closure ends the loop.
+
 ## Feature Flags & Stages
 
 Feature flags classify command readiness rather than risk. `Stage` orders `Experimental < Beta < Ga`; the default is `Ga`, so gating is opt-in — a command with no flag declaration is fully visible under every policy.

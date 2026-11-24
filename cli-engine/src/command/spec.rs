@@ -4,8 +4,8 @@ use clap::{Arg, ArgGroup, Command};
 use schemars::JsonSchema;
 
 use crate::{
-    AuthRequirement, CommandMeta, FeatureFlag, OutputSchema, SchemaInfo, Stage, Tier,
-    output::TableColumn,
+    AuthRequirement, CommandMeta, FeatureFlag, InteractivityPolicy, OutputSchema, SchemaInfo,
+    Stage, Tier, output::TableColumn,
 };
 
 /// Declarative leaf command metadata and parser arguments.
@@ -77,6 +77,19 @@ pub struct CommandSpec {
     pub handles_dry_run: bool,
     /// Forces this command's successful output to print verbatim to stdout.
     pub raw_output: bool,
+    /// Ids of optional args to ask for when the command runs interactively.
+    ///
+    /// Set with [`with_prompted_args`](CommandSpec::with_prompted_args).
+    /// Empty by default: the engine only prompts for *required* args unless a
+    /// command names optional ones here.
+    pub prompted_args: Vec<String>,
+    /// Whether this command runs interactively by default on a terminal.
+    ///
+    /// Set with [`with_interactivity`](CommandSpec::with_interactivity).
+    /// Defaults to [`InteractivityPolicy::Inherit`], which follows the
+    /// CLI-wide [`CliConfig::with_auto_interactive`](crate::CliConfig::with_auto_interactive)
+    /// setting.
+    pub interactivity: InteractivityPolicy,
     /// Provider-specific auth metadata.
     pub auth_metadata: BTreeMap<String, String>,
     /// Command-specific `clap` arguments.
@@ -571,6 +584,52 @@ impl CommandSpec {
         self
     }
 
+    /// Names optional args the engine should ask for when the command runs
+    /// interactively and the user did not supply them.
+    ///
+    /// The engine already prompts for missing *required* args. Use this for
+    /// an optional arg that is worth a question in a guided run, such as a
+    /// description. Each id is the arg's clap id (the field name under
+    /// `#[derive(clap::Args)]`). A blank answer leaves the arg unset, and an
+    /// arg given on the command line or through its environment variable is
+    /// never asked for. Nothing is asked under `--non-interactive` or without
+    /// a terminal. The answer is checked against the arg's own value parser
+    /// and asked again when clap would reject it.
+    ///
+    /// Only options can be prompted, not positionals: an answer for one would
+    /// land in the first free positional slot. Registration debug-asserts that
+    /// every id names an option (an arg with a long or short flag) of this
+    /// command, and a positional is skipped at run time in release builds.
+    #[must_use]
+    pub fn with_prompted_args<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.prompted_args = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets whether this command runs interactively by default.
+    ///
+    /// [`InteractivityPolicy::DefaultOnTty`] makes a guided command (an `init`
+    /// wizard, say) prompt whenever stdin and stderr are terminals, without
+    /// the whole CLI opting into
+    /// [`with_auto_interactive`](crate::CliConfig::with_auto_interactive).
+    /// [`InteractivityPolicy::OnRequest`] does the opposite for a command that
+    /// should only prompt under `--interactive`.
+    ///
+    /// The policy only picks the default. `--interactive` and
+    /// `--non-interactive` always win, and with no TTY the command is
+    /// non-interactive. Read the outcome with
+    /// [`CommandContext::is_interactive`](crate::CommandContext::is_interactive).
+    /// A `DefaultOnTty` command also gets a line in its long help saying so.
+    #[must_use]
+    pub fn with_interactivity(mut self, policy: InteractivityPolicy) -> Self {
+        self.interactivity = policy;
+        self
+    }
+
     /// Builds middleware metadata from the spec.
     #[must_use]
     pub fn metadata(&self) -> CommandMeta {
@@ -628,6 +687,12 @@ impl CommandSpec {
         }
         for group in &self.arg_groups {
             command = command.group(group.clone());
+        }
+        if self.interactivity == InteractivityPolicy::DefaultOnTty {
+            command = command.after_long_help(
+                "Interactive by default in a terminal: this command asks for missing values. \
+                 Pass --non-interactive to supply every value as a flag instead.",
+            );
         }
         command
     }

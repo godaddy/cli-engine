@@ -214,6 +214,18 @@ pub(super) fn command_clap_command_with_schema_help(
          pagination style, not both",
         spec.name
     );
+    debug_assert!(
+        spec.prompted_args
+            .iter()
+            .all(|id| spec.args.iter().any(|arg| {
+                arg.get_id().as_str() == id
+                    && (arg.get_long().is_some() || arg.get_short().is_some())
+            })),
+        "command {:?} names a prompted arg that is not one of its options (only args with a \
+         long or short flag can be prompted, not positionals): {:?}",
+        spec.name,
+        spec.prompted_args
+    );
     let mut command = spec.clap_command();
     command = apply_dry_run_visibility(command, spec);
     command = apply_pagination_args(command, spec);
