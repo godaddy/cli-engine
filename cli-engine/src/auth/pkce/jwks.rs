@@ -42,7 +42,10 @@ const ALLOWED_ALGORITHMS: [Algorithm; 8] = [
 /// Verifies id_tokens against a JSON Web Key Set.
 ///
 /// For each token it checks the signature against the key named by the token's
-/// `kid`, and the `iss` (issuer), `aud` (audience) and `exp` (expiry) claims. The
+/// `kid`, and the `iss` (issuer), `aud` (audience) and `exp` (expiry) claims. It
+/// also applies the OpenID Connect checks a generic JWT validator omits: `sub` must
+/// be a non-empty string, and `azp` (authorized party), when present or when `aud`
+/// lists several clients, must be this client. The
 /// accepted signature algorithms are the asymmetric RSA, RSA-PSS and ECDSA ones;
 /// HMAC is never accepted.
 ///
@@ -254,6 +257,45 @@ impl IdTokenVerifier for JwksVerifier {
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         let verified = decode::<Map<String, Value>>(id_token, &key, &validation)
             .map_err(|err| invalid(err.kind()))?;
+        check_oidc_claims(&verified.claims, audience)?;
         Ok(VerifiedIdToken::new(verified.claims))
     }
+}
+
+/// The OpenID Connect Core 3.1.3.7 checks that a generic JWT validator does not
+/// make, applied to claims whose signature, issuer, audience membership and expiry
+/// have already been checked.
+///
+/// - `sub` must be a non-empty string: it is the identity, and without one the
+///   token authenticates nobody.
+/// - `azp`, when present, must be this client. A token whose `aud` lists several
+///   clients was issued to one of them, and `azp` names which; a token naming
+///   another is not ours to accept even though our id is in its audience.
+/// - With several audiences, `azp` must be present and be this client. The spec
+///   leaves that a SHOULD; it is required here because accepting such a token
+///   without it would take any client that merely appears in `aud` as the holder.
+fn check_oidc_claims(claims: &Map<String, Value>, audience: &str) -> Result<(), VerifyError> {
+    let has_subject = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .is_some_and(|sub| !sub.is_empty());
+    if !has_subject {
+        return Err(VerifyError::Invalid(
+            "the token has no usable subject".to_owned(),
+        ));
+    }
+    let several_audiences = claims
+        .get("aud")
+        .and_then(Value::as_array)
+        .is_some_and(|audiences| audiences.len() > 1);
+    let wrong_party = match claims.get("azp") {
+        None => several_audiences,
+        Some(azp) => azp.as_str() != Some(audience),
+    };
+    if wrong_party {
+        return Err(VerifyError::Invalid(
+            "this client is not the token's authorized party".to_owned(),
+        ));
+    }
+    Ok(())
 }

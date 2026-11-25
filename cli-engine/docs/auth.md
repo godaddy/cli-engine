@@ -283,7 +283,7 @@ let provider = PkceAuthProvider::new(
 # Ok::<(), cli_engine::CliCoreError>(())
 ```
 
-It checks the signature against the key the token names in `kid`, and the `iss`, `aud` and `exp` claims. `aud` is compared with the OAuth client id. RSA, RSA-PSS and ECDSA signatures are accepted; HMAC never is, because a verifier that accepted it would let an attacker sign a token using the public key as the secret.
+It checks the signature against the key the token names in `kid`, and the `iss`, `aud` and `exp` claims. `aud` is compared with the OAuth client id. It also applies the OpenID Connect checks a generic JWT validator omits: `sub` must be a non-empty string, and `azp` (authorized party) must be this client when present, and must be present when `aud` lists several clients, since a token with a shared audience was issued to one of them and `azp` says which. RSA, RSA-PSS and ECDSA signatures are accepted; HMAC never is, because a verifier that accepted it would let an attacker sign a token using the public key as the secret.
 
 - The key set is fetched once and kept. It is fetched again, at most once per verification, when a token names a `kid` the kept set does not contain, which is how a key rotation reaches a long-running process.
 - A key endpoint that cannot be reached, answers an error status, or returns something unparseable or larger than 256 KiB is `Unavailable`, not a verdict on the token.

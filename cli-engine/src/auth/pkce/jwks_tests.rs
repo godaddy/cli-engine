@@ -356,6 +356,76 @@ async fn an_expired_token_is_rejected() {
     assert!(reason.contains("expired"), "{reason}");
 }
 
+/// A token whose `aud` lists this client among others, with no `azp` naming it as
+/// the party the token was issued to, was issued for someone else too.
+#[tokio::test]
+async fn a_multi_audience_token_must_name_this_client_as_authorized_party() {
+    let server = server_with_both_rsa_keys().await;
+    let f = fixture();
+
+    let mut claims = good_claims();
+    claims["aud"] = json!([AUDIENCE, "another-client"]);
+    let token = rs256(&f.rsa_a, "key-a", &claims);
+    let reason = expect_invalid(server.verifier().verify(&token, AUDIENCE).await);
+    assert!(reason.contains("authorized party"), "no azp: {reason}");
+
+    claims["azp"] = json!("another-client");
+    let token = rs256(&f.rsa_a, "key-a", &claims);
+    let reason = expect_invalid(server.verifier().verify(&token, AUDIENCE).await);
+    assert!(reason.contains("authorized party"), "wrong azp: {reason}");
+
+    claims["azp"] = json!(AUDIENCE);
+    let token = rs256(&f.rsa_a, "key-a", &claims);
+    server
+        .verifier()
+        .verify(&token, AUDIENCE)
+        .await
+        .expect("this client is the authorized party");
+}
+
+#[tokio::test]
+async fn an_azp_naming_another_client_is_rejected_even_with_a_single_audience() {
+    let server = server_with_both_rsa_keys().await;
+    let mut claims = good_claims();
+    claims["azp"] = json!("another-client");
+    let token = rs256(&fixture().rsa_a, "key-a", &claims);
+    expect_invalid(server.verifier().verify(&token, AUDIENCE).await);
+
+    // The common case: a single audience with an azp that agrees.
+    claims["azp"] = json!(AUDIENCE);
+    let token = rs256(&fixture().rsa_a, "key-a", &claims);
+    server
+        .verifier()
+        .verify(&token, AUDIENCE)
+        .await
+        .expect("azp agrees with aud");
+}
+
+#[tokio::test]
+async fn a_token_without_a_usable_subject_is_rejected() {
+    let server = server_with_both_rsa_keys().await;
+    for sub in [
+        None,
+        Some(json!("")),
+        Some(json!(42)),
+        Some(json!(null)),
+        Some(json!(["a"])),
+    ] {
+        let mut claims = good_claims();
+        match &sub {
+            Some(value) => claims["sub"] = value.clone(),
+            None => {
+                claims.as_object_mut().expect("object").remove("sub");
+            }
+        }
+        let token = rs256(&fixture().rsa_a, "key-a", &claims);
+        // Rejected either by our subject check or earlier, by the JWT layer that
+        // refuses a `sub` which is not a string; the reason text differs, the
+        // outcome must not.
+        expect_invalid(server.verifier().verify(&token, AUDIENCE).await);
+    }
+}
+
 #[tokio::test]
 async fn a_token_missing_a_required_claim_is_rejected() {
     let server = server_with_both_rsa_keys().await;
