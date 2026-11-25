@@ -79,7 +79,16 @@ fn seed_credential_file(xdg: &Path) {
     let json = format!(
         "{{\"access_token\":\"itok\",\"expires_at\":{expires_at},\"refresh_token\":null,\"scopes\":[]}}"
     );
-    std::fs::write(dir.join("primary-dev.json"), json).expect("write credential file");
+    let path = dir.join("primary-dev.json");
+    std::fs::write(&path, json).expect("write credential file");
+    // `FileStorage` refuses a credential file other users can reach, as the engine's
+    // own writes never leave one, so the fixture is private like a real one.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict credential file");
+    }
 }
 
 /// Writes `<xdg>/<app>/config.toml` with the given `[credentials].store`.

@@ -381,6 +381,15 @@ Tokens are persisted through the injectable `CredentialStorage` trait rather tha
 - **`auto`** (`AutoStorage`) — try the keychain, and transparently fall back to an unencrypted file when the keychain backend is unavailable.
 - **`file`** (`FileStorage`) — never contact the keychain. Tokens are written as **unencrypted JSON** to `<config-base>/<app_id>/credentials/<provider>-<env>.json` (`0600` on Unix), where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/Library/Application Support` (macOS), `$HOME/.config` (other Unix), or `%APPDATA%` (Windows).
 
+### What `FileStorage` checks
+
+The file store holds credentials in plaintext, and it is used when `file` is selected or when `auto` finds no reachable keychain (typically headless Linux, containers, or WSL without a Secret Service daemon). That is where nothing else protects them, so it does not take a file's word for being private. On Unix:
+
+- **Reads** open the file without following a symlink, and use it only if it is a regular file owned by the user running the CLI with no group or other permission bits (`0600` or stricter). Any other file is treated as no credential, with a warning in the log, so the user is asked to log in again; the login replaces it.
+- **Writes** go to a private temporary file in the same directory and are renamed over the target, so the file is always `0600`. The `credentials` directory is set to `0700` on every write, whether or not it already existed. Only that directory is changed, never the config base or `$HOME`.
+
+On Windows no extra check is made: the file lives under `%APPDATA%`, which inherits the user profile's access control, and the replace uses `std::fs::rename`. A `XDG_CONFIG_HOME` that points somewhere other users can read is not protected against there; use the `keyring` store.
+
 ### Listing Stored Environments
 
 `auth status` (with no `--env`) asks each provider which environments hold a credential. A storage backend cannot answer that: the system keychain has no way to list items by prefix, and scanning the credentials directory is ambiguous, because `<provider>-<env>.json` reads the same for provider `a` with env `b-c` as for provider `a-b` with env `c`.
