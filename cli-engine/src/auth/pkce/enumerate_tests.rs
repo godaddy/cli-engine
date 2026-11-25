@@ -26,6 +26,11 @@ fn memory() -> Arc<dyn CredentialStorage> {
     Arc::new(MemoryStorage::default())
 }
 
+/// Where the index for provider `test` under app `app` is stored.
+fn index_key() -> CredentialKey<'static> {
+    CredentialKey::new("app.index", "test.index", "index")
+}
+
 async fn listed(provider: &PkceAuthProvider) -> Vec<String> {
     let mut envs = provider.list_environments().await.expect("list");
     envs.sort();
@@ -102,10 +107,7 @@ async fn logging_out_updates_the_index_itself() {
     provider.logout("prod").await.expect("logout");
     assert!(index.list().await.is_empty());
     assert!(
-        storage
-            .load(&CredentialKey::new("app", "test.index", "index"))
-            .await
-            .is_none(),
+        storage.load(&index_key()).await.is_none(),
         "an empty index leaves no entry behind"
     );
 }
@@ -225,7 +227,7 @@ async fn apps_sharing_a_backend_do_not_see_each_others_environments() {
 #[tokio::test]
 async fn a_corrupt_or_foreign_index_is_treated_as_empty_and_repaired_by_the_next_save() {
     let storage = memory();
-    let index_key = CredentialKey::new("app", "test.index", "index");
+    let index_key = index_key();
     for garbage in [
         "not json",
         "[]",
@@ -249,10 +251,7 @@ async fn an_oversized_index_is_bounded() {
     let storage = memory();
     let many: Vec<String> = (0..10_000).map(|n| format!("env-{n}")).collect();
     let document = serde_json::json!({ "environments": many }).to_string();
-    storage
-        .save(&CredentialKey::new("app", "test.index", "index"), &document)
-        .await
-        .expect("seed");
+    storage.save(&index_key(), &document).await.expect("seed");
 
     let index = EnvironmentIndex::new(storage.clone(), "app", "test");
     assert!(
@@ -457,10 +456,98 @@ async fn a_reachable_empty_keychain_lists_nothing_and_is_not_an_error() {
     let provider = provider_on(&storage);
     assert!(listed(&provider).await.is_empty());
     // Listing wrote nothing: there was nothing to record.
-    assert!(
-        storage
-            .load(&CredentialKey::new("app", "test.index", "index"))
-            .await
-            .is_none()
+    assert!(storage.load(&index_key()).await.is_none());
+}
+
+/// Regression: `FileStorage` joins provider and environment as `<provider>-<env>.json`,
+/// so an index kept as a file beside the credentials is reachable by a credential of
+/// another provider whose environment ends in `.index-index`. Provider `a-b` (index)
+/// and provider `a` with env `b.index-index` (credential) used to share a file.
+#[tokio::test]
+// The guard serializes the process-wide config directory across the awaits below.
+#[allow(clippy::await_holding_lock)]
+async fn an_index_file_cannot_be_reached_by_a_credential_of_another_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _lock = crate::config::test_env::lock();
+    let _env = crate::config::test_env::EnvVarGuard::set("XDG_CONFIG_HOME", Some(dir.path()));
+    let files: Arc<dyn CredentialStorage> = Arc::new(crate::auth::FileStorage::new());
+
+    let index = EnvironmentIndex::new(files.clone(), "app", "a-b");
+    index.record("dev").await.expect("record");
+
+    // A credential that would have landed on the index's old path.
+    let credential = CredentialKey::new("app", "a", "b.index-index");
+    files.save(&credential, "secret").await.expect("save");
+    assert_eq!(
+        index.list().await,
+        ["dev"],
+        "saving did not overwrite the index"
     );
+
+    index.record("prod").await.expect("record");
+    assert_eq!(
+        files.load(&credential).await.as_deref(),
+        Some("secret"),
+        "writing the index did not overwrite the credential"
+    );
+    assert_eq!(index.list().await, ["dev", "prod"]);
+}
+
+/// Regression: listing probes a credential, finds it missing, and then forgets the
+/// name. A login that saved it, and recorded it, between the two must not be undone.
+#[tokio::test]
+async fn a_login_that_lands_between_the_probe_and_the_prune_is_kept() {
+    /// Reports the credential absent the first time it is asked, and completes a
+    /// login (saves it and records it in the index) before that answer is used.
+    #[derive(Debug)]
+    struct LoginDuringProbe {
+        inner: Arc<dyn CredentialStorage>,
+        armed: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl CredentialStorage for LoginDuringProbe {
+        async fn load(&self, key: &CredentialKey<'_>) -> Option<String> {
+            let is_credential = key.provider == "test" && key.env == "dev";
+            if is_credential && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let json = serde_json::to_string(&valid_token("late")).expect("serialize");
+                self.inner.save(key, &json).await.expect("late save");
+                EnvironmentIndex::new(self.inner.clone(), "app", "test")
+                    .record("dev")
+                    .await
+                    .expect("late record");
+                return None;
+            }
+            self.inner.load(key).await
+        }
+        async fn save(&self, key: &CredentialKey<'_>, value: &str) -> crate::Result<()> {
+            self.inner.save(key, value).await
+        }
+        async fn delete(&self, key: &CredentialKey<'_>) {
+            self.inner.delete(key).await;
+        }
+    }
+
+    let backend = memory();
+    // Start from a stale name: indexed, with no credential behind it.
+    EnvironmentIndex::new(backend.clone(), "app", "test")
+        .record("dev")
+        .await
+        .expect("seed");
+    let racing: Arc<dyn CredentialStorage> = Arc::new(LoginDuringProbe {
+        inner: backend.clone(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+
+    assert!(
+        listed(&provider_on(&racing)).await.is_empty(),
+        "the probe itself saw nothing"
+    );
+    assert_eq!(
+        EnvironmentIndex::new(backend.clone(), "app", "test")
+            .list()
+            .await,
+        ["dev"],
+        "the login that landed meanwhile is still indexed"
+    );
+    assert_eq!(listed(&provider_on(&backend)).await, ["dev"]);
 }

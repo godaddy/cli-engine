@@ -26,6 +26,20 @@ pub(super) async fn forget(provider: &PkceAuthProvider, env: &str) {
     }
 }
 
+/// Drops `env` from the index unless a credential for it is stored. The check is made
+/// under the index's lock, so a login that saved the credential after the caller
+/// last looked is not undone.
+async fn forget_if_still_absent(provider: &PkceAuthProvider, env: &str) {
+    let result = provider
+        .env_index()
+        .await
+        .forget_unless_present(env, async || provider.has_stored(env).await)
+        .await;
+    if let Err(err) = result {
+        tracing::warn!(env, error = %err, "could not remove the environment from the credential index");
+    }
+}
+
 /// Every environment with a stored credential, sorted.
 ///
 /// Candidates are the in-process cache, the index, and the environments the provider
@@ -60,8 +74,9 @@ pub(super) async fn environments_with_credentials(provider: &PkceAuthProvider) -
             }
             present.push(env);
         } else if indexed.contains(&env) {
-            // Named by the index but gone: drop the stale name.
-            forget(provider, &env).await;
+            // Named by the index but gone: drop the stale name, unless a login
+            // has saved it again since the probe above.
+            forget_if_still_absent(provider, &env).await;
         }
     }
     present

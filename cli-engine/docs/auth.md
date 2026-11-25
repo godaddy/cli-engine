@@ -389,7 +389,7 @@ So `PkceAuthProvider` keeps the list itself, as one small entry in the same back
 
 - Saving a credential records its environment, and logging out removes it. Removing the last one removes the entry.
 - Listing keeps only names the backend really holds a credential for, so an entry left behind by a crash, or by a credential deleted outside the CLI, is dropped (and removed from the entry) instead of being reported.
-- The entry lives under a key derived from the provider, `<provider>.index`, not from any environment, so no environment name can address or overwrite it. Do not name a provider as another provider's name plus `.index`.
+- The entry lives under a key derived from the app and the provider, `<app>.index` / `<provider>.index`, never from an environment, so no environment name can address or overwrite it. For the file backend that is a directory of its own beside the app's `credentials` directory. Do not name an app or a provider as another one's name plus `.index`.
 - Failing to write it never fails a login: the credential is saved, and the worst outcome is that it is not listed until the next save.
 - It holds at most 256 environments of at most 128 bytes each, so a damaged entry cannot make listing probe an unbounded list. A damaged or unreadable entry reads as empty, and the next save rewrites it.
 
