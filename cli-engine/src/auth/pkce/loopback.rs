@@ -21,6 +21,13 @@ pub(super) enum Reply {
     Body(String),
     Status(u16),
     Redirect(String),
+    /// A redirect with a chosen status. 307 and 308 are the ones that matter for a
+    /// POST: a client that follows them re-sends the request body, where a 302 is
+    /// turned into a body-less GET.
+    RedirectWith {
+        status: u16,
+        to: String,
+    },
     /// A declared `content-length` of `declared` bytes, then up to `actual`
     /// bytes of body, written in chunks until the client stops reading. Only the
     /// key-set tests need it.
@@ -202,6 +209,10 @@ async fn serve(
         }
         Reply::Redirect(to) => format!(
             "HTTP/1.1 302 Found\r\nlocation: {to}\r\ncontent-length: 0\r\n\
+             connection: close\r\n\r\n"
+        ),
+        Reply::RedirectWith { status, to } => format!(
+            "HTTP/1.1 {status} Redirect\r\nlocation: {to}\r\ncontent-length: 0\r\n\
              connection: close\r\n\r\n"
         ),
         #[cfg(feature = "id-token-verify")]

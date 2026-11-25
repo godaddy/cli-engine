@@ -598,79 +598,101 @@ async fn a_refresh_whose_discovery_fails_falls_back_to_a_login_without_leaking_t
     );
 }
 
-/// An allowed token endpoint that answers a refresh with a 307 pointing at a host
-/// that never passed discovery. A client that follows it re-sends the POST, body
-/// and all, so the refresh token would go to the redirect target.
+/// The statuses a redirect can have. 307 and 308 preserve the method and body, so a
+/// client that follows them re-sends the secret; 302 is turned into a body-less GET
+/// by `reqwest` but is still a request to a host that never passed discovery.
+const REDIRECT_STATUSES: [u16; 3] = [302, 307, 308];
+
+/// An allowed token endpoint that answers a refresh with a redirect to a host that
+/// never passed discovery. A client that follows a 307 or 308 re-sends the POST,
+/// body and all, so the refresh token would go to the redirect target.
 #[tokio::test]
 async fn a_refresh_is_never_forwarded_by_a_redirect_from_the_token_endpoint() {
-    let elsewhere = LoopbackServer::routes([("/token", Reply::Status(500))]).await;
-    let server = LoopbackServer::routes([
-        (WELL_KNOWN, Reply::Status(500)),
-        ("/token", Reply::Redirect(elsewhere.url("/token"))),
-    ])
-    .await;
-    let base = server.url("");
-    server.set(WELL_KNOWN, document(&base, |_| {}));
-    let (provider, _storage) = discovery_provider(OidcDiscovery::new_loopback(&base).expect("d"));
+    for status in REDIRECT_STATUSES {
+        let elsewhere = LoopbackServer::routes([("/token", Reply::Status(500))]).await;
+        let server = LoopbackServer::routes([
+            (WELL_KNOWN, Reply::Status(500)),
+            (
+                "/token",
+                Reply::RedirectWith {
+                    status,
+                    to: elsewhere.url("/token"),
+                },
+            ),
+        ])
+        .await;
+        let base = server.url("");
+        server.set(WELL_KNOWN, document(&base, |_| {}));
+        let (provider, _storage) =
+            discovery_provider(OidcDiscovery::new_loopback(&base).expect("d"));
 
-    let mut stale = valid_token("old");
-    stale.expires_at = chrono::Utc::now().timestamp() - 3600;
-    stale.refresh_token = Some("secret-refresh-token".to_owned());
-    provider.save_stored("dev", &stale).await.expect("seed");
+        let mut stale = valid_token("old");
+        stale.expires_at = chrono::Utc::now().timestamp() - 3600;
+        stale.refresh_token = Some("secret-refresh-token".to_owned());
+        provider.save_stored("dev", &stale).await.expect("seed");
 
-    // The refresh cannot complete, so the provider falls back to a login, which
-    // cannot start here (the redirect port is held); either way it must fail.
-    let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
-    let provider = provider.with_redirect_port(held.local_addr().expect("addr").port());
-    provider
-        .get_credential("dev", "", "")
-        .await
-        .expect_err("a redirected refresh must not succeed");
+        // The refresh cannot complete, so the provider falls back to a login, which
+        // cannot start here (the redirect port is held); either way it must fail.
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let provider = provider.with_redirect_port(held.local_addr().expect("addr").port());
+        provider
+            .get_credential("dev", "", "")
+            .await
+            .expect_err("a redirected refresh must not succeed");
 
-    assert_eq!(
-        server.hits_for("/token"),
-        1,
-        "the allowed endpoint was asked"
-    );
-    assert_eq!(
-        elsewhere.hits(),
-        0,
-        "the redirect target must never receive the refresh token"
-    );
-    drop(held);
+        assert_eq!(
+            server.hits_for("/token"),
+            1,
+            "{status}: the endpoint was asked"
+        );
+        assert_eq!(
+            elsewhere.hits(),
+            0,
+            "{status}: the redirect target must never receive the refresh token"
+        );
+        drop(held);
+    }
 }
 
 #[tokio::test]
 async fn a_code_exchange_is_never_forwarded_by_a_redirect_from_the_token_endpoint() {
-    let elsewhere = LoopbackServer::routes([("/token", Reply::Status(500))]).await;
-    let server =
-        LoopbackServer::routes([("/token", Reply::Redirect(elsewhere.url("/token")))]).await;
-    let provider = PkceAuthProvider::new(
-        "test",
-        "https://example.com/auth",
-        server.url("/token"),
-        "client-id",
-        &["openid"],
-    );
-    let oauth = provider.effective_oauth("dev").expect("oauth");
+    for status in REDIRECT_STATUSES {
+        let elsewhere = LoopbackServer::routes([("/token", Reply::Status(500))]).await;
+        let server = LoopbackServer::routes([(
+            "/token",
+            Reply::RedirectWith {
+                status,
+                to: elsewhere.url("/token"),
+            },
+        )])
+        .await;
+        let provider = PkceAuthProvider::new(
+            "test",
+            "https://example.com/auth",
+            server.url("/token"),
+            "client-id",
+            &["openid"],
+        );
+        let oauth = provider.effective_oauth("dev").expect("oauth");
 
-    provider
-        .exchange_code_for_token(
-            &oauth,
-            "the-code",
-            "the-verifier",
-            "http://127.0.0.1/cb",
-            &[],
-        )
-        .await
-        .expect_err("a redirected exchange must not succeed");
+        provider
+            .exchange_code_for_token(
+                &oauth,
+                "the-code",
+                "the-verifier",
+                "http://127.0.0.1/cb",
+                &[],
+            )
+            .await
+            .expect_err("a redirected exchange must not succeed");
 
-    assert_eq!(server.hits_for("/token"), 1);
-    assert_eq!(
-        elsewhere.hits(),
-        0,
-        "the redirect target must never receive the code or verifier"
-    );
+        assert_eq!(server.hits_for("/token"), 1, "{status}");
+        assert_eq!(
+            elsewhere.hits(),
+            0,
+            "{status}: the redirect target must never receive the code or verifier"
+        );
+    }
 }
 
 /// With only the token endpoint overridden for the environment, a refresh needs

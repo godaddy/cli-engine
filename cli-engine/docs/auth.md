@@ -273,8 +273,12 @@ A document can say where requests go, and nothing in it vouches for that, so `Oi
 - Redirects are never followed, the response is read in chunks and abandoned past 128 KiB, and the request carries
   the user-agent current at request time and no attribution headers.
 
-The document is fetched only when an endpoint is needed, which is to log in or to refresh. Reusing a valid
-stored credential, `auth status` and `auth logout` never touch the network. A successful fetch is kept for the
+The document is fetched only when an endpoint is needed, which is to log in or to refresh. Resolving the
+authorization and token endpoints therefore never touches the network for a valid stored credential, `auth status`
+or `auth logout`. That is a statement about endpoint resolution only: if an id_token verifier is configured, it
+verifies a stored credential before reusing it or reporting it, and `JwksVerifier::from_discovery` fetches the
+discovery document and the signing keys for that, so with it a discovery or key outage can make those operations
+fail too. A successful fetch is kept for the
 life of the `OidcDiscovery`, and concurrent callers share one request; a failed one is not kept, so the next call
 tries again. A failure stops a login before anything is opened or stored, and a refresh is not attempted without
 the endpoint, so a refresh token is never sent anywhere it should not go.

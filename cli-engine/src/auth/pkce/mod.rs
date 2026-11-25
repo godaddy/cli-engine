@@ -456,8 +456,12 @@ impl PkceAuthProvider {
     /// `environments.toml` or via [`with_environments`](Self::with_environments))
     /// still wins for that environment, as an explicit override of the provider's
     /// own. The discovery document is fetched only when an endpoint is needed, that
-    /// is, to log in or to refresh; reusing a valid stored credential never fetches
-    /// it. A failure to fetch or to validate it is an error, and nothing is stored.
+    /// is, to log in or to refresh, so endpoint resolution never fetches it for a
+    /// valid stored credential. That is about endpoints only: an id_token verifier
+    /// (`JwksVerifier::from_discovery`) fetches the document and the signing keys
+    /// to verify a stored credential, so with one a discovery outage can still
+    /// stop reuse and `auth status`. A failure to fetch or to validate it is an
+    /// error, and nothing is stored.
     ///
     /// Share the same [`OidcDiscovery`] with the id_token verifier
     /// (`JwksVerifier::from_discovery`, with the `id-token-verify` feature) so the
