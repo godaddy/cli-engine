@@ -243,6 +243,64 @@ With the id_token as the bearer:
 
 The default, `Bearer::AccessToken`, is unchanged, including carrying the previous id_token across a refresh so identity claims keep resolving.
 
+### OIDC Discovery
+
+An OpenID Connect provider publishes its endpoints in a discovery document at
+`<issuer>/.well-known/openid-configuration`. `PkceAuthProvider::with_oidc_discovery` takes the authorization and
+token endpoints from it instead of from configuration, so a CLI needs only the issuer and a client id:
+
+```rust
+use std::sync::Arc;
+use cli_engine::auth::pkce::{OidcDiscovery, PkceAuthProvider};
+
+let discovery = Arc::new(OidcDiscovery::new("https://idp.example.com")?);
+// The endpoints come from discovery, so the ones given here are not used.
+let provider = PkceAuthProvider::new("idp", "", "", "my-client-id", &["openid", "email"])
+    .with_oidc_discovery(discovery);
+# Ok::<(), cli_engine::CliCoreError>(())
+```
+
+A document can say where requests go, and nothing in it vouches for that, so `OidcDiscovery` does not trust it:
+
+- Every endpoint must be an `https` URL, with no port, credentials or fragment, on an allowed host. The issuer's own host is
+  always allowed. A provider that serves endpoints from another domain needs it named with
+  `OidcDiscovery::with_allowed_hosts`, which takes bare host names and matches them exactly, so
+  `accounts.example.com` does not allow `login.accounts.example.com` or `accounts.example.com.evil.test`.
+- The document must name the issuer it was fetched for, exactly as configured (OpenID Connect Discovery 1.0
+  section 4.3), so a response served for another issuer is refused.
+- A document missing an endpoint, or naming one that fails these checks, is an error that names the rule and
+  never echoes the document.
+- Redirects are never followed, the response is read in chunks and abandoned past 128 KiB, and the request carries
+  the user-agent current at request time and no attribution headers.
+
+The document is fetched only when an endpoint is needed, which is to log in or to refresh. Resolving the
+authorization and token endpoints therefore never touches the network for a valid stored credential, `auth status`
+or `auth logout`. That is a statement about endpoint resolution only: if an id_token verifier is configured, it
+verifies a stored credential before reusing it or reporting it, and `JwksVerifier::from_discovery` fetches the
+discovery document and the signing keys for that, so with it a discovery or key outage can make those operations
+fail too. A successful fetch is kept for the
+life of the `OidcDiscovery`, and concurrent callers share one request; a failed one is not kept, so the next call
+tries again. A failure stops a login before anything is opened or stored, and a refresh is not attempted without
+the endpoint, so a refresh token is never sent anywhere it should not go.
+
+An `auth_url` or `token_url` set for an environment, in `environments.toml` or through `with_environments`, still
+wins for that environment: it is an explicit override of the provider's own, and an endpoint set that way is not
+fetched. The `auth_url` and `token_url` given to `PkceAuthProvider::new` are ignored under discovery.
+
+With the `id-token-verify` feature, `JwksVerifier::from_discovery` takes its issuer and key-set URL from the same
+`OidcDiscovery`. Pass the same `Arc` to both so the document is fetched once:
+
+```rust,ignore
+let discovery = Arc::new(OidcDiscovery::new("https://idp.example.com")?);
+let verifier = JwksVerifier::from_discovery(discovery.clone())?;
+let provider = PkceAuthProvider::new("idp", "", "", "my-client-id", &["openid"])
+    .with_oidc_discovery(discovery)
+    .with_id_token_verifier(Arc::new(verifier));
+```
+
+A discovery failure while verifying is reported as unavailable, not as a bad token, so it does not start a new
+login.
+
 ### Verifying The id_token
 
 By default the provider decodes id_token and access-token claims without checking anything about them. That is fine for showing who is logged in, but not for a decision such as authorization: the stored copy is writable by anything running as the user, so a forged `email` in it would be believed.
