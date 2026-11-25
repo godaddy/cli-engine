@@ -659,8 +659,10 @@ mod tests {
         /// and the path its file lives at. The guards hold the process-wide lock and
         /// environment for the test.
         struct Fixture {
-            _lock: std::sync::MutexGuard<'static, ()>,
+            // Fields drop in declaration order: the environment must be restored while
+            // the lock is still held, so `_env` comes first.
             _env: EnvVarGuard,
+            _lock: std::sync::MutexGuard<'static, ()>,
             dir: tempfile::TempDir,
             store: FileStorage,
             path: std::path::PathBuf,
@@ -676,8 +678,8 @@ mod tests {
                 .join("credentials")
                 .join("prov-dev.json");
             Fixture {
-                _lock: lock,
                 _env: env,
+                _lock: lock,
                 dir,
                 store: FileStorage::new(),
                 path,
@@ -813,6 +815,31 @@ mod tests {
             assert_eq!(mode_of(&f.path), 0o600, "the file comes back private");
             assert_eq!(mode_of(&dir), 0o700, "the existing directory is tightened");
             assert_eq!(f.store.load(&key()).await.as_deref(), Some(SECRET));
+        }
+
+        /// A link planted at the credentials directory must not turn a save into a
+        /// permission change on, or a write into, whatever it points at.
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_symlinked_credentials_directory_is_refused_and_its_target_untouched() {
+            let f = fixture();
+            let target = f.dir.path().join("somewhere-else");
+            std::fs::create_dir(&target).expect("mkdir");
+            chmod(&target, 0o755);
+            let credentials = f.path.parent().expect("parent").to_owned();
+            std::fs::create_dir_all(credentials.parent().expect("app dir")).expect("mkdir");
+            std::os::unix::fs::symlink(&target, &credentials).expect("symlink");
+
+            assert!(
+                f.store.save(&key(), SECRET).await.is_err(),
+                "saving through a symlinked directory is refused"
+            );
+            assert_eq!(mode_of(&target), 0o755, "the target's mode is not changed");
+            assert_eq!(
+                std::fs::read_dir(&target).expect("read_dir").count(),
+                0,
+                "nothing is written into the target"
+            );
         }
 
         #[tokio::test]

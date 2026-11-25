@@ -291,9 +291,10 @@ pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
 /// **Blocking**, like [`write_string_atomic`].
 ///
 /// # Errors
-/// Returns an error when the directory cannot be created or the write/rename
-/// fails. Failing to restrict an existing directory is logged, not an error: the file
-/// is still written `0600`, and a read checks the file itself.
+/// Returns an error when the directory cannot be created, is a symlink, or the
+/// write/rename fails. Failing to change the mode of a directory that is not a link
+/// is logged, not an error: the file is still written `0600`, and a read checks the
+/// file itself.
 pub(crate) fn write_private_file_atomic(path: &Path, contents: &str) -> crate::Result<()> {
     write_atomic(path, contents, true)
 }
@@ -328,11 +329,19 @@ fn write_atomic(path: &Path, contents: &str, restrict_existing_dir: bool) -> cra
 /// A pre-existing one (e.g. `$HOME`) is left unchanged unless
 /// `restrict_existing`, so a caller that merely writes into it does not alter its
 /// permissions.
+///
+/// With `restrict_existing`, the directory itself must not be a symlink: it is
+/// opened without following one and restricted through that handle, so a link
+/// planted at the path cannot redirect the permission change (or the write that
+/// follows) to some other directory. Ancestors may be links; a symlinked
+/// `~/.config` is common and is the user's own arrangement.
 fn ensure_private_dir(dir: &Path, restrict_existing: bool) -> std::io::Result<()> {
     let existed = dir.is_dir();
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
-    if !existed || restrict_existing {
+    if restrict_existing {
+        restrict_dir_without_following(dir)?;
+    } else if !existed {
         use std::os::unix::fs::PermissionsExt as _;
         if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
             tracing::debug!(
@@ -344,6 +353,38 @@ fn ensure_private_dir(dir: &Path, restrict_existing: bool) -> std::io::Result<()
     }
     #[cfg(not(unix))]
     let _ = (existed, restrict_existing);
+    Ok(())
+}
+
+/// Sets `dir` to `0700` through a handle opened with `O_NOFOLLOW | O_DIRECTORY`.
+/// Fails when `dir` is a symlink (or not a directory). Failing to change the mode
+/// of a directory that is opened (it belongs to someone else, say) is logged, not an
+/// error: the file written into it is still `0600` and reads check the file itself.
+#[cfg(unix)]
+fn restrict_dir_without_following(dir: &Path) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    let handle = rustix::fs::open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is not a plain directory (a symlink?): {}",
+                dir.display(),
+                std::io::Error::from(e)
+            ),
+        )
+    })?;
+    if let Err(e) = rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o700)) {
+        tracing::debug!(
+            path = %dir.display(),
+            error = %std::io::Error::from(e),
+            "could not restrict directory permissions"
+        );
+    }
     Ok(())
 }
 
