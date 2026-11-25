@@ -842,6 +842,24 @@ mod tests {
             );
         }
 
+        /// A credentials directory the owner can write and search but not read (`0300`)
+        /// cannot be opened for reading, yet a save into it works and repairs it.
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_write_only_credentials_directory_is_still_saved_into_and_repaired() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            let dir = f.path.parent().expect("parent").to_owned();
+            chmod(&dir, 0o300);
+
+            f.store
+                .save(&key(), SECRET)
+                .await
+                .expect("a 0300 directory is writable");
+            assert_eq!(mode_of(&dir), 0o700, "and is repaired");
+            assert_eq!(f.store.load(&key()).await.as_deref(), Some(SECRET));
+        }
+
         #[tokio::test]
         #[allow(clippy::await_holding_lock)]
         async fn saving_leaves_no_temp_file_beside_the_credential() {

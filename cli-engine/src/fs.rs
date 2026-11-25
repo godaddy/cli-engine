@@ -357,31 +357,48 @@ fn ensure_private_dir(dir: &Path, restrict_existing: bool) -> std::io::Result<()
 }
 
 /// Sets `dir` to `0700` through a handle opened with `O_NOFOLLOW | O_DIRECTORY`.
-/// Fails when `dir` is a symlink (or not a directory). Failing to change the mode
-/// of a directory that is opened (it belongs to someone else, say) is logged, not an
-/// error: the file written into it is still `0600` and reads check the file itself.
+/// Fails when `dir` is a symlink (or not a directory).
+///
+/// A directory the owner cannot read (mode `0300`, say) cannot be opened that way, and
+/// is not a symlink either, since opening a symlink with those flags fails with
+/// `ENOTDIR` before permissions are consulted. That one case is restricted by path
+/// instead, which leaves a window between the failed open and the `chmod` that the
+/// handle does not have.
+///
+/// Failing to change the mode of a directory that is not a link (it belongs to
+/// someone else, say) is logged, not an error: the file written into it is still
+/// `0600` and reads check the file itself.
 #[cfg(unix)]
 fn restrict_dir_without_following(dir: &Path) -> std::io::Result<()> {
     use rustix::fs::{Mode, OFlags};
-    let handle = rustix::fs::open(
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let restricted = match rustix::fs::open(
         dir,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
-    )
-    .map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "{} is not a plain directory (a symlink?): {}",
-                dir.display(),
-                std::io::Error::from(e)
-            ),
-        )
-    })?;
-    if let Err(e) = rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o700)) {
+    ) {
+        Ok(handle) => {
+            rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o700)).map_err(std::io::Error::from)
+        }
+        Err(rustix::io::Errno::ACCESS) => {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is not a plain directory (a symlink?): {}",
+                    dir.display(),
+                    std::io::Error::from(e)
+                ),
+            ));
+        }
+    };
+    if let Err(e) = restricted {
         tracing::debug!(
             path = %dir.display(),
-            error = %std::io::Error::from(e),
+            error = %e,
             "could not restrict directory permissions"
         );
     }
