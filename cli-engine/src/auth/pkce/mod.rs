@@ -65,7 +65,6 @@ use crate::{
     auth::CredentialRequest,
     auth::storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
     config::CredentialStore,
-    env_config::{EnvConfig, SourceChain, ValueSource},
     error::CliCoreError,
 };
 
@@ -76,6 +75,7 @@ mod callback_server;
 mod jwks;
 #[cfg(all(test, feature = "id-token-verify"))]
 mod jwks_tests;
+mod oauth_config;
 mod redirect;
 #[cfg(test)]
 mod redirect_tests;
@@ -94,6 +94,7 @@ use callback_server::{
 };
 #[cfg(feature = "id-token-verify")]
 pub use jwks::JwksVerifier;
+use oauth_config::OAuthSection;
 use redirect::{REDIRECT_PORT_DEFAULT, RedirectPort};
 pub use scopes::ScopeHierarchy;
 use scopes::{
@@ -109,22 +110,6 @@ const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
 /// Default timeout applied to OAuth token-endpoint requests (exchange/refresh)
 /// so a stalled token server cannot hang the CLI indefinitely.
 const TOKEN_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
-
-/// The effective OAuth values for an environment. No default on
-/// `client_id`/`auth_url`/`token_url`: a provider whose base config and
-/// resolved environment both leave one of these blank must fail loudly
-/// (`EnvConfigError::MissingField`), not silently assemble with an empty
-/// endpoint. `scopes` is different — an empty scope list is a normal,
-/// supported configuration (see [`PkceAuthProvider::effective_scopes`]), not
-/// a sign of a never-initialized provider.
-#[derive(Debug, Clone, Default, EnvConfig)]
-struct OAuthSection {
-    client_id: String,
-    auth_url: String,
-    token_url: String,
-    #[env_config(default = Vec::new())]
-    scopes: Vec<String>,
-}
 
 /// OAuth 2.0 PKCE authentication provider.
 ///
@@ -518,53 +503,19 @@ impl PkceAuthProvider {
         }
     }
 
-    /// Computes the effective OAuth config for `env` with a SINGLE environment
-    /// resolution (at most one `environments.toml` read), by assembling an
-    /// [`OAuthSection`] from a two-tier [`SourceChain`], highest priority
-    /// first:
-    ///
-    /// 1. The resolved environment's own TOML value (compiled + file layers).
-    /// 2. This provider's own base config, from [`PkceAuthProvider::new`].
-    ///
-    /// Token flows call this once and reuse the result so they don't re-read the
-    /// environments file once per field.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a present TOML value fails to convert to its
-    /// field's type (for example a non-array `scopes` value), or if
-    /// `client_id`/`auth_url`/`token_url` is blank in *both* tiers — a
-    /// provider whose base config was never given a real value, and whose
-    /// resolved environment (if any) doesn't supply one either, fails loudly
-    /// rather than assembling with an empty endpoint.
+    /// Computes the effective OAuth config for `env`, with at most one
+    /// environment resolution. See [`oauth_config::effective_oauth`].
     fn effective_oauth(&self, env: &str) -> Result<OAuthSection> {
-        let env_source =
-            self.environments
-                .as_ref()
-                .and_then(|environments| match environments.source(env) {
-                    Ok(source) => Some(source),
-                    Err(err) => {
-                        tracing::debug!(
-                            env,
-                            error = %err,
-                            "environment resolve failed; falling back to base OAuth config"
-                        );
-                        None
-                    }
-                });
-        let base = ValueSource::new()
-            .with("client_id", self.client_id.clone())
-            .with("auth_url", self.auth_url.clone())
-            .with("token_url", self.token_url.clone())
-            .with("scopes", self.scopes.clone());
-
-        let mut chain = SourceChain::new();
-        if let Some(env_source) = &env_source {
-            chain = chain.push(env_source);
-        }
-        chain = chain.push(&base);
-
-        OAuthSection::assemble(&chain).map_err(CliCoreError::from)
+        oauth_config::effective_oauth(
+            self.environments.as_deref(),
+            env,
+            oauth_config::Base {
+                client_id: &self.client_id,
+                auth_url: &self.auth_url,
+                token_url: &self.token_url,
+                scopes: &self.scopes,
+            },
+        )
     }
 
     /// Default scopes for `env`: the resolved environment's scopes when
@@ -648,11 +599,21 @@ impl PkceAuthProvider {
         self.storage().await.delete(&key).await;
     }
 
+    /// Whether `token` can be handed out without a refresh.
+    ///
+    /// Under a verifier the id_token's own expiry bounds reuse as well, even when
+    /// the access token is the bearer: the identity comes from the id_token's
+    /// claims, so it must not outlive the id_token. This is checked here rather
+    /// than left to the verifier because the trait does not promise to check `exp`.
+    fn is_reusable(&self, token: &StoredToken) -> bool {
+        token.is_valid_for(self.bearer) && (self.verifier.is_none() || token.id_token_is_fresh())
+    }
+
     async fn cached_token(&self, env: &str) -> Option<StoredToken> {
         let cache = self.cache.read().await;
         cache
             .get(env)
-            .filter(|t| t.is_valid_for(self.bearer))
+            .filter(|t| self.is_reusable(t))
             // Defence in depth: only a token verified in this process is served.
             .filter(|t| self.verifier.is_none() || t.verified_claims.is_some())
             .cloned()
@@ -682,7 +643,7 @@ impl PkceAuthProvider {
         let Some(mut stored) = self.load_stored(env).await else {
             return Ok(None);
         };
-        if stored.is_valid_for(self.bearer) {
+        if self.is_reusable(&stored) {
             match self.verify_token(env, &mut stored).await? {
                 Verification::Verified => {
                     self.store_cached_token(env, stored.clone()).await;
@@ -733,6 +694,13 @@ impl PkceAuthProvider {
             tracing::warn!(env, reason, "refreshed id_token failed verification");
             return Ok(None);
         }
+        if self.verifier.is_some() && !refreshed.id_token_is_fresh() {
+            tracing::warn!(
+                env,
+                "refreshed id_token has no usable expiry or is about to expire"
+            );
+            return Ok(None);
+        }
         self.save_stored(env, &refreshed).await?;
         self.store_cached_token(env, refreshed.clone()).await;
         Ok(Some(refreshed))
@@ -777,6 +745,14 @@ impl PkceAuthProvider {
             )));
         }
         token.require_bearer(self.bearer, env)?;
+        // Without a usable expiry the identity could never be reused, so every
+        // command would log in again; say so now instead.
+        if self.verifier.is_some() && !token.id_token_is_fresh() {
+            return Err(CliCoreError::message(format!(
+                "the id_token for environment {env:?} has no usable `exp` claim, or expires \
+                 too soon to use, so nothing was stored"
+            )));
+        }
         // Persist first — the keychain write overwrites the existing entry for
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails

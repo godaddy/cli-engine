@@ -139,8 +139,17 @@ impl StoredToken {
     pub(super) fn is_valid_for(&self, bearer: Bearer) -> bool {
         match bearer {
             Bearer::AccessToken => self.is_valid(),
-            Bearer::IdToken => self.id_token_expiry().is_some_and(outlives_expiry_buffer),
+            Bearer::IdToken => self.id_token_is_fresh(),
         }
+    }
+
+    /// Whether the id_token carries a usable `exp` that is not about to pass.
+    ///
+    /// Under an [`IdTokenVerifier`](super::IdTokenVerifier) this bounds how long
+    /// the identity it vouched for may be reused, whichever token is the bearer:
+    /// an id_token commonly expires before the access token does.
+    pub(super) fn id_token_is_fresh(&self) -> bool {
+        self.id_token_expiry().is_some_and(outlives_expiry_buffer)
     }
 
     /// The token `bearer` selects, and when it expires (Unix seconds).

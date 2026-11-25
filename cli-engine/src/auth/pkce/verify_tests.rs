@@ -81,6 +81,10 @@ fn unavailable() -> Outcome {
     Err(VerifyError::Unavailable("keys unreachable".to_owned()))
 }
 
+fn id_token_expired() -> String {
+    id_token_expiring_at(Utc::now().timestamp() - 60)
+}
+
 fn id_token_for_an_hour() -> String {
     id_token_expiring_at(Utc::now().timestamp() + 3600)
 }
@@ -184,6 +188,93 @@ async fn a_stored_token_is_verified_before_it_is_reused_and_then_cached() {
         .expect("cached");
     assert!(second.verified_claims.is_some());
     assert_eq!(verifier.calls(), 1);
+}
+
+/// The access token outlives the id_token the identity was vouched for with.
+fn access_valid_but_id_token_expired() -> StoredToken {
+    token_with_id_token(Some(id_token_expired()))
+}
+
+#[tokio::test]
+async fn a_cached_identity_does_not_outlive_its_id_token() {
+    let verifier = ScriptedVerifier::new(vec![]);
+    let (provider, _storage) = provider_with(&verifier);
+    let mut token = access_valid_but_id_token_expired();
+    token.verified_claims = Some(verified_claims("real@example.com"));
+    provider.store_cached_token("dev", token).await;
+
+    assert!(
+        provider.cached_token("dev").await.is_none(),
+        "a verified identity must not be served past its id_token's expiry"
+    );
+}
+
+#[tokio::test]
+async fn a_stored_token_with_an_expired_id_token_is_not_reused_even_if_the_verifier_would_accept() {
+    // The verifier accepts everything; reuse must still be refused on expiry.
+    let verifier = ScriptedVerifier::accepting("real@example.com");
+    let (provider, _storage) = provider_with(&verifier);
+    provider
+        .save_stored("dev", &access_valid_but_id_token_expired())
+        .await
+        .expect("seed");
+
+    let reused = provider.existing_token("dev").await.expect("no error");
+    assert!(
+        reused.is_none(),
+        "an expired id_token needs a refresh or login"
+    );
+    assert_eq!(verifier.calls(), 0, "no point verifying an expired token");
+}
+
+#[tokio::test]
+async fn without_a_verifier_an_expired_id_token_does_not_block_reuse() {
+    // Unchanged behaviour: the access token alone decides when nothing relies on
+    // the id_token's authenticity.
+    let storage = Arc::new(MemoryStorage::default());
+    let provider = test_provider()
+        .with_app_id("app")
+        .with_storage(storage.clone());
+    provider
+        .store_cached_token("dev", access_valid_but_id_token_expired())
+        .await;
+    assert!(provider.cached_token("dev").await.is_some());
+}
+
+#[tokio::test]
+async fn a_login_whose_id_token_has_no_usable_expiry_stores_nothing() {
+    let verifier = ScriptedVerifier::accepting("real@example.com");
+    let (provider, storage) = provider_with(&verifier);
+    let mut token = valid_token("access");
+    token.id_token = Some(make_jwt(&json!({"sub": "no-exp"})));
+
+    let err = provider
+        .accept_login("dev", token)
+        .await
+        .expect_err("no exp");
+    assert!(err.to_string().contains("`exp`"), "{err}");
+    assert!(storage.load(&stored_key()).await.is_none());
+}
+
+#[tokio::test]
+async fn a_refresh_returning_an_already_expired_id_token_is_discarded() {
+    let verifier = ScriptedVerifier::accepting("real@example.com");
+    let (provider, storage) = provider_with_token_endpoint(
+        &verifier,
+        &json!({"access_token": "new", "expires_in": 3600, "id_token": id_token_expired()}),
+    );
+    let stored = token_with_expired_access(Some(id_token_for_an_hour()), Some("refresh-1"));
+    provider.save_stored("dev", &stored).await.expect("seed");
+    let before = storage.load(&stored_key()).await;
+
+    assert!(
+        provider
+            .existing_token("dev")
+            .await
+            .expect("no error")
+            .is_none()
+    );
+    assert_eq!(storage.load(&stored_key()).await, before);
 }
 
 #[tokio::test]

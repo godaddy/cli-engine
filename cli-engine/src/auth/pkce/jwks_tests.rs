@@ -116,12 +116,25 @@ enum Reply {
     Body(String),
     Status(u16),
     Redirect(String),
+    /// A declared `content-length` of `declared` bytes, then up to `actual`
+    /// bytes of body, written in chunks until the client stops reading.
+    Lying {
+        declared: usize,
+        actual: usize,
+    },
+    /// No `content-length` at all (the body ends when the connection closes), and
+    /// up to `bytes` bytes written in chunks until the client stops reading.
+    Unbounded {
+        bytes: usize,
+    },
 }
 
 /// A loopback key endpoint that counts its requests and can be re-scripted.
 struct KeyServer {
     url: String,
     hits: Arc<AtomicUsize>,
+    /// Body bytes the server managed to write, across all requests.
+    sent: Arc<AtomicUsize>,
     reply: Arc<Mutex<Reply>>,
     task: JoinHandle<()>,
 }
@@ -131,12 +144,13 @@ impl KeyServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let url = format!("http://{}/keys", listener.local_addr().expect("addr"));
         let hits = Arc::new(AtomicUsize::new(0));
+        let sent = Arc::new(AtomicUsize::new(0));
         let reply = Arc::new(Mutex::new(reply));
         let task = tokio::spawn({
-            let (hits, reply) = (hits.clone(), reply.clone());
+            let (hits, reply, sent) = (hits.clone(), reply.clone(), sent.clone());
             async move {
                 while let Ok((mut stream, _)) = listener.accept().await {
-                    let (hits, reply) = (hits.clone(), reply.clone());
+                    let (hits, reply, sent) = (hits.clone(), reply.clone(), sent.clone());
                     tokio::spawn(async move {
                         let mut head = Vec::new();
                         let mut buf = [0_u8; 1024];
@@ -161,6 +175,20 @@ impl KeyServer {
                                 "HTTP/1.1 302 Found\r\nlocation: {to}\r\ncontent-length: 0\r\n\
                                  connection: close\r\n\r\n"
                             ),
+                            Reply::Lying { declared, actual } => {
+                                let head = format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-length: {declared}\r\n\
+                                     connection: close\r\n\r\n"
+                                );
+                                stream_body(&mut stream, head, actual, &sent).await;
+                                return;
+                            }
+                            Reply::Unbounded { bytes } => {
+                                let head =
+                                    "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned();
+                                stream_body(&mut stream, head, bytes, &sent).await;
+                                return;
+                            }
                         };
                         // A client that already gave up makes this fail; that is
                         // expected in the tests that abandon a request.
@@ -172,6 +200,7 @@ impl KeyServer {
         Self {
             url,
             hits,
+            sent,
             reply,
             task,
         }
@@ -179,6 +208,10 @@ impl KeyServer {
 
     fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
+    }
+
+    fn body_bytes_sent(&self) -> usize {
+        self.sent.load(Ordering::SeqCst)
     }
 
     fn set(&self, reply: Reply) {
@@ -193,6 +226,30 @@ impl KeyServer {
 impl Drop for KeyServer {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Writes `head`, then up to `total` bytes of body in 16 KiB chunks, counting
+/// what was accepted. Stops at the first write error, which is the client closing
+/// the connection once it has decided to give up.
+async fn stream_body(
+    stream: &mut tokio::net::TcpStream,
+    head: String,
+    total: usize,
+    sent: &AtomicUsize,
+) {
+    if stream.write_all(head.as_bytes()).await.is_err() {
+        return;
+    }
+    let chunk = vec![b'x'; 16 * 1024];
+    let mut remaining = total;
+    while remaining > 0 {
+        let n = remaining.min(chunk.len());
+        if stream.write_all(&chunk[..n]).await.is_err() {
+            return;
+        }
+        sent.fetch_add(n, Ordering::SeqCst);
+        remaining -= n;
     }
 }
 
@@ -446,6 +503,94 @@ async fn an_error_status_a_bad_body_and_an_oversized_body_are_unavailable() {
         let reason = expect_unavailable(server.verifier().verify(&token, AUDIENCE).await);
         assert!(reason.contains(expected), "{expected}: {reason}");
     }
+}
+
+const LIMIT: usize = 256 * 1024;
+
+/// How much of an oversized body the server may have written by the time the
+/// client gives up. The kernel's socket buffers absorb a couple of megabytes
+/// before the writer blocks on a client that has stopped reading, so this cannot
+/// be as tight as the 256 KiB limit; it only has to be far below the tens of
+/// megabytes a client that buffered the whole body would have drawn.
+const BODY_BOUND: usize = 8 * 1024 * 1024;
+
+#[tokio::test]
+async fn an_oversized_declared_length_is_not_drained() {
+    let server = KeyServer::start(Reply::Lying {
+        declared: 256 * 1024 * 1024,
+        actual: 256 * 1024 * 1024,
+    })
+    .await;
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    let reason = expect_unavailable(server.verifier().verify(&token, AUDIENCE).await);
+    assert!(reason.contains("too large"), "{reason}");
+    assert!(
+        server.body_bytes_sent() < BODY_BOUND,
+        "the client must not have drained the body: {} bytes sent",
+        server.body_bytes_sent()
+    );
+}
+
+#[tokio::test]
+async fn a_body_without_a_declared_length_is_abandoned_once_it_passes_the_limit() {
+    // 64 MiB offered, no content-length: buffering it whole would take all of it.
+    let server = KeyServer::start(Reply::Unbounded {
+        bytes: 64 * 1024 * 1024,
+    })
+    .await;
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    let reason = expect_unavailable(server.verifier().verify(&token, AUDIENCE).await);
+    assert!(reason.contains("too large"), "{reason}");
+    assert!(
+        server.body_bytes_sent() < BODY_BOUND,
+        "reading must stop near the limit, not after the whole body: {} bytes sent",
+        server.body_bytes_sent()
+    );
+}
+
+#[tokio::test]
+async fn a_declared_length_that_understates_the_body_is_still_bounded() {
+    let server = KeyServer::start(Reply::Lying {
+        declared: 1024,
+        actual: 64 * 1024 * 1024,
+    })
+    .await;
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    // hyper stops at the declared length, so this is a short, unparseable body:
+    // unavailable either way, and never a large read.
+    expect_unavailable(server.verifier().verify(&token, AUDIENCE).await);
+    assert!(server.body_bytes_sent() < BODY_BOUND);
+}
+
+#[tokio::test]
+async fn a_key_set_just_under_the_limit_is_still_accepted() {
+    let f = fixture();
+    let mut keys = vec![rsa_jwk(&f.rsa_a, "key-a")];
+    // Pad with unrelated keys to just under the limit. One padding key's size is
+    // measured once and the count computed from it, rather than re-serializing the
+    // growing set on every pass.
+    // Sized by the longest id any pad will have (`pad-9999`), so no pad is bigger
+    // than the estimate and the total cannot overshoot the limit.
+    let one_pad = ec_jwk("pad-9999").to_string().len() + 1;
+    let base = key_set(keys.clone()).len();
+    let pads = (LIMIT - 2048 - base) / one_pad;
+    assert!(
+        pads < 10_000,
+        "{pads} pads would outgrow the id width assumed above"
+    );
+    keys.extend((0..pads).map(|n| ec_jwk(&format!("pad-{n}"))));
+    let body = key_set(keys);
+    assert!(
+        (LIMIT - 4096..LIMIT).contains(&body.len()),
+        "the key set should sit just under the limit, got {} bytes",
+        body.len()
+    );
+    let server = KeyServer::start(Reply::Body(body)).await;
+    server
+        .verifier()
+        .verify(&rs256(&f.rsa_a, "key-a", &good_claims()), AUDIENCE)
+        .await
+        .expect("a large but legitimate key set is accepted");
 }
 
 #[tokio::test]

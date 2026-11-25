@@ -20,7 +20,8 @@ use super::verify::{IdTokenVerifier, VerifiedIdToken, VerifyError};
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Largest key set accepted, so a hostile or broken endpoint cannot make the CLI
-/// buffer an unbounded response. Real key sets are a few kilobytes.
+/// buffer an unbounded response: the body is read incrementally and abandoned once
+/// it passes this. Real key sets are a few kilobytes.
 const JWKS_MAX_BYTES: usize = 256 * 1024;
 
 /// Asymmetric algorithms only. HMAC is excluded on purpose: with a verifier that
@@ -167,7 +168,7 @@ impl JwksVerifier {
 
     async fn fetch(&self) -> Result<JwkSet, VerifyError> {
         let unavailable = |what: &str| VerifyError::Unavailable(format!("signing keys: {what}"));
-        let response = self
+        let mut response = self
             .client
             .get(&self.jwks_uri)
             .send()
@@ -179,12 +180,19 @@ impl JwksVerifier {
                 response.status().as_u16()
             )));
         }
-        let body = response
-            .bytes()
+        let too_large = || unavailable("the key endpoint's response is too large");
+        // Read in pieces and abandoned the moment it passes the limit, so memory
+        // stays bounded whatever `content-length` claims, or whether it is sent.
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|_| unavailable("the key endpoint's response could not be read"))?;
-        if body.len() > JWKS_MAX_BYTES {
-            return Err(unavailable("the key endpoint's response is too large"));
+            .map_err(|_| unavailable("the key endpoint's response could not be read"))?
+        {
+            if body.len() + chunk.len() > JWKS_MAX_BYTES {
+                return Err(too_large());
+            }
+            body.extend_from_slice(&chunk);
         }
         serde_json::from_slice(&body).map_err(|_| unavailable("the key set could not be parsed"))
     }
