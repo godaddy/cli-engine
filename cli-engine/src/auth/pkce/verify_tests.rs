@@ -249,7 +249,7 @@ async fn a_login_whose_id_token_has_no_usable_expiry_stores_nothing() {
     token.id_token = Some(make_jwt(&json!({"sub": "no-exp"})));
 
     let err = provider
-        .accept_login("dev", token)
+        .accept_login("dev", token, "client-id")
         .await
         .expect_err("no exp");
     assert!(err.to_string().contains("`exp`"), "{err}");
@@ -450,7 +450,7 @@ async fn a_rejected_login_stores_nothing() {
     let (provider, storage) = provider_with(&verifier);
 
     let err = provider
-        .accept_login("dev", good_stored_token())
+        .accept_login("dev", good_stored_token(), "client-id")
         .await
         .expect_err("rejected");
     assert!(err.to_string().contains("nothing was stored"), "{err}");
@@ -465,7 +465,7 @@ async fn a_login_whose_check_could_not_run_stores_nothing() {
     let (provider, storage) = provider_with(&verifier);
 
     let err = provider
-        .accept_login("dev", good_stored_token())
+        .accept_login("dev", good_stored_token(), "client-id")
         .await
         .expect_err("unavailable");
     assert!(err.to_string().contains("could not verify"), "{err}");
@@ -478,7 +478,7 @@ async fn a_login_without_an_id_token_is_rejected_when_a_verifier_is_configured()
     let (provider, storage) = provider_with(&verifier);
 
     let err = provider
-        .accept_login("dev", token_with_id_token(None))
+        .accept_login("dev", token_with_id_token(None), "client-id")
         .await
         .expect_err("no id_token");
     assert!(err.to_string().contains("openid"), "{err}");
@@ -492,7 +492,7 @@ async fn an_accepted_login_is_stored_and_carries_verified_identity() {
     let (provider, storage) = provider_with(&verifier);
 
     let token = provider
-        .accept_login("dev", good_stored_token())
+        .accept_login("dev", good_stored_token(), "client-id")
         .await
         .expect("accepted");
     assert_eq!(
@@ -511,7 +511,7 @@ async fn without_a_verifier_a_login_is_accepted_as_before() {
         .with_storage(storage.clone());
 
     let token = provider
-        .accept_login("dev", token_with_id_token(None))
+        .accept_login("dev", token_with_id_token(None), "client-id")
         .await
         .expect("no verifier, no extra requirements");
     assert!(token.verified_claims.is_none());
@@ -580,4 +580,78 @@ fn stored_token_debug_never_prints_verified_values() {
     token.verified_claims = Some(verified_claims("secret@example.com"));
     let shown = format!("{token:?}");
     assert!(!shown.contains("secret@example.com"), "{shown}");
+}
+
+#[tokio::test]
+async fn a_fresh_token_is_verified_against_the_client_id_it_was_acquired_with() {
+    let verifier = ScriptedVerifier::accepting("real@example.com");
+    let (provider, _storage) = provider_with(&verifier);
+
+    // The provider's current configuration says "client-id"; the login that
+    // produced this token used another one.
+    provider
+        .accept_login("dev", good_stored_token(), "client-used-for-this-login")
+        .await
+        .expect("accepted");
+    assert_eq!(
+        verifier.audiences(),
+        vec!["client-used-for-this-login".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_stored_token_is_verified_against_the_current_client_id() {
+    let verifier = ScriptedVerifier::accepting("real@example.com");
+    let (provider, _storage) = provider_with(&verifier);
+    provider
+        .save_stored("dev", &good_stored_token())
+        .await
+        .expect("seed");
+    provider.existing_token("dev").await.expect("no error");
+    assert_eq!(verifier.audiences(), vec!["client-id".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_refreshed_token_is_verified_against_the_client_id_that_requested_it() {
+    let verifier = ScriptedVerifier::accepting("real@example.com");
+    let (provider, _storage) = provider_with_token_endpoint(
+        &verifier,
+        &json!({"access_token": "new", "expires_in": 3600, "id_token": id_token_for_an_hour()}),
+    );
+    let stored = token_with_expired_access(Some(id_token_for_an_hour()), Some("refresh-1"));
+    provider.save_stored("dev", &stored).await.expect("seed");
+
+    provider
+        .existing_token("dev")
+        .await
+        .expect("no error")
+        .expect("refreshed");
+    assert_eq!(verifier.audiences(), vec!["client-id".to_owned()]);
+}
+
+#[tokio::test]
+async fn replacing_the_verifier_drops_what_the_old_one_vouched_for() {
+    let lenient = ScriptedVerifier::accepting("real@example.com");
+    let (provider, _storage) = provider_with(&lenient);
+    provider
+        .save_stored("dev", &good_stored_token())
+        .await
+        .expect("seed");
+    provider
+        .existing_token("dev")
+        .await
+        .expect("no error")
+        .expect("accepted by the first verifier and cached");
+    assert!(provider.cached_token("dev").await.is_some());
+
+    let strict = ScriptedVerifier::new(vec![rejected("stricter policy")]);
+    let provider = provider.with_id_token_verifier(strict.clone());
+
+    assert!(
+        provider.cached_token("dev").await.is_none(),
+        "what the old verifier accepted must not satisfy the new one"
+    );
+    let reused = provider.existing_token("dev").await.expect("no error");
+    assert!(reused.is_none(), "the new verifier rejected it");
+    assert_eq!(strict.calls(), 1, "the new verifier was actually consulted");
 }

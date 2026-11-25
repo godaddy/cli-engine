@@ -251,7 +251,8 @@ By default the provider decodes id_token and access-token claims without checkin
 
 - `identity` and `sub` come only from the claims the verifier returns, never from the raw access token or the stored copy. A token that has not been verified in this process names no identity.
 - The verifier runs on every id_token the provider handles: at login, after a refresh, and when a stored credential is read back, including by `auth status`.
-- A login needs an id_token, so request the `openid` scope. One the verifier rejects is never stored, and the previous stored credential is left alone.
+- A login needs an id_token, so request the `openid` scope. One the verifier rejects is never stored, and nothing is deleted when it is. When the login was started by a command that needed a credential, the previous stored credential is therefore left in place. `auth login` is different: it clears the stored credential before it starts, for every provider, so a rejected `auth login` leaves you logged out.
+- A fresh token is verified against the client id it was requested with, not a new read of the configuration, so a client id that changes while the browser is open does not reject a correctly issued token.
 - A refresh must return a fresh id_token that verifies. The previous id_token is never reused, so a refresh without one is discarded and the next command logs in interactively.
 - A stored id_token that is rejected is not reused. `auth status` reports it as an error.
 

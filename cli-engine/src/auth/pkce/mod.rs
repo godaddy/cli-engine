@@ -449,6 +449,9 @@ impl PkceAuthProvider {
     #[must_use]
     pub fn with_id_token_verifier(mut self, verifier: Arc<dyn IdTokenVerifier>) -> Self {
         self.verifier = Some(verifier);
+        // Claims accepted under a previous verifier (or none) must not satisfy this
+        // one's policy, so drop anything already held in memory.
+        self.cache = Arc::new(RwLock::new(HashMap::new()));
         self
     }
 
@@ -669,8 +672,12 @@ impl PkceAuthProvider {
         let Some(refresh_token) = stored.refresh_token.as_deref() else {
             return Ok(None);
         };
+        // One resolution serves both the request and the check of its result.
+        let Ok(oauth) = self.effective_oauth(env) else {
+            return Ok(None);
+        };
         let Ok(mut refreshed) = self
-            .refresh_access_token(env, refresh_token, &stored.scopes)
+            .refresh_access_token(&oauth, refresh_token, &stored.scopes)
             .await
         else {
             return Ok(None);
@@ -690,7 +697,10 @@ impl PkceAuthProvider {
         if self.bearer == Bearer::IdToken && !refreshed.is_valid_for(self.bearer) {
             return Ok(None);
         }
-        if let Verification::Rejected(reason) = self.verify_token(env, &mut refreshed).await? {
+        if let Verification::Rejected(reason) = self
+            .verify_for_audience(&oauth.client_id, &mut refreshed)
+            .await?
+        {
             tracing::warn!(env, reason, "refreshed id_token failed verification");
             return Ok(None);
         }
@@ -715,31 +725,58 @@ impl PkceAuthProvider {
     /// signing keys were unreachable). That is not a verdict on the token, so
     /// callers must not answer it by logging in again.
     async fn verify_token(&self, env: &str, token: &mut StoredToken) -> Result<Verification> {
+        if self.verifier.is_none() {
+            return Ok(Verification::Verified);
+        }
+        let audience = self.effective_oauth(env)?.client_id;
+        self.verify_for_audience(&audience, token).await
+    }
+
+    /// Like [`verify_token`](Self::verify_token), for a token whose client id is
+    /// already known. A token just acquired is checked against the client id used
+    /// to acquire it, not a fresh read of the configuration, which can change while
+    /// a browser login is in progress.
+    async fn verify_for_audience(
+        &self,
+        audience: &str,
+        token: &mut StoredToken,
+    ) -> Result<Verification> {
         let Some(verifier) = &self.verifier else {
             return Ok(Verification::Verified);
         };
-        let audience = self.effective_oauth(env)?.client_id;
-        verify::verify_token(verifier.as_ref(), &audience, token).await
+        verify::verify_token(verifier.as_ref(), audience, token).await
     }
 
     /// Runs a fresh interactive PKCE flow requesting exactly `scopes`, replacing
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
-        let token = self.run_pkce_flow_with(env, scopes).await?;
-        self.accept_login(env, token).await
+        // Resolved once for the whole login, so the audience the token is verified
+        // against is the client id it was requested with.
+        let oauth = self.effective_oauth(env)?;
+        let token = self.run_pkce_flow_with(&oauth, scopes).await?;
+        self.accept_login(env, token, &oauth.client_id).await
     }
 
     /// Stores and caches a token from a fresh login, after checking it.
     ///
-    /// The checks come first so a login that cannot produce a trustworthy token,
-    /// or this provider's bearer, leaves the previous stored token alone.
+    /// The checks come first, so a rejected token is never written and nothing is
+    /// deleted here. (An explicit `auth login` has already cleared the stored
+    /// credential by the time it gets here: the dispatcher logs out first, for
+    /// every provider.)
     ///
     /// # Errors
     ///
     /// Returns an error when the verifier rejects the token or cannot run, when
     /// the bearer token is missing, or when storage fails.
-    async fn accept_login(&self, env: &str, mut token: StoredToken) -> Result<StoredToken> {
-        if let Verification::Rejected(reason) = self.verify_token(env, &mut token).await? {
+    async fn accept_login(
+        &self,
+        env: &str,
+        mut token: StoredToken,
+        audience: &str,
+    ) -> Result<StoredToken> {
+        if let Verification::Rejected(reason) =
+            self.verify_for_audience(audience, &mut token).await?
+        {
             return Err(CliCoreError::message(format!(
                 "the id_token was rejected, so nothing was stored: {reason}"
             )));
@@ -764,12 +801,14 @@ impl PkceAuthProvider {
 
     /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
     /// default login and for scope step-up, which requests a wider union).
-    async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
+    async fn run_pkce_flow_with(
+        &self,
+        oauth: &OAuthSection,
+        scopes: &[String],
+    ) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
         let nonce = random_nonce();
-        // Resolve the OAuth config once for this whole flow (authorize + exchange).
-        let oauth = self.effective_oauth(env)?;
         let scope = scopes.join(" ");
         let (listener, redirect_uri, callback_path) = self.bind_callback_listener()?;
 
@@ -794,7 +833,7 @@ impl PkceAuthProvider {
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
         let token = self
-            .exchange_code_for_token(&oauth, &code, &code_verifier, &redirect_uri, scopes)
+            .exchange_code_for_token(oauth, &code, &code_verifier, &redirect_uri, scopes)
             .await?;
         verify_id_token_nonce(&token, &nonce, self.require_nonce)?;
         emit_auth_complete_message();
@@ -841,11 +880,10 @@ impl PkceAuthProvider {
 
     async fn refresh_access_token(
         &self,
-        env: &str,
+        oauth: &OAuthSection,
         refresh_token: &str,
         prior_scopes: &[String],
     ) -> Result<StoredToken> {
-        let oauth = self.effective_oauth(env)?;
         let params = [
             ("grant_type", "refresh_token"),
             ("client_id", &oauth.client_id),
