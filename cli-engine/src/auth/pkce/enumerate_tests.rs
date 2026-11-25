@@ -604,3 +604,24 @@ async fn a_login_that_lands_between_the_logout_delete_and_the_index_update_is_ke
     );
     assert_eq!(listed(&provider_on(&backend)).await, ["dev"]);
 }
+
+/// The count and length limits apply to what was parsed; this one applies before
+/// parsing, so a huge entry is never turned into a huge list of strings first.
+#[tokio::test]
+async fn an_index_document_over_the_size_limit_is_not_parsed() {
+    let storage = memory();
+    // Valid JSON, and entirely within the per-name limits, but far larger than the
+    // index could ever have written: the index never writes more than 256 names.
+    let names: Vec<String> = (0..3_000).map(|n| format!("env-{n:0>120}")).collect();
+    let document = serde_json::json!({ "environments": names }).to_string();
+    assert!(document.len() > 256 * 1024);
+    storage.save(&index_key(), &document).await.expect("seed");
+
+    let index = EnvironmentIndex::new(storage.clone(), "app", "test");
+    assert!(
+        index.list().await.is_empty(),
+        "an oversized document reads as empty, not as its first 256 names"
+    );
+    index.record("dev").await.expect("record");
+    assert_eq!(index.list().await, ["dev"], "the next save repairs it");
+}

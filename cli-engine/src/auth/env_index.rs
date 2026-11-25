@@ -31,6 +31,12 @@ const MAX_ENVIRONMENTS: usize = 256;
 /// Longest environment name the index accepts, in bytes.
 const MAX_NAME_BYTES: usize = 128;
 
+/// Largest stored document that is parsed at all, in bytes. The most the index writes
+/// is 256 names of 128 bytes, each of which JSON can escape to six times its length,
+/// about 197 KB; anything larger was not written by this type, and is not parsed, so
+/// a damaged entry cannot make a listing or a save allocate without bound.
+const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
+
 /// The environment slot of the index's own key. With the two suffixes below it puts
 /// the index at `("<app>.index", "<provider>.index", "index")`.
 const INDEX_ENV: &str = "index";
@@ -202,6 +208,13 @@ impl EnvironmentIndex {
         let Some(raw) = self.storage.load(&self.key()).await else {
             return BTreeSet::new();
         };
+        if raw.len() > MAX_DOCUMENT_BYTES {
+            tracing::warn!(
+                bytes = raw.len(),
+                "environment index is oversized; treating it as empty"
+            );
+            return BTreeSet::new();
+        }
         match serde_json::from_str::<IndexDocument>(&raw) {
             Ok(document) => document
                 .environments
