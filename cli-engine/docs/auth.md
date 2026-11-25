@@ -262,7 +262,7 @@ let provider = PkceAuthProvider::new("idp", "", "", "my-client-id", &["openid", 
 
 A document can say where requests go, and nothing in it vouches for that, so `OidcDiscovery` does not trust it:
 
-- Every endpoint must be an `https` URL, with no port or credentials, on an allowed host. The issuer's own host is
+- Every endpoint must be an `https` URL, with no port, credentials or fragment, on an allowed host. The issuer's own host is
   always allowed. A provider that serves endpoints from another domain needs it named with
   `OidcDiscovery::with_allowed_hosts`, which takes bare host names and matches them exactly, so
   `accounts.example.com` does not allow `login.accounts.example.com` or `accounts.example.com.evil.test`.

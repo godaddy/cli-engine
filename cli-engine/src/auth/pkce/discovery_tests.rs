@@ -138,6 +138,22 @@ async fn an_endpoint_on_another_host_is_rejected_whichever_endpoint_it_is() {
     }
 }
 
+/// Every reason an endpoint can be refused is named in the message, so an operator
+/// with a rejected document can tell what to fix.
+#[tokio::test]
+async fn the_rejection_message_names_every_rule_an_endpoint_can_fail() {
+    let (_server, discovery) =
+        setup(|doc| doc["token_endpoint"] = json!("https://idp.example.com/token#frag")).await;
+    let message = problem(discovery.endpoints().await);
+    for rule in ["https", "allowed host", "port", "credentials", "fragment"] {
+        assert!(
+            message.contains(rule),
+            "message should name {rule:?}: {message}"
+        );
+    }
+    assert!(!message.contains("#frag"), "{message}");
+}
+
 #[tokio::test]
 async fn an_unparseable_or_oversized_document_is_an_error_that_never_echoes_it() {
     let server =

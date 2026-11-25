@@ -247,8 +247,8 @@ impl OidcDiscovery {
             Ok(value)
         } else {
             Err(problem(format!(
-                "the {label} endpoint must be an https URL on an allowed host, without a port \
-                 or credentials"
+                "the {label} endpoint must be an https URL on an allowed host, without a port, \
+                 credentials or fragment"
             )))
         }
     }
