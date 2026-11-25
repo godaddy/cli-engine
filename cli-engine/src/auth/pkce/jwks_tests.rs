@@ -1,11 +1,12 @@
 //! `JwksVerifier` against real signatures: RSA and ECDSA keys are generated here,
 //! tokens are signed with them, and a loopback server publishes the key set.
 
-use std::sync::{
-    Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, OnceLock};
 
+use super::{
+    IdTokenVerifier, JwksVerifier, OidcDiscovery, VerifyError,
+    loopback::{LoopbackServer, Reply},
+};
 use aws_lc_rs::{
     hmac,
     rand::SystemRandom,
@@ -15,13 +16,6 @@ use aws_lc_rs::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    task::JoinHandle,
-};
-
-use super::{IdTokenVerifier, JwksVerifier, VerifyError};
 
 const ISSUER: &str = "https://idp.example.com";
 const AUDIENCE: &str = "client-id";
@@ -110,162 +104,36 @@ fn es256(kid: &str, claims: &Value) -> String {
     })
 }
 
-/// What the loopback key endpoint answers.
-#[derive(Clone)]
-enum Reply {
-    Body(String),
-    Status(u16),
-    Redirect(String),
-    /// A declared `content-length` of `declared` bytes, then up to `actual`
-    /// bytes of body, written in chunks until the client stops reading.
-    Lying {
-        declared: usize,
-        actual: usize,
-    },
-    /// No `content-length` at all (the body ends when the connection closes), and
-    /// up to `bytes` bytes written in chunks until the client stops reading.
-    Unbounded {
-        bytes: usize,
-    },
-}
-
-/// A loopback key endpoint that counts its requests and can be re-scripted.
-struct KeyServer {
-    url: String,
-    hits: Arc<AtomicUsize>,
-    /// Body bytes the server managed to write, across all requests.
-    sent: Arc<AtomicUsize>,
-    /// The request head (request line and headers) of the latest request.
-    last_head: Arc<Mutex<String>>,
-    reply: Arc<Mutex<Reply>>,
-    task: JoinHandle<()>,
-}
+/// A loopback key endpoint at `/keys`, with a verifier pointed at it.
+struct KeyServer(LoopbackServer);
 
 impl KeyServer {
     async fn start(reply: Reply) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let url = format!("http://{}/keys", listener.local_addr().expect("addr"));
-        let hits = Arc::new(AtomicUsize::new(0));
-        let sent = Arc::new(AtomicUsize::new(0));
-        let last_head = Arc::new(Mutex::new(String::new()));
-        let reply = Arc::new(Mutex::new(reply));
-        let task = tokio::spawn({
-            let (hits, reply, sent) = (hits.clone(), reply.clone(), sent.clone());
-            let last_head = last_head.clone();
-            async move {
-                while let Ok((mut stream, _)) = listener.accept().await {
-                    let (hits, reply, sent) = (hits.clone(), reply.clone(), sent.clone());
-                    let last_head = last_head.clone();
-                    tokio::spawn(async move {
-                        let mut head = Vec::new();
-                        let mut buf = [0_u8; 1024];
-                        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                            match stream.read(&mut buf).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(read) => head.extend_from_slice(&buf[..read]),
-                            }
-                        }
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        *last_head.lock().expect("head lock") =
-                            String::from_utf8_lossy(&head).into_owned();
-                        let reply = reply.lock().expect("reply lock").clone();
-                        let response = match reply {
-                            Reply::Body(body) => format!(
-                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                                body.len()
-                            ),
-                            Reply::Status(code) => format!(
-                                "HTTP/1.1 {code} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                            ),
-                            Reply::Redirect(to) => format!(
-                                "HTTP/1.1 302 Found\r\nlocation: {to}\r\ncontent-length: 0\r\n\
-                                 connection: close\r\n\r\n"
-                            ),
-                            Reply::Lying { declared, actual } => {
-                                let head = format!(
-                                    "HTTP/1.1 200 OK\r\ncontent-length: {declared}\r\n\
-                                     connection: close\r\n\r\n"
-                                );
-                                stream_body(&mut stream, head, actual, &sent).await;
-                                return;
-                            }
-                            Reply::Unbounded { bytes } => {
-                                let head =
-                                    "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_owned();
-                                stream_body(&mut stream, head, bytes, &sent).await;
-                                return;
-                            }
-                        };
-                        // A client that already gave up makes this fail; that is
-                        // expected in the tests that abandon a request.
-                        drop(stream.write_all(response.as_bytes()).await);
-                    });
-                }
-            }
-        });
-        Self {
-            url,
-            hits,
-            sent,
-            last_head,
-            reply,
-            task,
-        }
+        Self(LoopbackServer::keys(reply).await)
     }
 
-    /// The headers of the latest request, lowercased, one `name: value` per line.
-    fn last_request_headers(&self) -> String {
-        self.last_head
-            .lock()
-            .expect("head lock")
-            .to_ascii_lowercase()
+    fn url(&self) -> String {
+        self.0.keys_url()
     }
 
     fn hits(&self) -> usize {
-        self.hits.load(Ordering::SeqCst)
+        self.0.hits()
     }
 
     fn body_bytes_sent(&self) -> usize {
-        self.sent.load(Ordering::SeqCst)
+        self.0.body_bytes_sent()
+    }
+
+    fn last_request_headers(&self) -> String {
+        self.0.last_request_headers()
     }
 
     fn set(&self, reply: Reply) {
-        *self.reply.lock().expect("reply lock") = reply;
+        self.0.set("/keys", reply);
     }
 
     fn verifier(&self) -> JwksVerifier {
-        JwksVerifier::new_unchecked(ISSUER, &self.url).expect("verifier")
-    }
-}
-
-impl Drop for KeyServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-/// Writes `head`, then up to `total` bytes of body in 16 KiB chunks, counting
-/// what was accepted. Stops at the first write error, which is the client closing
-/// the connection once it has decided to give up.
-async fn stream_body(
-    stream: &mut tokio::net::TcpStream,
-    head: String,
-    total: usize,
-    sent: &AtomicUsize,
-) {
-    if stream.write_all(head.as_bytes()).await.is_err() {
-        return;
-    }
-    let chunk = vec![b'x'; 16 * 1024];
-    let mut remaining = total;
-    while remaining > 0 {
-        let n = remaining.min(chunk.len());
-        if stream.write_all(&chunk[..n]).await.is_err() {
-            return;
-        }
-        sent.fetch_add(n, Ordering::SeqCst);
-        remaining -= n;
+        JwksVerifier::new_unchecked(ISSUER, self.url()).expect("verifier")
     }
 }
 
@@ -781,7 +649,7 @@ async fn the_key_request_carries_the_current_user_agent_and_no_attribution_heade
 #[tokio::test]
 async fn a_redirect_from_the_key_endpoint_is_not_followed() {
     let elsewhere = server_with_both_rsa_keys().await;
-    let server = KeyServer::start(Reply::Redirect(elsewhere.url.clone())).await;
+    let server = KeyServer::start(Reply::Redirect(elsewhere.url())).await;
     let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
     let reason = expect_unavailable(server.verifier().verify(&token, AUDIENCE).await);
     assert!(reason.contains("HTTP 302"), "{reason}");
@@ -901,4 +769,139 @@ async fn a_verifier_plugs_into_a_provider_end_to_end() {
     provider.save_stored("dev", &stored).await.expect("seed");
     let err = provider.status("dev").await.expect_err("forged");
     assert!(err.to_string().contains("failed verification"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// A verifier whose issuer and key-set URL come from discovery
+// ---------------------------------------------------------------------------
+
+const WELL_KNOWN: &str = "/.well-known/openid-configuration";
+
+/// An identity provider serving discovery and `/keys`, whose issuer is its own
+/// base URL, so tokens must carry that as `iss`.
+async fn discovered_provider() -> (LoopbackServer, Arc<OidcDiscovery>, String) {
+    let f = fixture();
+    let server = LoopbackServer::routes([
+        (WELL_KNOWN, Reply::Status(500)),
+        (
+            "/keys",
+            Reply::Body(key_set(vec![rsa_jwk(&f.rsa_a, "key-a")])),
+        ),
+    ])
+    .await;
+    let base = server.url("");
+    server.set(
+        WELL_KNOWN,
+        Reply::Body(
+            json!({
+                "issuer": base,
+                "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"),
+                "jwks_uri": format!("{base}/keys"),
+            })
+            .to_string(),
+        ),
+    );
+    let discovery = Arc::new(OidcDiscovery::new_loopback(&base).expect("discovery"));
+    (server, discovery, base)
+}
+
+fn claims_for(issuer: &str) -> Value {
+    let mut claims = good_claims();
+    claims["iss"] = json!(issuer);
+    claims
+}
+
+#[tokio::test]
+async fn a_verifier_built_from_discovery_verifies_against_the_discovered_issuer_and_keys() {
+    let (server, discovery, base) = discovered_provider().await;
+    let verifier = JwksVerifier::from_discovery(discovery).expect("verifier");
+
+    let token = rs256(&fixture().rsa_a, "key-a", &claims_for(&base));
+    let verified = verifier.verify(&token, AUDIENCE).await.expect("valid");
+    assert_eq!(verified.claims()["email"], "user@example.com");
+    assert_eq!(server.hits_for("/keys"), 1);
+    assert_eq!(server.hits_for(WELL_KNOWN), 1);
+}
+
+#[tokio::test]
+async fn a_discovered_verifier_rejects_a_token_from_another_issuer() {
+    let (_server, discovery, _base) = discovered_provider().await;
+    let verifier = JwksVerifier::from_discovery(discovery).expect("verifier");
+    let token = rs256(
+        &fixture().rsa_a,
+        "key-a",
+        &claims_for("https://evil.example.com"),
+    );
+    let reason = expect_invalid(verifier.verify(&token, AUDIENCE).await);
+    assert!(reason.contains("issuer"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_verifier_and_a_provider_sharing_discovery_fetch_the_document_once() {
+    let (server, discovery, base) = discovered_provider().await;
+    let verifier = JwksVerifier::from_discovery(discovery.clone()).expect("verifier");
+
+    // The provider needs the endpoints first, as it would to log in.
+    let provider = super::PkceAuthProvider::new("test", "", "", "client-id", &["openid"])
+        .with_oidc_discovery(discovery);
+    provider.resolved_oauth("dev").await.expect("endpoints");
+    verifier
+        .verify(
+            &rs256(&fixture().rsa_a, "key-a", &claims_for(&base)),
+            AUDIENCE,
+        )
+        .await
+        .expect("valid");
+
+    assert_eq!(server.hits_for(WELL_KNOWN), 1, "one fetch for both");
+}
+
+#[tokio::test]
+async fn a_discovery_failure_is_unavailable_and_never_a_verdict_on_the_token() {
+    let server = LoopbackServer::routes([(WELL_KNOWN, Reply::Status(503))]).await;
+    let discovery = Arc::new(OidcDiscovery::new_loopback(server.url("")).expect("discovery"));
+    let verifier = JwksVerifier::from_discovery(discovery).expect("verifier");
+
+    let token = rs256(&fixture().rsa_a, "key-a", &claims_for(&server.url("")));
+    let reason = expect_unavailable(verifier.verify(&token, AUDIENCE).await);
+    assert!(reason.contains("discovery"), "{reason}");
+    assert!(!reason.contains(&token), "{reason}");
+}
+
+#[tokio::test]
+async fn a_poisoned_key_set_url_in_the_document_is_never_fetched() {
+    let evil = LoopbackServer::routes([("/keys", Reply::Status(500))]).await;
+    let server = LoopbackServer::routes([(WELL_KNOWN, Reply::Status(500))]).await;
+    let base = server.url("");
+    server.set(
+        WELL_KNOWN,
+        Reply::Body(
+            json!({
+                "issuer": base,
+                "authorization_endpoint": format!("{base}/authorize"),
+                "token_endpoint": format!("{base}/token"),
+                "jwks_uri": "https://evil.example.net/keys",
+            })
+            .to_string(),
+        ),
+    );
+    let discovery = Arc::new(OidcDiscovery::new_loopback(&base).expect("discovery"));
+    let verifier = JwksVerifier::from_discovery(discovery).expect("verifier");
+
+    let token = rs256(&fixture().rsa_a, "key-a", &claims_for(&base));
+    expect_unavailable(verifier.verify(&token, AUDIENCE).await);
+    assert_eq!(evil.hits(), 0);
+}
+
+#[tokio::test]
+async fn nothing_is_fetched_for_a_token_that_needs_no_keys() {
+    let (server, discovery, _base) = discovered_provider().await;
+    let verifier = JwksVerifier::from_discovery(discovery).expect("verifier");
+    expect_invalid(verifier.verify("not-a-jwt", AUDIENCE).await);
+    assert_eq!(
+        server.hits(),
+        0,
+        "a malformed token is rejected before any fetch"
+    );
 }

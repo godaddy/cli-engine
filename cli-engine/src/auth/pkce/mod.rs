@@ -54,27 +54,31 @@
 
 use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use chrono::SecondsFormat;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::{
     Credential, Result,
-    auth::AuthProvider,
-    auth::CredentialRequest,
     auth::storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
     config::CredentialStore,
     error::CliCoreError,
 };
 
+mod auth_provider;
 #[cfg(test)]
 mod bearer_tests;
 mod callback_server;
+mod discovery;
+#[cfg(test)]
+mod discovery_tests;
+mod http_fetch;
 #[cfg(feature = "id-token-verify")]
 mod jwks;
 #[cfg(all(test, feature = "id-token-verify"))]
 mod jwks_tests;
+#[cfg(test)]
+mod loopback;
 mod oauth_config;
 mod redirect;
 #[cfg(test)]
@@ -92,6 +96,7 @@ use callback_server::{
     emit_auth_complete_message, emit_browser_login_prompt, pkce_challenge, random_nonce,
     random_state, wait_for_callback,
 };
+pub use discovery::{OidcDiscovery, OidcEndpoints};
 #[cfg(feature = "id-token-verify")]
 pub use jwks::JwksVerifier;
 use oauth_config::OAuthSection;
@@ -163,6 +168,9 @@ pub struct PkceAuthProvider {
     /// Authenticates id_tokens before their claims are trusted — see
     /// [`IdTokenVerifier`]. `None` keeps the unverified behaviour.
     verifier: Option<Arc<dyn IdTokenVerifier>>,
+    /// Supplies the authorization and token endpoints — see
+    /// [`PkceAuthProvider::with_oidc_discovery`]. `None` uses the configured ones.
+    discovery: Option<Arc<OidcDiscovery>>,
 }
 
 /// Formats Unix seconds as RFC 3339, or an empty string when out of range.
@@ -216,6 +224,7 @@ impl PkceAuthProvider {
             require_nonce: false,
             bearer: Bearer::default(),
             verifier: None,
+            discovery: None,
         }
     }
 
@@ -438,6 +447,26 @@ impl PkceAuthProvider {
         self
     }
 
+    /// Takes the authorization and token endpoints from an OIDC discovery document
+    /// instead of configuration.
+    ///
+    /// The endpoints passed to [`new`](Self::new) are then ignored, so they can be
+    /// left empty. An `auth_url` or `token_url` set for an environment (in
+    /// `environments.toml` or via [`with_environments`](Self::with_environments))
+    /// still wins for that environment, as an explicit override of the provider's
+    /// own. The discovery document is fetched only when an endpoint is needed, that
+    /// is, to log in or to refresh; reusing a valid stored credential never fetches
+    /// it. A failure to fetch or to validate it is an error, and nothing is stored.
+    ///
+    /// Share the same [`OidcDiscovery`] with the id_token verifier
+    /// (`JwksVerifier::from_discovery`, with the `id-token-verify` feature) so the
+    /// document is fetched once.
+    #[must_use]
+    pub fn with_oidc_discovery(mut self, discovery: Arc<OidcDiscovery>) -> Self {
+        self.discovery = Some(discovery);
+        self
+    }
+
     /// Authenticates every id_token this provider handles before trusting it.
     ///
     /// Without one, `identity` and `sub` come from claims decoded without any
@@ -509,16 +538,52 @@ impl PkceAuthProvider {
     /// Computes the effective OAuth config for `env`, with at most one
     /// environment resolution. See [`oauth_config::effective_oauth`].
     fn effective_oauth(&self, env: &str) -> Result<OAuthSection> {
+        // Under discovery the endpoints given to `new` are not used, so only an
+        // endpoint set for the environment itself survives.
+        let (auth_url, token_url) = if self.discovery.is_some() {
+            ("", "")
+        } else {
+            (self.auth_url.as_str(), self.token_url.as_str())
+        };
         oauth_config::effective_oauth(
             self.environments.as_deref(),
             env,
             oauth_config::Base {
                 client_id: &self.client_id,
-                auth_url: &self.auth_url,
-                token_url: &self.token_url,
+                auth_url,
+                token_url,
                 scopes: &self.scopes,
             },
+            self.discovery.is_none(),
         )
+    }
+
+    /// [`effective_oauth`](Self::effective_oauth) with any endpoint still blank
+    /// filled in from discovery. Use it where an endpoint is needed (to log in or
+    /// refresh); where only the client id or scopes are, the plain one avoids the
+    /// network.
+    ///
+    /// # Errors
+    ///
+    /// See [`effective_oauth`](Self::effective_oauth), plus any failure of
+    /// discovery, which is never answered with a guessed endpoint.
+    async fn resolved_oauth(&self, env: &str) -> Result<OAuthSection> {
+        let mut oauth = self.effective_oauth(env)?;
+        let Some(discovery) = &self.discovery else {
+            return Ok(oauth);
+        };
+        if oauth.auth_url.is_empty() || oauth.token_url.is_empty() {
+            let endpoints = discovery.endpoints().await?;
+            if oauth.auth_url.is_empty() {
+                endpoints
+                    .authorization_endpoint()
+                    .clone_into(&mut oauth.auth_url);
+            }
+            if oauth.token_url.is_empty() {
+                endpoints.token_endpoint().clone_into(&mut oauth.token_url);
+            }
+        }
+        Ok(oauth)
     }
 
     /// Default scopes for `env`: the resolved environment's scopes when
@@ -678,7 +743,7 @@ impl PkceAuthProvider {
             return Ok(None);
         };
         // One resolution serves both the request and the check of its result.
-        let Ok(oauth) = self.effective_oauth(env) else {
+        let Ok(oauth) = self.resolved_oauth(env).await else {
             return Ok(None);
         };
         let Ok(mut refreshed) = self
@@ -757,7 +822,7 @@ impl PkceAuthProvider {
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
         // Resolved once for the whole login, so the audience the token is verified
         // against is the client id it was requested with.
-        let oauth = self.effective_oauth(env)?;
+        let oauth = self.resolved_oauth(env).await?;
         let token = self.run_pkce_flow_with(&oauth, scopes).await?;
         let token = self.accept_login(env, token, &oauth.client_id).await?;
         // Announced only now: a token the verifier rejects, or that cannot be
@@ -899,87 +964,6 @@ impl PkceAuthProvider {
         ];
         let request = self.token_request(&oauth.token_url, &params);
         token_endpoint::fetch_tokens(request, token_endpoint::REFRESH, prior_scopes).await
-    }
-}
-
-#[async_trait]
-impl AuthProvider for PkceAuthProvider {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn get_credential(&self, env: &str, _command: &str, _tier: &str) -> Result<Credential> {
-        let token = self.resolve_token(env).await?;
-        self.bearer_credential(env, &token)
-    }
-
-    async fn get_credential_for(&self, req: &CredentialRequest<'_>) -> Result<Credential> {
-        let env = req.env;
-        let required = &req.meta.scopes;
-
-        // Look for a usable token WITHOUT launching a flow, so we can pick the
-        // scope set for a single login rather than authenticating twice (e.g.
-        // `auth login --scope X` logs out first; resolving defaults and then
-        // stepping up would open the browser twice).
-        if let Some(token) = self.existing_token(env).await? {
-            // Decide based on what the token grants (JWT claim plus the scopes it
-            // was obtained with).
-            let granted = granted_scopes(&token);
-            match plan_step_up(&granted, required, &self.scope_hierarchy) {
-                StepUp::Covered => return self.bearer_credential(env, &token),
-                // Step-up is re-consent: the authorization server has no silent
-                // scope-expansion grant, so acquire the missing scopes with a
-                // fresh login — the same browser flow the no-token path runs
-                // below, rather than failing when stdio is not a TTY. Resolve
-                // per-env defaults only now (off the cached-token hot path) and
-                // request defaults ∪ already-granted ∪ required so step-up never
-                // drops previously-acquired scopes.
-                StepUp::Reauthenticate => {
-                    let union = union_scopes(&self.effective_scopes(env)?, &granted, required);
-                    let token = self.reauthenticate(env, &union).await?;
-                    ensure_granted(env, &token, required, &self.scope_hierarchy)?;
-                    return self.bearer_credential(env, &token);
-                }
-            }
-        }
-
-        // No usable token: authenticate once, requesting defaults ∪ required.
-        let union = union_scopes(&self.effective_scopes(env)?, &[], required);
-        let token = self.reauthenticate(env, &union).await?;
-        ensure_granted(env, &token, required, &self.scope_hierarchy)?;
-        self.bearer_credential(env, &token)
-    }
-
-    async fn status(&self, env: &str) -> Result<Credential> {
-        let Some(mut token) = self.load_stored(env).await else {
-            return Err(CliCoreError::message(format!(
-                "not logged in for environment {env:?}"
-            )));
-        };
-        // Reported as an error, not shown with a blank identity: the stored copy
-        // is writable by the user's other processes, so nothing in it is trusted
-        // until the verifier has accepted it.
-        if let Verification::Rejected(reason) = self.verify_token(env, &mut token).await? {
-            return Err(CliCoreError::message(format!(
-                "the stored id_token for environment {env:?} failed verification ({reason}); log in again"
-            )));
-        }
-        self.bearer_credential(env, &token)
-    }
-
-    async fn logout(&self, env: &str) -> Result<()> {
-        self.delete_stored(env).await;
-        let mut cache = self.cache.write().await;
-        cache.remove(env);
-        Ok(())
-    }
-
-    async fn list_environments(&self) -> Result<Vec<String>> {
-        // Keyring and file-fallback storage do not support listing; return only
-        // the in-memory cache keys as a hint. Tokens that survived a restart via
-        // file fallback are not enumerated here.
-        let cache = self.cache.read().await;
-        Ok(cache.keys().cloned().collect())
     }
 }
 

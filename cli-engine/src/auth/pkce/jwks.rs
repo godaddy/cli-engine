@@ -1,8 +1,6 @@
 //! A ready-made [`IdTokenVerifier`] that checks an id_token against the issuer's
 //! published JSON Web Key Set.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
@@ -12,16 +10,12 @@ use jsonwebtoken::{
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
-use super::verify::{IdTokenVerifier, VerifiedIdToken, VerifyError};
+use std::sync::Arc;
 
-/// Per-fetch bound on the key-set request. There is no separate command-level
-/// budget here: the engine's `--timeout` cancels the whole command, and this
-/// keeps an unresponsive key endpoint from consuming all of it.
-const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Bound on establishing the connection, so an unroutable key endpoint fails fast
-/// instead of using up the whole fetch budget.
-const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+use super::{
+    OidcDiscovery, http_fetch,
+    verify::{IdTokenVerifier, VerifiedIdToken, VerifyError},
+};
 
 /// Largest key set accepted, so a hostile or broken endpoint cannot make the CLI
 /// buffer an unbounded response: the body is read incrementally and abandoned once
@@ -74,6 +68,9 @@ const ALLOWED_ALGORITHMS: [Algorithm; 8] = [
 /// program enables none, the first verification panics with a message from
 /// `jsonwebtoken` saying so.
 ///
+/// To take the issuer and key-set URL from an OIDC discovery document instead,
+/// see [`from_discovery`](Self::from_discovery).
+///
 /// # Examples
 ///
 /// With `jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }`
@@ -101,9 +98,18 @@ const ALLOWED_ALGORITHMS: [Algorithm; 8] = [
 #[derive(Debug)]
 pub struct JwksVerifier {
     issuer: String,
-    jwks_uri: String,
+    key_set: KeySetSource,
     client: reqwest::Client,
     keys: Mutex<Option<JwkSet>>,
+}
+
+/// Where the key set's URL comes from.
+#[derive(Debug)]
+enum KeySetSource {
+    /// Given at construction and already checked.
+    Fixed(String),
+    /// Read from the issuer's discovery document the first time it is needed.
+    Discovered(Arc<OidcDiscovery>),
 }
 
 impl JwksVerifier {
@@ -127,7 +133,27 @@ impl JwksVerifier {
         if issuer_host != jwks_host {
             return Err(invalid("the key-set URL"));
         }
-        Self::build(issuer, jwks_uri)
+        Self::build(issuer, KeySetSource::Fixed(jwks_uri))
+    }
+
+    /// Creates a verifier whose issuer and key-set URL come from `discovery`.
+    ///
+    /// The issuer is the one `discovery` was created for, and the key-set URL is
+    /// read from its document, checked as `discovery` checks every endpoint, the
+    /// first time a key is needed. Share `discovery` with the provider
+    /// (`PkceAuthProvider::with_oidc_discovery`) so the document is fetched once.
+    ///
+    /// A discovery document that cannot be fetched or is not acceptable is
+    /// reported as [`VerifyError::Unavailable`]: it says nothing about the token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP client cannot be built.
+    pub fn from_discovery(discovery: Arc<OidcDiscovery>) -> crate::Result<Self> {
+        Self::build(
+            discovery.issuer().to_owned(),
+            KeySetSource::Discovered(discovery),
+        )
     }
 
     /// Like [`new`](Self::new) without the URL checks, so tests can point at a
@@ -137,29 +163,18 @@ impl JwksVerifier {
         issuer: impl Into<String>,
         jwks_uri: impl Into<String>,
     ) -> crate::Result<Self> {
-        Self::build(issuer.into(), jwks_uri.into())
+        Self::build(issuer.into(), KeySetSource::Fixed(jwks_uri.into()))
     }
 
-    fn build(issuer: String, jwks_uri: String) -> crate::Result<Self> {
-        // A plain client: the user-agent is attached per request (see `fetch`), as
-        // the provider's token requests do. `reqwest_client_builder` would snapshot
-        // the process identity here, and a verifier is built during registration,
-        // before the identity is published, so it would hold a stale one. It would
-        // also carry attribution headers, including a session-correlation hash,
-        // to an identity provider that has no use for them.
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(JWKS_CONNECT_TIMEOUT)
-            .timeout(JWKS_FETCH_TIMEOUT)
-            .build()
-            .map_err(|err| {
-                crate::error::CliCoreError::message(format!(
-                    "id_token verifier: could not build an HTTP client: {err}"
-                ))
-            })?;
+    fn build(issuer: String, key_set: KeySetSource) -> crate::Result<Self> {
+        let client = http_fetch::client().map_err(|err| {
+            crate::error::CliCoreError::message(format!(
+                "id_token verifier: could not build an HTTP client: {err}"
+            ))
+        })?;
         Ok(Self {
             issuer,
-            jwks_uri,
+            key_set,
             client,
             keys: Mutex::new(None),
         })
@@ -181,49 +196,23 @@ impl JwksVerifier {
     }
 
     async fn fetch(&self) -> Result<JwkSet, VerifyError> {
-        let unavailable = |what: &str| VerifyError::Unavailable(format!("signing keys: {what}"));
-        let mut response = self
-            .client
-            .get(&self.jwks_uri)
-            .header(
-                reqwest::header::USER_AGENT,
-                crate::transport::client::default_user_agent(),
-            )
-            .send()
+        let jwks_uri = match &self.key_set {
+            KeySetSource::Fixed(uri) => uri.as_str(),
+            KeySetSource::Discovered(discovery) => discovery
+                .endpoints()
+                .await
+                .map_err(|err| VerifyError::Unavailable(err.to_string()))?
+                .jwks_uri(),
+        };
+        http_fetch::get_json(&self.client, jwks_uri, JWKS_MAX_BYTES)
             .await
-            .map_err(|_| unavailable("the key endpoint could not be reached"))?;
-        if !response.status().is_success() {
-            return Err(unavailable(&format!(
-                "the key endpoint answered HTTP {}",
-                response.status().as_u16()
-            )));
-        }
-        let too_large = || unavailable("the key endpoint's response is too large");
-        // Read in pieces and abandoned the moment it passes the limit, so memory
-        // stays bounded whatever `content-length` claims, or whether it is sent.
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| unavailable("the key endpoint's response could not be read"))?
-        {
-            if body.len() + chunk.len() > JWKS_MAX_BYTES {
-                return Err(too_large());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        serde_json::from_slice(&body).map_err(|_| unavailable("the key set could not be parsed"))
+            .map_err(|err| {
+                VerifyError::Unavailable(format!(
+                    "signing keys: {}",
+                    err.describe("the key endpoint")
+                ))
+            })
     }
-}
-
-/// The host of `url` when it is `https` with no port, user or password.
-fn https_host(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    let plain = parsed.scheme() == "https"
-        && parsed.port().is_none()
-        && parsed.username().is_empty()
-        && parsed.password().is_none();
-    plain.then(|| parsed.host_str().map(str::to_ascii_lowercase))?
 }
 
 /// The explicit reasons a token is not accepted. They name the rule, never a claim
@@ -334,4 +323,14 @@ fn check_oidc_claims(claims: &Map<String, Value>, audience: &str) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// The host of `url` when it is `https` with no port, user or password.
+fn https_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let plain = parsed.scheme() == "https"
+        && parsed.port().is_none()
+        && parsed.username().is_empty()
+        && parsed.password().is_none();
+    plain.then(|| parsed.host_str().map(str::to_ascii_lowercase))?
 }
