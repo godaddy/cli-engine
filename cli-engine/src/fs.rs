@@ -124,7 +124,7 @@ fn move_directory_contents(old_dir: &Path, new_dir: &Path) -> MoveOutcome {
             skipped: 0,
         };
     };
-    if ensure_private_dir(new_dir).is_err() {
+    if ensure_private_dir(new_dir, false).is_err() {
         return MoveOutcome {
             moved: 0,
             skipped: 0,
@@ -276,8 +276,32 @@ pub fn is_safe_path_component(s: &str) -> bool {
 /// Returns an error when the directory cannot be created or the write/rename
 /// fails.
 pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
+    write_atomic(path, contents, false)
+}
+
+/// Like [`write_string_atomic`], for a file that holds a secret and lives in a
+/// directory of its own, such as a credentials directory. The parent directory is
+/// restricted to `0700` on Unix even when it already existed, so a directory left
+/// loose by hand is tightened by the next write. The file is replaced rather than
+/// rewritten in place, so one that had loose permissions comes back `0600`.
+///
+/// Never point this at a directory the caller does not own outright (`$HOME`, say):
+/// it changes that directory's permissions.
+///
+/// **Blocking**, like [`write_string_atomic`].
+///
+/// # Errors
+/// Returns an error when the directory cannot be created, is a symlink, or the
+/// write/rename fails. Failing to change the mode of a directory that is not a link
+/// is logged, not an error: the file is still written `0600`, and a read checks the
+/// file itself.
+pub(crate) fn write_private_file_atomic(path: &Path, contents: &str) -> crate::Result<()> {
+    write_atomic(path, contents, true)
+}
+
+fn write_atomic(path: &Path, contents: &str, restrict_existing_dir: bool) -> crate::Result<()> {
     if let Some(parent) = path.parent() {
-        ensure_private_dir(parent)
+        ensure_private_dir(parent, restrict_existing_dir)
             .map_err(|e| CliCoreError::message(format!("failed to create directory: {e}")))?;
     }
     // Unique temp name without pulling in `rand`: pid plus a monotonic counter is
@@ -301,14 +325,23 @@ pub fn write_string_atomic(path: &Path, contents: &str) -> crate::Result<()> {
 }
 
 /// Creates `dir` (and any missing ancestors) if absent. On Unix, a directory
-/// that did **not** already exist is best-effort restricted to `0700`;
-/// pre-existing directories (e.g. `$HOME`) are left unchanged so their
-/// permissions aren't altered by a caller that merely writes into them.
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+/// that did **not** already exist is best-effort restricted to `0700`.
+/// A pre-existing one (e.g. `$HOME`) is left unchanged unless
+/// `restrict_existing`, so a caller that merely writes into it does not alter its
+/// permissions.
+///
+/// With `restrict_existing`, the directory itself must not be a symlink: it is
+/// opened without following one and restricted through that handle, so a link
+/// planted at the path cannot redirect the permission change (or the write that
+/// follows) to some other directory. Ancestors may be links; a symlinked
+/// `~/.config` is common and is the user's own arrangement.
+fn ensure_private_dir(dir: &Path, restrict_existing: bool) -> std::io::Result<()> {
     let existed = dir.is_dir();
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
-    if !existed {
+    if restrict_existing {
+        restrict_dir_without_following(dir)?;
+    } else if !existed {
         use std::os::unix::fs::PermissionsExt as _;
         if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
             tracing::debug!(
@@ -317,6 +350,57 @@ fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
                 "could not restrict directory permissions"
             );
         }
+    }
+    #[cfg(not(unix))]
+    let _ = (existed, restrict_existing);
+    Ok(())
+}
+
+/// Sets `dir` to `0700` through a handle opened with `O_NOFOLLOW | O_DIRECTORY`.
+/// Fails when `dir` is a symlink (or not a directory).
+///
+/// A directory the owner cannot read (mode `0300`, say) cannot be opened that way, and
+/// is not a symlink either, since opening a symlink with those flags fails with
+/// `ENOTDIR` before permissions are consulted. That one case is restricted by path
+/// instead, which leaves a window between the failed open and the `chmod` that the
+/// handle does not have.
+///
+/// Failing to change the mode of a directory that is not a link (it belongs to
+/// someone else, say) is logged, not an error: the file written into it is still
+/// `0600` and reads check the file itself.
+#[cfg(unix)]
+fn restrict_dir_without_following(dir: &Path) -> std::io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let restricted = match rustix::fs::open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(handle) => {
+            rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o700)).map_err(std::io::Error::from)
+        }
+        Err(rustix::io::Errno::ACCESS) => {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        }
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is not a plain directory (a symlink?): {}",
+                    dir.display(),
+                    std::io::Error::from(e)
+                ),
+            ));
+        }
+    };
+    if let Err(e) = restricted {
+        tracing::debug!(
+            path = %dir.display(),
+            error = %e,
+            "could not restrict directory permissions"
+        );
     }
     Ok(())
 }
@@ -335,8 +419,16 @@ fn write_tmp_file(tmp_path: &Path, contents: &str) -> crate::Result<()> {
     let mut file = opts.open(tmp_path).map_err(|e| {
         CliCoreError::message(format!("failed to write {}: {e}", tmp_path.display()))
     })?;
-    file.write_all(contents.as_bytes())
-        .map_err(|e| CliCoreError::message(format!("failed to write {}: {e}", tmp_path.display())))
+    if let Err(e) = file.write_all(contents.as_bytes()) {
+        // Do not leave a half-written secret behind under a name nothing cleans up.
+        drop(file);
+        std::fs::remove_file(tmp_path).ok();
+        return Err(CliCoreError::message(format!(
+            "failed to write {}: {e}",
+            tmp_path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -459,6 +551,24 @@ mod tests {
         write_string_atomic(&path, "s3cr3t").expect("write");
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "file should be owner read/write only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_general_writer_leaves_an_existing_directory_alone_and_the_private_one_does_not() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("shared");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        write_string_atomic(&dir.join("a.txt"), "x").expect("write");
+        assert_eq!(mode(&dir), 0o755, "callers writing into $HOME and the like");
+
+        write_private_file_atomic(&dir.join("b.txt"), "x").expect("write");
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("b.txt")), 0o600);
     }
 
     #[test]

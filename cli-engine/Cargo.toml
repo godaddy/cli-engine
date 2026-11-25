@@ -44,6 +44,12 @@ tracing = "0.1.43"
 termimad = "0.34.1"
 inquire = "0.9.4"
 
+# Safe wrappers for the effective user id and the open flags the credential file
+# reads need (`O_NOFOLLOW`, `O_NONBLOCK`), so no `unsafe` is required. Already in the
+# dependency tree through `tempfile` and `crossterm`.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.1", optional = true, default-features = false, features = ["async-secret-service", "tokio", "crypto-rust"] }
 

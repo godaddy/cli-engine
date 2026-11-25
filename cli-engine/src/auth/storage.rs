@@ -140,18 +140,107 @@ impl FileStorage {
     }
 }
 
+/// Reads the credential file at `path`, or `None` when it is absent or not safe to
+/// trust.
+///
+/// On Unix the file is opened without following a symlink and must be a regular file
+/// owned by the effective user with no group or other permission bits. A file that
+/// fails that is not read: it may have been exposed to, or planted by, someone else,
+/// so the caller gets no credential and the user has to log in again, which replaces
+/// the file with a private one. `FileStorage` holds plaintext and is used where no
+/// keychain is reachable, so nothing else protects the file, and it does not take the
+/// file's word for it.
+///
+/// Elsewhere (Windows) the file is read without these checks: it lives under the
+/// user's profile, whose access control already keeps other users out.
+async fn read_credential_file(path: &std::path::Path) -> Option<String> {
+    match read_private_file(path).await {
+        Ok(contents) => Some(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "credential file was not read; log in again to replace it"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn read_private_file(path: &std::path::Path) -> std::io::Result<String> {
+    read_private_file_as(path, rustix::process::geteuid().as_raw()).await
+}
+
+/// [`read_private_file`] for a given effective user, which a test sets to someone
+/// other than the file's owner, since it cannot create a file owned by another user.
+#[cfg(unix)]
+async fn read_private_file_as(
+    path: &std::path::Path,
+    effective_user: u32,
+) -> std::io::Result<String> {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use tokio::io::AsyncReadExt as _;
+
+    // `NOFOLLOW` refuses a symlink at the path; `NONBLOCK` keeps a FIFO planted there
+    // from hanging the open (it is then refused as not a regular file).
+    let flags = i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits())
+        .map_err(std::io::Error::other)?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true).custom_flags(flags);
+    let mut file = options.open(path).await?;
+    // Checked on the open handle, not the path, so nothing can be swapped in between.
+    let metadata = file.metadata().await?;
+    if let Some(problem) = untrusted_file_problem(
+        metadata.is_file(),
+        metadata.uid(),
+        effective_user,
+        metadata.permissions().mode(),
+    ) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            problem,
+        ));
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await?;
+    Ok(contents)
+}
+
+/// Why a credential file with these attributes must not be trusted, if it must not:
+/// it is not a regular file, belongs to a user other than the one running, or can be
+/// reached by group or others. Split out so each rule can be tested without needing
+/// another user or root.
+#[cfg(unix)]
+fn untrusted_file_problem(
+    is_file: bool,
+    owner: u32,
+    effective_user: u32,
+    mode: u32,
+) -> Option<&'static str> {
+    if !is_file {
+        Some("not a regular file")
+    } else if owner != effective_user {
+        Some("owned by another user")
+    } else if mode & 0o077 != 0 {
+        Some("readable or writable by group or others")
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+async fn read_private_file(path: &std::path::Path) -> std::io::Result<String> {
+    tokio::fs::read_to_string(path).await
+}
+
 #[async_trait]
 impl CredentialStorage for FileStorage {
     async fn load(&self, key: &CredentialKey<'_>) -> Option<String> {
         let path = Self::path_for(key)?;
-        match tokio::fs::read_to_string(&path).await {
-            Ok(s) => Some(s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "credential file read failed");
-                None
-            }
-        }
+        read_credential_file(&path).await
     }
 
     async fn save(&self, key: &CredentialKey<'_>, value: &str) -> Result<()> {
@@ -159,7 +248,7 @@ impl CredentialStorage for FileStorage {
             crate::error::CliCoreError::message("could not determine credential file path")
         })?;
         let value = value.to_owned();
-        tokio::task::spawn_blocking(move || crate::fs::write_string_atomic(&path, &value))
+        tokio::task::spawn_blocking(move || crate::fs::write_private_file_atomic(&path, &value))
             .await
             .map_err(|e| {
                 crate::error::CliCoreError::message(format!(
@@ -545,5 +634,243 @@ mod tests {
         // Just assert it constructs without panicking; behavior covered above.
         let store = storage_for(CredentialStore::File);
         assert!(format!("{store:?}").contains("FileStorage"));
+    }
+
+    #[cfg(unix)]
+    mod hardening {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const SECRET: &str = "{\"token\":\"abc\"}";
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        fn chmod(path: &std::path::Path, mode: u32) {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+
+        /// A `FileStorage` rooted in a fresh config directory, the credential key,
+        /// and the path its file lives at. The guards hold the process-wide lock and
+        /// environment for the test.
+        struct Fixture {
+            // Fields drop in declaration order: the environment must be restored while
+            // the lock is still held, so `_env` comes first.
+            _env: EnvVarGuard,
+            _lock: std::sync::MutexGuard<'static, ()>,
+            dir: tempfile::TempDir,
+            store: FileStorage,
+            path: std::path::PathBuf,
+        }
+
+        fn fixture() -> Fixture {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock = lock();
+            let env = EnvVarGuard::set("XDG_CONFIG_HOME", Some(dir.path()));
+            let path = dir
+                .path()
+                .join("app")
+                .join("credentials")
+                .join("prov-dev.json");
+            Fixture {
+                _env: env,
+                _lock: lock,
+                dir,
+                store: FileStorage::new(),
+                path,
+            }
+        }
+
+        fn key() -> CredentialKey<'static> {
+            CredentialKey::new("app", "prov", "dev")
+        }
+
+        #[tokio::test]
+        // The guards serialize the process-wide environment across the awaits.
+        #[allow(clippy::await_holding_lock)]
+        async fn a_private_file_is_read() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            assert_eq!(f.store.load(&key()).await.as_deref(), Some(SECRET));
+            // Owner-only read access is still private.
+            chmod(&f.path, 0o400);
+            assert_eq!(f.store.load(&key()).await.as_deref(), Some(SECRET));
+        }
+
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_file_that_group_or_others_can_reach_is_not_read() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            for mode in [0o644, 0o640, 0o604, 0o660, 0o666, 0o610, 0o601] {
+                chmod(&f.path, mode);
+                assert_eq!(f.store.load(&key()).await, None, "{mode:o}");
+            }
+        }
+
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_symlink_at_the_credential_path_is_not_followed() {
+            let f = fixture();
+            let elsewhere = f.dir.path().join("elsewhere.json");
+            std::fs::write(&elsewhere, SECRET).expect("write target");
+            chmod(&elsewhere, 0o600);
+            std::fs::create_dir_all(f.path.parent().expect("parent")).expect("mkdir");
+            std::os::unix::fs::symlink(&elsewhere, &f.path).expect("symlink");
+            assert_eq!(
+                f.store.load(&key()).await,
+                None,
+                "a private target does not make the link trustworthy"
+            );
+        }
+
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn something_that_is_not_a_regular_file_is_refused_without_blocking() {
+            let f = fixture();
+            std::fs::create_dir_all(f.path.parent().expect("parent")).expect("mkdir");
+            rustix::fs::mknodat(
+                rustix::fs::CWD,
+                &f.path,
+                rustix::fs::FileType::Fifo,
+                rustix::fs::Mode::from_raw_mode(0o600),
+                0,
+            )
+            .expect("mkfifo");
+            // A blocking open of a FIFO with no writer never returns. If it would, give
+            // it a writer after the deadline so the blocked thread is released and the
+            // test fails instead of hanging the whole run.
+            let path = f.path.clone();
+            let credential_key = key();
+            let load = f.store.load(&credential_key);
+            tokio::pin!(load);
+            let loaded = tokio::select! {
+                loaded = &mut load => Some(loaded),
+                () = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+                    drop(std::fs::OpenOptions::new().write(true).open(&path));
+                    None
+                }
+            };
+            assert!(loaded.is_some(), "load blocked on a FIFO");
+            let loaded = loaded.flatten();
+            assert_eq!(loaded, None);
+        }
+
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_file_owned_by_another_user_is_not_read() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            let me = rustix::process::geteuid().as_raw();
+            assert_eq!(
+                read_private_file_as(&f.path, me).await.expect("own file"),
+                SECRET
+            );
+            // The same private file, as seen by a different user running the CLI.
+            let refused = read_private_file_as(&f.path, me.wrapping_add(1))
+                .await
+                .expect_err("another user's file");
+            assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+        }
+
+        #[test]
+        fn the_ownership_and_mode_rules() {
+            // (is_file, owner, effective user, mode) -> trusted?
+            let mine = 1000;
+            assert_eq!(untrusted_file_problem(true, mine, mine, 0o100_600), None);
+            assert_eq!(untrusted_file_problem(true, mine, mine, 0o100_400), None);
+            assert!(
+                untrusted_file_problem(true, 0, mine, 0o100_600).is_some(),
+                "root's"
+            );
+            assert!(
+                untrusted_file_problem(true, 2000, mine, 0o100_600).is_some(),
+                "another user's"
+            );
+            assert!(untrusted_file_problem(true, mine, mine, 0o100_640).is_some());
+            assert!(untrusted_file_problem(true, mine, mine, 0o100_604).is_some());
+            assert!(
+                untrusted_file_problem(false, mine, mine, 0o600).is_some(),
+                "not a file"
+            );
+        }
+
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn saving_repairs_a_loose_file_and_directory() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            let dir = f.path.parent().expect("parent").to_owned();
+            // As a careless `chmod`, or a file from before these checks, may leave them.
+            chmod(&dir, 0o755);
+            chmod(&f.path, 0o644);
+            assert_eq!(f.store.load(&key()).await, None, "loose file refused");
+
+            f.store.save(&key(), SECRET).await.expect("save again");
+            assert_eq!(mode_of(&f.path), 0o600, "the file comes back private");
+            assert_eq!(mode_of(&dir), 0o700, "the existing directory is tightened");
+            assert_eq!(f.store.load(&key()).await.as_deref(), Some(SECRET));
+        }
+
+        /// A link planted at the credentials directory must not turn a save into a
+        /// permission change on, or a write into, whatever it points at.
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_symlinked_credentials_directory_is_refused_and_its_target_untouched() {
+            let f = fixture();
+            let target = f.dir.path().join("somewhere-else");
+            std::fs::create_dir(&target).expect("mkdir");
+            chmod(&target, 0o755);
+            let credentials = f.path.parent().expect("parent").to_owned();
+            std::fs::create_dir_all(credentials.parent().expect("app dir")).expect("mkdir");
+            std::os::unix::fs::symlink(&target, &credentials).expect("symlink");
+
+            assert!(
+                f.store.save(&key(), SECRET).await.is_err(),
+                "saving through a symlinked directory is refused"
+            );
+            assert_eq!(mode_of(&target), 0o755, "the target's mode is not changed");
+            assert_eq!(
+                std::fs::read_dir(&target).expect("read_dir").count(),
+                0,
+                "nothing is written into the target"
+            );
+        }
+
+        /// A credentials directory the owner can write and search but not read (`0300`)
+        /// cannot be opened for reading, yet a save into it works and repairs it.
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn a_write_only_credentials_directory_is_still_saved_into_and_repaired() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            let dir = f.path.parent().expect("parent").to_owned();
+            chmod(&dir, 0o300);
+
+            f.store
+                .save(&key(), SECRET)
+                .await
+                .expect("a 0300 directory is writable");
+            assert_eq!(mode_of(&dir), 0o700, "and is repaired");
+            assert_eq!(f.store.load(&key()).await.as_deref(), Some(SECRET));
+        }
+
+        #[tokio::test]
+        #[allow(clippy::await_holding_lock)]
+        async fn saving_leaves_no_temp_file_beside_the_credential() {
+            let f = fixture();
+            f.store.save(&key(), SECRET).await.expect("save");
+            f.store.save(&key(), SECRET).await.expect("save again");
+            let names: Vec<_> = std::fs::read_dir(f.path.parent().expect("parent"))
+                .expect("read_dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["prov-dev.json"]);
+        }
     }
 }

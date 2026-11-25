@@ -16,6 +16,8 @@
 //!   `<config-base>/<app>/credentials/<provider>-<env>.json`, where
 //!   `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/Library/Application
 //!   Support` (macOS), `$HOME/.config` (other Unix), or `%APPDATA%` (Windows).
+//!   On Unix a file that is a symlink, is owned by someone else, or is accessible
+//!   to group or others is not read, and the next login replaces it.
 //!
 //! See [`CredentialStore`](crate::config::CredentialStore). A backend can also be
 //! injected directly with
