@@ -14,6 +14,7 @@
 pub mod commands;
 mod credential;
 mod dispatcher;
+mod env_index;
 /// External process auth provider implementation.
 pub mod exec;
 /// OAuth 2.0 PKCE auth provider (requires the `pkce-auth` feature).
@@ -31,6 +32,7 @@ pub use commands::{
 };
 pub use credential::{CACHE_TTL, Credential};
 pub use dispatcher::{Dispatcher, SingleProvider, StatusEntry};
+pub use env_index::EnvironmentIndex;
 pub use exec::{
     ACTION_AUTHENTICATE, ACTION_LIST_ENVIRONMENTS, ACTION_LIST_REALMS, ACTION_LOGOUT,
     ACTION_STATUS, AuthnRequest, EnvironmentsResponse, ExecProvider,

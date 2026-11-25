@@ -55,12 +55,14 @@
 use std::{collections::HashMap, net::TcpListener, sync::Arc, time::Duration};
 
 use chrono::SecondsFormat;
-use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::{
     Credential, Result,
-    auth::storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
+    auth::{
+        EnvironmentIndex,
+        storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
+    },
     config::CredentialStore,
     error::CliCoreError,
 };
@@ -69,9 +71,13 @@ mod auth_provider;
 #[cfg(test)]
 mod bearer_tests;
 mod callback_server;
+mod credential_build;
 mod discovery;
 #[cfg(test)]
 mod discovery_tests;
+mod enumerate;
+#[cfg(test)]
+mod enumerate_tests;
 mod http_fetch;
 #[cfg(feature = "id-token-verify")]
 mod jwks;
@@ -172,6 +178,9 @@ pub struct PkceAuthProvider {
     /// Supplies the authorization and token endpoints — see
     /// [`PkceAuthProvider::with_oidc_discovery`]. `None` uses the configured ones.
     discovery: Option<Arc<OidcDiscovery>>,
+    /// Which environments hold a stored credential, built on first use once the
+    /// storage backend is known. See [`enumerate`].
+    env_index: tokio::sync::OnceCell<EnvironmentIndex>,
 }
 
 /// Formats Unix seconds as RFC 3339, or an empty string when out of range.
@@ -226,6 +235,7 @@ impl PkceAuthProvider {
             bearer: Bearer::default(),
             verifier: None,
             discovery: None,
+            env_index: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -489,55 +499,16 @@ impl PkceAuthProvider {
         self
     }
 
-    /// Builds the [`Credential`] handed to callers: [`build_credential`](Self::build_credential)
-    /// with the token and expiry this provider's [`Bearer`] selects.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the id_token is the bearer and `token` has no usable one.
+    /// The [`Credential`] handed to callers, with the token and expiry this
+    /// provider's [`Bearer`] selects. See [`credential_build::bearer_credential`].
     fn bearer_credential(&self, env: &str, token: &StoredToken) -> Result<Credential> {
-        let (bearer_token, expires_at) = token.require_bearer(self.bearer, env)?;
-        let mut credential = self.build_credential(env, token);
-        bearer_token.clone_into(&mut credential.token);
-        credential.expires_at = rfc3339_secs(expires_at);
-        Ok(credential)
+        credential_build::bearer_credential(self, env, token)
     }
 
-    /// Builds a [`Credential`] from a stored token, deriving `identity` and `sub`
-    /// from the access-token JWT claims when present.
+    /// A [`Credential`] built from a stored token. See [`credential_build::build_credential`].
+    #[cfg(test)]
     fn build_credential(&self, env: &str, token: &StoredToken) -> Credential {
-        // The id_token (see `StoredToken::id_token`) is the OIDC-standard home
-        // for profile claims; merge it over the access token's claims, letting
-        // its values win on a shared key, so `identity`/`sub` reflect whichever
-        // token actually carries them.
-        let claims = if self.verifier.is_some() {
-            // Only authenticated claims, and none when the token was not verified:
-            // an unauthenticated one must not name the identity.
-            token.verified_claims.clone().unwrap_or_default()
-        } else {
-            let mut claims = decode_jwt_claims(&token.access_token).unwrap_or_default();
-            if let Some(id_claims) = token.id_token.as_deref().and_then(decode_jwt_claims) {
-                claims.extend(id_claims);
-            }
-            claims
-        };
-        let identity = extract_identity(&claims, &self.identity_claims);
-        let sub = claims
-            .get("sub")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        Credential {
-            token: token.access_token.clone(),
-            env: env.to_owned(),
-            provider: self.name.clone(),
-            expires_at: rfc3339_secs(token.expires_at),
-            identity,
-            sub,
-            scopes: granted_scopes(token),
-            refreshable: token.refresh_token.is_some(),
-            ..Credential::default()
-        }
+        credential_build::build_credential(self, env, token)
     }
 
     /// Computes the effective OAuth config for `env`, with at most one
@@ -673,13 +644,33 @@ impl PkceAuthProvider {
     async fn save_stored(&self, env: &str, token: &StoredToken) -> Result<()> {
         let json = serde_json::to_string(token).map_err(CliCoreError::from)?;
         let key = self.credential_key(env);
-        self.storage().await.save(&key, &json).await
+        self.storage().await.save(&key, &json).await?;
+        enumerate::record(self, env).await;
+        Ok(())
+    }
+
+    /// The index of environments with a stored credential, in the same storage
+    /// backend as the credentials.
+    async fn env_index(&self) -> &EnvironmentIndex {
+        self.env_index
+            .get_or_init(async || {
+                EnvironmentIndex::new(self.storage().await.clone(), &self.app_id, &self.name)
+            })
+            .await
+    }
+
+    /// Whether the backend holds a credential for `env`, without parsing it. Unlike
+    /// [`load_stored`](Self::load_stored) it never deletes a blob it cannot read.
+    async fn has_stored(&self, env: &str) -> bool {
+        let key = self.credential_key(env);
+        self.storage().await.load(&key).await.is_some()
     }
 
     /// Removes any stored token for `env` via the storage backend.
     async fn delete_stored(&self, env: &str) {
         let key = self.credential_key(env);
         self.storage().await.delete(&key).await;
+        enumerate::forget(self, env).await;
     }
 
     /// Whether `token` can be handed out without a refresh.

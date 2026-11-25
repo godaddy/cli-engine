@@ -381,6 +381,22 @@ Tokens are persisted through the injectable `CredentialStorage` trait rather tha
 - **`auto`** (`AutoStorage`) — try the keychain, and transparently fall back to an unencrypted file when the keychain backend is unavailable.
 - **`file`** (`FileStorage`) — never contact the keychain. Tokens are written as **unencrypted JSON** to `<config-base>/<app_id>/credentials/<provider>-<env>.json` (`0600` on Unix), where `<config-base>` is `$XDG_CONFIG_HOME`, `$HOME/Library/Application Support` (macOS), `$HOME/.config` (other Unix), or `%APPDATA%` (Windows).
 
+### Listing Stored Environments
+
+`auth status` (with no `--env`) asks each provider which environments hold a credential. A storage backend cannot answer that: the system keychain has no way to list items by prefix, and scanning the credentials directory is ambiguous, because `<provider>-<env>.json` reads the same for provider `a` with env `b-c` as for provider `a-b` with env `c`.
+
+So `PkceAuthProvider` keeps the list itself, as one small entry in the same backend as the credentials, which makes listing work the same for `keyring`, `file` and `auto`, and after a restart:
+
+- Saving a credential records its environment, and logging out removes it. Removing the last one removes the entry.
+- Listing keeps only names the backend really holds a credential for, so an entry left behind by a crash, or by a credential deleted outside the CLI, is dropped (and removed from the entry) instead of being reported.
+- The entry lives under a key derived from the provider, `<provider>.index`, not from any environment, so no environment name can address or overwrite it. Do not name a provider as another provider's name plus `.index`.
+- Failing to write it never fails a login: the credential is saved, and the worst outcome is that it is not listed until the next save.
+- It holds at most 256 environments of at most 128 bytes each, so a damaged entry cannot make listing probe an unbounded list. A damaged or unreadable entry reads as empty, and the next save rewrites it.
+
+A credential saved before there was an index is found when its environment is declared to the provider (`with_environments`), which is probed and, if present, indexed; with no declared environment there is nothing to probe, and a fresh login or any save records it. The index is also available directly, as `EnvironmentIndex`, for a custom `AuthProvider` built on `CredentialStorage`.
+
+Two processes saving at the same moment can lose one of the two additions; the next save of that environment repairs it. When `auto` storage's keychain is unavailable the index falls back to the file along with the credentials, so what is listed always matches what can actually be loaded.
+
 ### Selecting a mode
 
 `file` is the recommended escape hatch on **WSL and headless Linux**, where a Secret Service daemon is often missing or awkward to run. Operators can disable the keychain without code changes, with this precedence (highest first):

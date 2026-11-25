@@ -125,9 +125,9 @@ pub use auth::storage::{
 };
 pub use auth::{
     AUTH_LOGIN_VIEW_ID, AUTH_STATUS_VIEW_ID, AuthLoginResult, AuthProvider, AuthStatusEntry,
-    CACHE_TTL, Credential, CredentialRequest, Dispatcher, SingleProvider, StatusEntry,
-    auth_command_group, default_auth_login_view, default_auth_status_view, login_and_build,
-    login_and_build_with_scopes, logout_result, status_result, to_status_entry,
+    CACHE_TTL, Credential, CredentialRequest, Dispatcher, EnvironmentIndex, SingleProvider,
+    StatusEntry, auth_command_group, default_auth_login_view, default_auth_status_view,
+    login_and_build, login_and_build_with_scopes, logout_result, status_result, to_status_entry,
 };
 pub use cli::{
     ApplyFlags, Argv0LinkMethod, Argv0Route, BuildInfo, Cli, CliConfig, CliRunOutput,
