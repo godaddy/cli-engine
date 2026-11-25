@@ -55,8 +55,18 @@ keyring = { version = "3.6.1", optional = true, default-features = false, featur
 
 [features]
 pkce-auth = ["dep:jsonwebtoken", "dep:keyring", "dep:open", "dep:rand", "dep:url", "dep:zeroize"]
+# Adds `auth::pkce::JwksVerifier`. Deliberately names no jsonwebtoken signature backend:
+# jsonwebtoken keeps its backend in a process-wide global and panics when none, or both
+# of `rust_crypto` and `aws_lc_rs`, are enabled, so enabling one here would break any
+# consumer that already uses the other. The consumer enables exactly one.
+id-token-verify = ["pkce-auth"]
 
 [dev-dependencies]
+aws-lc-rs = "1.15"
+# The signature backend for this crate's own tests, which exercise JwksVerifier with
+# real signatures. A dev-dependency's features do not reach a normal build, so
+# consumers still choose their own.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 pretty_assertions = "1.4.1"
 tempfile = "3.23.0"
 

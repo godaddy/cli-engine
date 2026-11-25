@@ -2,6 +2,7 @@
 //! of its tokens becomes the bearer credential.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::{TOKEN_EXPIRY_BUFFER_SECS, scopes::decode_jwt_claims};
@@ -89,6 +90,22 @@ pub(super) struct StoredToken {
     /// `access_token`/`refresh_token`, it can carry sensitive claims.
     #[serde(default)]
     pub(super) id_token: Option<String>,
+    /// The id_token's claims as authenticated by the provider's
+    /// [`IdTokenVerifier`](super::IdTokenVerifier), when one is configured.
+    ///
+    /// Held in memory only. `#[serde(skip)]` keeps it out of what is written to
+    /// storage and, just as important, out of what is read back: the stored copy
+    /// is writable by anything running as the user, so a value found there must
+    /// never count as verified. Only a verifier in this process can set it. Not
+    /// secret, so excluded from zeroization.
+    #[serde(skip)]
+    #[zeroize(skip)]
+    pub(super) verified_claims: Option<Map<String, Value>>,
+    /// The client id (audience) `verified_claims` were verified against. Memory
+    /// only, like the claims, and for the same reason.
+    #[serde(skip)]
+    #[zeroize(skip)]
+    pub(super) verified_audience: Option<String>,
 }
 
 impl std::fmt::Debug for StoredToken {
@@ -113,6 +130,7 @@ impl std::fmt::Debug for StoredToken {
                 },
             )
             .field("scopes", &self.scopes)
+            .field("verified", &self.verified_claims.is_some())
             .finish()
     }
 }
@@ -126,8 +144,29 @@ impl StoredToken {
     pub(super) fn is_valid_for(&self, bearer: Bearer) -> bool {
         match bearer {
             Bearer::AccessToken => self.is_valid(),
-            Bearer::IdToken => self.id_token_expiry().is_some_and(outlives_expiry_buffer),
+            Bearer::IdToken => self.id_token_is_fresh(),
         }
+    }
+
+    /// Whether this token's verified claims can be served for `audience`, the
+    /// client id configured now. `None` means no verifier is configured, so there
+    /// is nothing to match. Otherwise the claims must have been verified in this
+    /// process, and for that same client id: a configuration change since then
+    /// (the environments file is re-read on each resolution) must not let a token
+    /// verified for another client keep serving its identity.
+    pub(super) fn verified_for(&self, audience: Option<&str>) -> bool {
+        audience.is_none_or(|current| {
+            self.verified_claims.is_some() && self.verified_audience.as_deref() == Some(current)
+        })
+    }
+
+    /// Whether the id_token carries a usable `exp` that is not about to pass.
+    ///
+    /// Under an [`IdTokenVerifier`](super::IdTokenVerifier) this bounds how long
+    /// the identity it vouched for may be reused, whichever token is the bearer:
+    /// an id_token commonly expires before the access token does.
+    pub(super) fn id_token_is_fresh(&self) -> bool {
+        self.id_token_expiry().is_some_and(outlives_expiry_buffer)
     }
 
     /// The token `bearer` selects, and when it expires (Unix seconds).

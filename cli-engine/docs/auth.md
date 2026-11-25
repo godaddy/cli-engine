@@ -243,6 +243,64 @@ With the id_token as the bearer:
 
 The default, `Bearer::AccessToken`, is unchanged, including carrying the previous id_token across a refresh so identity claims keep resolving.
 
+### Verifying The id_token
+
+By default the provider decodes id_token and access-token claims without checking anything about them. That is fine for showing who is logged in, but not for a decision such as authorization: the stored copy is writable by anything running as the user, so a forged `email` in it would be believed.
+
+`PkceAuthProvider::with_id_token_verifier` takes an `IdTokenVerifier` that authenticates the id_token before the provider trusts it. With one configured:
+
+- `identity` and `sub` come only from the claims the verifier returns, never from the raw access token or the stored copy. A token that has not been verified in this process names no identity.
+- The verifier runs on every id_token the provider handles: at login, after a refresh, and when a stored credential is read back, including by `auth status`.
+- A login needs an id_token, so request the `openid` scope. One the verifier rejects is never stored, and nothing is deleted when it is. When the login was started by a command that needed a credential, the previous stored credential is therefore left in place. `auth login` is different: it clears the stored credential before it starts, for every provider, so a rejected `auth login` leaves you logged out.
+- A fresh token is verified against the client id it was requested with, not a new read of the configuration, so a client id that changes while the browser is open does not reject a correctly issued token.
+- A refresh must return a fresh id_token that verifies. The previous id_token is never reused, so a refresh without one is discarded and the next command logs in interactively.
+- A stored id_token that is rejected is not reused. `auth status` reports it as an error.
+
+A verifier answers one of two ways when it does not accept a token. `VerifyError::Invalid` means the token is not to be trusted, and the provider falls back to a refresh or a new login. `VerifyError::Unavailable` means no decision could be made, for example because the signing keys could not be fetched. The provider returns that as an error without starting a login, because a login needs the same keys and would only overwrite a credential that may still be good.
+
+Reasons are shown to users and logged, so an implementation must never put the token or its claim values in one.
+
+#### JwksVerifier
+
+`JwksVerifier` is a ready-made verifier for an OIDC provider that publishes its keys as a JSON Web Key Set. It needs the `id-token-verify` Cargo feature, and a `jsonwebtoken` backend (below).
+
+```rust
+use std::sync::Arc;
+use cli_engine::auth::pkce::{JwksVerifier, PkceAuthProvider};
+
+let verifier = JwksVerifier::new(
+    "https://idp.example.com",
+    "https://idp.example.com/oauth2/v1/keys",
+)?;
+let provider = PkceAuthProvider::new(
+    "idp",
+    "https://idp.example.com/oauth2/v1/authorize",
+    "https://idp.example.com/oauth2/v1/token",
+    "my-client-id",
+    &["openid", "email"],
+)
+.with_id_token_verifier(Arc::new(verifier));
+# Ok::<(), cli_engine::CliCoreError>(())
+```
+
+It checks the signature against the key the token names in `kid`, and the `iss`, `aud` and `exp` claims. `aud` is compared with the OAuth client id. It also applies the OpenID Connect checks a generic JWT validator omits: `sub` must be a non-empty string, and `azp` (authorized party) must be this client when present, and must be present when `aud` lists several clients, since a token with a shared audience was issued to one of them and `azp` says which. A key that declares itself unfit is not used: `use` other than `sig`, `key_ops` without `verify`, or an `alg` other than the one the token used. A key that declares none of these is unrestricted. RSA, RSA-PSS and ECDSA signatures are accepted; HMAC never is, because a verifier that accepted it would let an attacker sign a token using the public key as the secret.
+
+- The key set is fetched once and kept. It is fetched again, at most once per verification, when a token names a `kid` the kept set does not contain, which is how a key rotation reaches a long-running process.
+- A key endpoint that cannot be reached, answers an error status, or returns something unparseable or larger than 256 KiB is `Unavailable`, not a verdict on the token.
+- The key-set URL must be `https` on the issuer's host with no port or credentials, and redirects are not followed, so a poisoned URL cannot send the fetch elsewhere. `JwksVerifier::new` rejects anything else.
+- A fetch is bounded to 15 seconds, and the command's `--timeout` bounds the whole command.
+
+The program must enable exactly one `jsonwebtoken` signature backend itself:
+
+```toml
+[dependencies]
+cli-engine = { version = "...", features = ["id-token-verify"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] } # or "aws_lc_rs"
+```
+
+`id-token-verify` does not choose one for you, deliberately. `jsonwebtoken` keeps its backend in a process-wide global and panics on the first token it decodes anywhere in the process, not only in this crate, when no backend is enabled or when both are. A backend chosen here would break any program that
+already uses the other one. If a program enables none, the first verification panics with a message from `jsonwebtoken` saying so; if it enables both, the same happens unless it first calls `jsonwebtoken::crypto::CryptoProvider::install_default`. The two backends accept the same algorithms, so which one to use is a build-size and policy choice rather than a behavioral one.
+
 ### Environment Variable Overrides
 
 At runtime, the provider checks for environment variable overrides before using its compiled-in

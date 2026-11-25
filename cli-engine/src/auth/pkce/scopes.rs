@@ -313,5 +313,7 @@ pub(super) async fn parse_token_response(
         refresh_token: body.refresh_token,
         scopes,
         id_token: body.id_token,
+        verified_claims: None,
+        verified_audience: None,
     })
 }

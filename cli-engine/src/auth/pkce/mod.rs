@@ -65,68 +65,51 @@ use crate::{
     auth::CredentialRequest,
     auth::storage::{CredentialKey, CredentialStorage, default_storage, storage_for},
     config::CredentialStore,
-    env_config::{EnvConfig, SourceChain, ValueSource},
     error::CliCoreError,
 };
 
 #[cfg(test)]
 mod bearer_tests;
 mod callback_server;
+#[cfg(feature = "id-token-verify")]
+mod jwks;
+#[cfg(all(test, feature = "id-token-verify"))]
+mod jwks_tests;
+mod oauth_config;
+mod redirect;
 #[cfg(test)]
 mod redirect_tests;
 mod scopes;
 mod stored_token;
 #[cfg(test)]
 mod tests;
+mod token_endpoint;
+mod verify;
+#[cfg(test)]
+mod verify_tests;
 
 use callback_server::{
     emit_auth_complete_message, emit_browser_login_prompt, pkce_challenge, random_nonce,
     random_state, wait_for_callback,
 };
+#[cfg(feature = "id-token-verify")]
+pub use jwks::JwksVerifier;
+use oauth_config::OAuthSection;
+use redirect::{REDIRECT_PORT_DEFAULT, RedirectPort};
 pub use scopes::ScopeHierarchy;
 use scopes::{
-    StepUp, decode_jwt_claims, ensure_granted, extract_identity, granted_scopes,
-    parse_token_response, plan_step_up, union_scopes, verify_id_token_nonce,
+    StepUp, decode_jwt_claims, ensure_granted, extract_identity, granted_scopes, plan_step_up,
+    union_scopes, verify_id_token_nonce,
 };
 pub use stored_token::Bearer;
 use stored_token::StoredToken;
-
-const REDIRECT_PORT_DEFAULT: u16 = 7443;
-
-/// How the local callback listener's port is chosen. Private: callers select
-/// a variant through [`PkceAuthProvider::with_redirect_port`]/
-/// [`PkceAuthProvider::with_ephemeral_redirect_port`], not by naming this
-/// type directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RedirectPort {
-    /// Bind exactly this port; `TcpListener::bind` fails if it's taken.
-    Fixed(u16),
-    /// Bind port `0` and let the OS assign a free loopback port (RFC 8252
-    /// §7.3 loopback interface redirection). Opt-in — see
-    /// [`PkceAuthProvider::with_ephemeral_redirect_port`].
-    Ephemeral,
-}
+use verify::Verification;
+pub use verify::{IdTokenVerifier, VerifiedIdToken, VerifyError};
 
 const TOKEN_EXPIRY_BUFFER_SECS: i64 = 30;
 /// Default timeout applied to OAuth token-endpoint requests (exchange/refresh)
 /// so a stalled token server cannot hang the CLI indefinitely.
 const TOKEN_REQUEST_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
-
-/// The effective OAuth values for an environment. No default on
-/// `client_id`/`auth_url`/`token_url`: a provider whose base config and
-/// resolved environment both leave one of these blank must fail loudly
-/// (`EnvConfigError::MissingField`), not silently assemble with an empty
-/// endpoint. `scopes` is different — an empty scope list is a normal,
-/// supported configuration (see [`PkceAuthProvider::effective_scopes`]), not
-/// a sign of a never-initialized provider.
-#[derive(Debug, Clone, Default, EnvConfig)]
-struct OAuthSection {
-    client_id: String,
-    auth_url: String,
-    token_url: String,
-    #[env_config(default = Vec::new())]
-    scopes: Vec<String>,
-}
 
 /// OAuth 2.0 PKCE authentication provider.
 ///
@@ -177,6 +160,9 @@ pub struct PkceAuthProvider {
     require_nonce: bool,
     /// Which stored token becomes `Credential::token` — see [`Bearer`].
     bearer: Bearer,
+    /// Authenticates id_tokens before their claims are trusted — see
+    /// [`IdTokenVerifier`]. `None` keeps the unverified behaviour.
+    verifier: Option<Arc<dyn IdTokenVerifier>>,
 }
 
 /// Formats Unix seconds as RFC 3339, or an empty string when out of range.
@@ -229,6 +215,7 @@ impl PkceAuthProvider {
             scope_hierarchy: ScopeHierarchy::new(),
             require_nonce: false,
             bearer: Bearer::default(),
+            verifier: None,
         }
     }
 
@@ -451,6 +438,23 @@ impl PkceAuthProvider {
         self
     }
 
+    /// Authenticates every id_token this provider handles before trusting it.
+    ///
+    /// Without one, `identity` and `sub` come from claims decoded without any
+    /// check, which suits display but not authorization. With one (see
+    /// [`IdTokenVerifier`]), they come only from the claims it returns, and an
+    /// id_token it rejects is never stored or reused. The provider then also
+    /// requires an id_token (request the `openid` scope), and a refresh that
+    /// returns none is discarded rather than reusing the previous one.
+    #[must_use]
+    pub fn with_id_token_verifier(mut self, verifier: Arc<dyn IdTokenVerifier>) -> Self {
+        self.verifier = Some(verifier);
+        // Claims accepted under a previous verifier (or none) must not satisfy this
+        // one's policy, so drop anything already held in memory.
+        self.cache = Arc::new(RwLock::new(HashMap::new()));
+        self
+    }
+
     /// Builds the [`Credential`] handed to callers: [`build_credential`](Self::build_credential)
     /// with the token and expiry this provider's [`Bearer`] selects.
     ///
@@ -472,10 +476,17 @@ impl PkceAuthProvider {
         // for profile claims; merge it over the access token's claims, letting
         // its values win on a shared key, so `identity`/`sub` reflect whichever
         // token actually carries them.
-        let mut claims = decode_jwt_claims(&token.access_token).unwrap_or_default();
-        if let Some(id_claims) = token.id_token.as_deref().and_then(decode_jwt_claims) {
-            claims.extend(id_claims);
-        }
+        let claims = if self.verifier.is_some() {
+            // Only authenticated claims, and none when the token was not verified:
+            // an unauthenticated one must not name the identity.
+            token.verified_claims.clone().unwrap_or_default()
+        } else {
+            let mut claims = decode_jwt_claims(&token.access_token).unwrap_or_default();
+            if let Some(id_claims) = token.id_token.as_deref().and_then(decode_jwt_claims) {
+                claims.extend(id_claims);
+            }
+            claims
+        };
         let identity = extract_identity(&claims, &self.identity_claims);
         let sub = claims
             .get("sub")
@@ -495,53 +506,19 @@ impl PkceAuthProvider {
         }
     }
 
-    /// Computes the effective OAuth config for `env` with a SINGLE environment
-    /// resolution (at most one `environments.toml` read), by assembling an
-    /// [`OAuthSection`] from a two-tier [`SourceChain`], highest priority
-    /// first:
-    ///
-    /// 1. The resolved environment's own TOML value (compiled + file layers).
-    /// 2. This provider's own base config, from [`PkceAuthProvider::new`].
-    ///
-    /// Token flows call this once and reuse the result so they don't re-read the
-    /// environments file once per field.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a present TOML value fails to convert to its
-    /// field's type (for example a non-array `scopes` value), or if
-    /// `client_id`/`auth_url`/`token_url` is blank in *both* tiers — a
-    /// provider whose base config was never given a real value, and whose
-    /// resolved environment (if any) doesn't supply one either, fails loudly
-    /// rather than assembling with an empty endpoint.
+    /// Computes the effective OAuth config for `env`, with at most one
+    /// environment resolution. See [`oauth_config::effective_oauth`].
     fn effective_oauth(&self, env: &str) -> Result<OAuthSection> {
-        let env_source =
-            self.environments
-                .as_ref()
-                .and_then(|environments| match environments.source(env) {
-                    Ok(source) => Some(source),
-                    Err(err) => {
-                        tracing::debug!(
-                            env,
-                            error = %err,
-                            "environment resolve failed; falling back to base OAuth config"
-                        );
-                        None
-                    }
-                });
-        let base = ValueSource::new()
-            .with("client_id", self.client_id.clone())
-            .with("auth_url", self.auth_url.clone())
-            .with("token_url", self.token_url.clone())
-            .with("scopes", self.scopes.clone());
-
-        let mut chain = SourceChain::new();
-        if let Some(env_source) = &env_source {
-            chain = chain.push(env_source);
-        }
-        chain = chain.push(&base);
-
-        OAuthSection::assemble(&chain).map_err(CliCoreError::from)
+        oauth_config::effective_oauth(
+            self.environments.as_deref(),
+            env,
+            oauth_config::Base {
+                client_id: &self.client_id,
+                auth_url: &self.auth_url,
+                token_url: &self.token_url,
+                scopes: &self.scopes,
+            },
+        )
     }
 
     /// Default scopes for `env`: the resolved environment's scopes when
@@ -555,89 +532,17 @@ impl PkceAuthProvider {
     }
 
     /// Decides the redirect-URI template and the port to request from
-    /// `TcpListener::bind`, without touching a socket.
-    ///
-    /// Precedence, highest first: an explicit
-    /// [`with_redirect_uri`](Self::with_redirect_uri) override, then
-    /// [`with_redirect_port`](Self::with_redirect_port)/
-    /// [`with_ephemeral_redirect_port`](Self::with_ephemeral_redirect_port).
-    /// The returned port is `0` for [`RedirectPort::Ephemeral`] — this
-    /// function alone cannot know the real port; only binding and reading it
-    /// back (see [`bind_callback_listener`](Self::bind_callback_listener))
-    /// can.
+    /// `TcpListener::bind`, without touching a socket. See
+    /// [`redirect::redirect_url_template`].
+    #[cfg(test)]
     fn redirect_url_template(&self) -> Result<(url::Url, u16)> {
-        if let Some(uri) = &self.redirect_uri {
-            let parsed = url::Url::parse(uri)
-                .map_err(|e| CliCoreError::message(format!("invalid redirect URI '{uri}': {e}")))?;
-            let port = parsed
-                .port()
-                .or_else(|| parsed.port_or_known_default())
-                .ok_or_else(|| {
-                    CliCoreError::message(format!("redirect URI '{uri}' has no port"))
-                })?;
-            return Ok((parsed, port));
-        }
-        let requested_port = match self.redirect_port {
-            RedirectPort::Fixed(port) => port,
-            RedirectPort::Ephemeral => 0,
-        };
-        let url = url::Url::parse(&format!("http://127.0.0.1:{requested_port}/callback"))
-            .map_err(|e| CliCoreError::message(format!("invalid default redirect URI: {e}")))?;
-        Ok((url, requested_port))
+        redirect::redirect_url_template(self.redirect_uri.as_deref(), self.redirect_port)
     }
 
-    /// Binds the local callback listener and returns it together with the
-    /// exact redirect URI that must be sent both at authorization and at
-    /// token exchange (RFC 6749 §4.1.3 requires the same value at both
-    /// steps) and the path to match the incoming callback request against.
-    ///
-    /// The bound listener's actual port — read back via
-    /// `TcpListener::local_addr` — always becomes the URI's port. For a
-    /// [`RedirectPort::Fixed`] port, or an explicit non-zero port in
-    /// [`with_redirect_uri`](Self::with_redirect_uri), this is just an echo
-    /// of the port that was requested (bind already fails if that port is
-    /// taken, so it can't differ). For [`RedirectPort::Ephemeral`] — or a
-    /// `with_redirect_uri` that itself names port `0` — it's the only way to
-    /// learn the port at all.
-    ///
-    /// Whenever the bound port matches what was requested, an explicit
-    /// [`with_redirect_uri`](Self::with_redirect_uri) override is returned
-    /// **verbatim**, byte-for-byte, rather than re-serialized from the parsed
-    /// `Url` — re-serializing can silently rewrite it (an empty path becomes
-    /// `/`, an explicit port matching the scheme's default gets dropped),
-    /// and OAuth servers commonly match `redirect_uri` exactly, so a rewrite
-    /// the caller never asked for can turn a previously-working
-    /// configuration into an `invalid_grant`/`invalid_request` failure.
+    /// Binds the local callback listener; returns it with the exact redirect URI
+    /// and the callback path. See [`redirect::bind_callback_listener`].
     fn bind_callback_listener(&self) -> Result<(TcpListener, String, String)> {
-        let (redirect_url, requested_port) = self.redirect_url_template()?;
-
-        let listener =
-            TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], requested_port)))
-                .map_err(|err| {
-                    CliCoreError::message(format!(
-                        "failed to bind callback server on port {requested_port}: {err}"
-                    ))
-                })?;
-        let actual_port = listener
-            .local_addr()
-            .map_err(|err| {
-                CliCoreError::message(format!("failed to read bound callback port: {err}"))
-            })?
-            .port();
-
-        if let Some(uri) = &self.redirect_uri
-            && actual_port == requested_port
-        {
-            let callback_path = redirect_url.path().to_owned();
-            return Ok((listener, uri.clone(), callback_path));
-        }
-
-        let mut redirect_url = redirect_url;
-        redirect_url.set_port(Some(actual_port)).map_err(|()| {
-            CliCoreError::message(format!("redirect URI '{redirect_url}' cannot carry a port"))
-        })?;
-        let callback_path = redirect_url.path().to_owned();
-        Ok((listener, redirect_url.to_string(), callback_path))
+        redirect::bind_callback_listener(self.redirect_uri.as_deref(), self.redirect_port)
     }
 
     /// Builds the storage key for this provider and `env`.
@@ -697,11 +602,28 @@ impl PkceAuthProvider {
         self.storage().await.delete(&key).await;
     }
 
+    /// Whether `token` can be handed out without a refresh.
+    ///
+    /// Under a verifier the id_token's own expiry bounds reuse as well, even when
+    /// the access token is the bearer: the identity comes from the id_token's
+    /// claims, so it must not outlive the id_token. This is checked here rather
+    /// than left to the verifier because the trait does not promise to check `exp`.
+    fn is_reusable(&self, token: &StoredToken) -> bool {
+        token.is_valid_for(self.bearer) && (self.verifier.is_none() || token.id_token_is_fresh())
+    }
+
     async fn cached_token(&self, env: &str) -> Option<StoredToken> {
+        // Under a verifier a hit must still match the client id configured now,
+        // exactly as a token read back from storage is checked against it. An
+        // unresolvable configuration is a miss; the storage path reports why.
+        let audience = match self.verifier {
+            Some(_) => Some(self.effective_oauth(env).ok()?.client_id),
+            None => None,
+        };
         let cache = self.cache.read().await;
         cache
             .get(env)
-            .filter(|t| t.is_valid_for(self.bearer))
+            .filter(|t| self.is_reusable(t) && t.verified_for(audience.as_deref()))
             .cloned()
     }
 
@@ -726,50 +648,157 @@ impl PkceAuthProvider {
         if let Some(token) = self.cached_token(env).await {
             return Ok(Some(token));
         }
-        if let Some(token) = self.load_stored(env).await {
-            if token.is_valid_for(self.bearer) {
-                self.store_cached_token(env, token.clone()).await;
-                return Ok(Some(token));
-            }
-            if let Some(refresh_token) = token.refresh_token.as_deref()
-                && let Ok(mut refreshed) = self
-                    .refresh_access_token(env, refresh_token, &token.scopes)
-                    .await
-            {
-                if refreshed.refresh_token.is_none() {
-                    refreshed.refresh_token = Some(refresh_token.to_owned());
+        let Some(mut stored) = self.load_stored(env).await else {
+            return Ok(None);
+        };
+        if self.is_reusable(&stored) {
+            match self.verify_token(env, &mut stored).await? {
+                Verification::Verified => {
+                    self.store_cached_token(env, stored.clone()).await;
+                    return Ok(Some(stored));
                 }
-                match self.bearer {
-                    // Profile claims still come from the earlier id_token when a
-                    // refresh response omits one.
-                    Bearer::AccessToken => {
-                        if refreshed.id_token.is_none() {
-                            refreshed.id_token = token.id_token.clone();
-                        }
-                    }
-                    // The id_token is the credential, so a refresh that returns
-                    // no fresh one has nothing to hand out; log in again.
-                    Bearer::IdToken => {
-                        if !refreshed.is_valid_for(self.bearer) {
-                            return Ok(None);
-                        }
-                    }
-                }
-                self.save_stored(env, &refreshed).await?;
-                self.store_cached_token(env, refreshed.clone()).await;
-                return Ok(Some(refreshed));
+                Verification::Rejected(reason) => tracing::warn!(
+                    env,
+                    reason,
+                    "stored id_token failed verification; refreshing or logging in again"
+                ),
             }
         }
-        Ok(None)
+        self.refreshed_token(env, &stored).await
+    }
+
+    /// Exchanges `stored`'s refresh token for a new token set, keeping it only if
+    /// it is usable as is. `None` means the caller must log in again.
+    async fn refreshed_token(
+        &self,
+        env: &str,
+        stored: &StoredToken,
+    ) -> Result<Option<StoredToken>> {
+        let Some(refresh_token) = stored.refresh_token.as_deref() else {
+            return Ok(None);
+        };
+        // One resolution serves both the request and the check of its result.
+        let Ok(oauth) = self.effective_oauth(env) else {
+            return Ok(None);
+        };
+        let Ok(mut refreshed) = self
+            .refresh_access_token(&oauth, refresh_token, &stored.scopes)
+            .await
+        else {
+            return Ok(None);
+        };
+        if refreshed.refresh_token.is_none() {
+            refreshed.refresh_token = Some(refresh_token.to_owned());
+        }
+        // Profile claims keep coming from the earlier id_token when a refresh
+        // response omits one, but only when nothing relies on the id_token being
+        // fresh: as the bearer, or under a verifier, a stale one is never reused.
+        if self.bearer == Bearer::AccessToken
+            && self.verifier.is_none()
+            && refreshed.id_token.is_none()
+        {
+            refreshed.id_token.clone_from(&stored.id_token);
+        }
+        if self.bearer == Bearer::IdToken && !refreshed.is_valid_for(self.bearer) {
+            return Ok(None);
+        }
+        if let Verification::Rejected(reason) = self
+            .verify_for_audience(&oauth.client_id, &mut refreshed)
+            .await?
+        {
+            tracing::warn!(env, reason, "refreshed id_token failed verification");
+            return Ok(None);
+        }
+        if self.verifier.is_some() && !refreshed.id_token_is_fresh() {
+            tracing::warn!(
+                env,
+                "refreshed id_token has no usable expiry or is about to expire"
+            );
+            return Ok(None);
+        }
+        self.save_stored(env, &refreshed).await?;
+        self.store_cached_token(env, refreshed.clone()).await;
+        Ok(Some(refreshed))
+    }
+
+    /// Runs the configured [`IdTokenVerifier`] over `token`, attaching the
+    /// authenticated claims on success. Without a verifier everything passes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when verification could not run (for example the
+    /// signing keys were unreachable). That is not a verdict on the token, so
+    /// callers must not answer it by logging in again.
+    async fn verify_token(&self, env: &str, token: &mut StoredToken) -> Result<Verification> {
+        if self.verifier.is_none() {
+            return Ok(Verification::Verified);
+        }
+        let audience = self.effective_oauth(env)?.client_id;
+        self.verify_for_audience(&audience, token).await
+    }
+
+    /// Like [`verify_token`](Self::verify_token), for a token whose client id is
+    /// already known. A token just acquired is checked against the client id used
+    /// to acquire it, not a fresh read of the configuration, which can change while
+    /// a browser login is in progress.
+    async fn verify_for_audience(
+        &self,
+        audience: &str,
+        token: &mut StoredToken,
+    ) -> Result<Verification> {
+        let Some(verifier) = &self.verifier else {
+            return Ok(Verification::Verified);
+        };
+        verify::verify_token(verifier.as_ref(), audience, token).await
     }
 
     /// Runs a fresh interactive PKCE flow requesting exactly `scopes`, replacing
     /// any stored token for `env`.
     async fn reauthenticate(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
-        let token = self.run_pkce_flow_with(env, scopes).await?;
-        // Checked before anything is stored, so a login that cannot produce this
-        // provider's bearer leaves the previous token alone.
+        // Resolved once for the whole login, so the audience the token is verified
+        // against is the client id it was requested with.
+        let oauth = self.effective_oauth(env)?;
+        let token = self.run_pkce_flow_with(&oauth, scopes).await?;
+        let token = self.accept_login(env, token, &oauth.client_id).await?;
+        // Announced only now: a token the verifier rejects, or that cannot be
+        // stored, is not a completed authentication.
+        emit_auth_complete_message();
+        Ok(token)
+    }
+
+    /// Stores and caches a token from a fresh login, after checking it.
+    ///
+    /// The checks come first, so a rejected token is never written and nothing is
+    /// deleted here. (An explicit `auth login` has already cleared the stored
+    /// credential by the time it gets here: the dispatcher logs out first, for
+    /// every provider.)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verifier rejects the token or cannot run, when
+    /// the bearer token is missing, or when storage fails.
+    async fn accept_login(
+        &self,
+        env: &str,
+        mut token: StoredToken,
+        audience: &str,
+    ) -> Result<StoredToken> {
+        if let Verification::Rejected(reason) =
+            self.verify_for_audience(audience, &mut token).await?
+        {
+            return Err(CliCoreError::message(format!(
+                "the id_token was rejected, so nothing was stored: {reason}"
+            )));
+        }
         token.require_bearer(self.bearer, env)?;
+        // Without a usable expiry the identity could never be reused, so every
+        // command would log in again; say so now instead.
+        if self.verifier.is_some() && !token.id_token_is_fresh() {
+            return Err(CliCoreError::message(format!(
+                "the id_token for environment {env:?} has no usable `exp` claim, or expires \
+                 too soon to use, so nothing was stored"
+            )));
+        }
         // Persist first — the keychain write overwrites the existing entry for
         // this env — and only update the in-memory cache after a successful
         // save. This avoids destroying a still-valid token if the save fails
@@ -781,12 +810,14 @@ impl PkceAuthProvider {
 
     /// Runs the browser PKCE flow requesting exactly `scopes` (used both for the
     /// default login and for scope step-up, which requests a wider union).
-    async fn run_pkce_flow_with(&self, env: &str, scopes: &[String]) -> Result<StoredToken> {
+    async fn run_pkce_flow_with(
+        &self,
+        oauth: &OAuthSection,
+        scopes: &[String],
+    ) -> Result<StoredToken> {
         let (code_verifier, code_challenge) = pkce_challenge();
         let state = random_state();
         let nonce = random_nonce();
-        // Resolve the OAuth config once for this whole flow (authorize + exchange).
-        let oauth = self.effective_oauth(env)?;
         let scope = scopes.join(" ");
         let (listener, redirect_uri, callback_path) = self.bind_callback_listener()?;
 
@@ -811,10 +842,9 @@ impl PkceAuthProvider {
         let code =
             wait_for_callback(listener, &state, &callback_path, Duration::from_secs(120)).await?;
         let token = self
-            .exchange_code_for_token(&oauth, &code, &code_verifier, &redirect_uri, scopes)
+            .exchange_code_for_token(oauth, &code, &code_verifier, &redirect_uri, scopes)
             .await?;
         verify_id_token_nonce(&token, &nonce, self.require_nonce)?;
-        emit_auth_complete_message();
         Ok(token)
     }
 
@@ -852,50 +882,23 @@ impl PkceAuthProvider {
             ("code", code),
             ("code_verifier", code_verifier),
         ];
-        let response = self
-            .token_request(&oauth.token_url, &params)
-            .send()
-            .await
-            .map_err(|err| CliCoreError::message(format!("token request failed: {err}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CliCoreError::message(format!(
-                "token endpoint returned {status}: {body}"
-            )));
-        }
-
-        parse_token_response(response, requested_scopes).await
+        let request = self.token_request(&oauth.token_url, &params);
+        token_endpoint::fetch_tokens(request, token_endpoint::EXCHANGE, requested_scopes).await
     }
 
     async fn refresh_access_token(
         &self,
-        env: &str,
+        oauth: &OAuthSection,
         refresh_token: &str,
         prior_scopes: &[String],
     ) -> Result<StoredToken> {
-        let oauth = self.effective_oauth(env)?;
         let params = [
             ("grant_type", "refresh_token"),
             ("client_id", &oauth.client_id),
             ("refresh_token", refresh_token),
         ];
-        let response = self
-            .token_request(&oauth.token_url, &params)
-            .send()
-            .await
-            .map_err(|err| CliCoreError::message(format!("token refresh failed: {err}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(CliCoreError::message(format!(
-                "refresh endpoint returned {status}: {body}"
-            )));
-        }
-
-        parse_token_response(response, prior_scopes).await
+        let request = self.token_request(&oauth.token_url, &params);
+        token_endpoint::fetch_tokens(request, token_endpoint::REFRESH, prior_scopes).await
     }
 }
 
@@ -948,11 +951,19 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn status(&self, env: &str) -> Result<Credential> {
-        let Some(token) = self.load_stored(env).await else {
+        let Some(mut token) = self.load_stored(env).await else {
             return Err(CliCoreError::message(format!(
                 "not logged in for environment {env:?}"
             )));
         };
+        // Reported as an error, not shown with a blank identity: the stored copy
+        // is writable by the user's other processes, so nothing in it is trusted
+        // until the verifier has accepted it.
+        if let Verification::Rejected(reason) = self.verify_token(env, &mut token).await? {
+            return Err(CliCoreError::message(format!(
+                "the stored id_token for environment {env:?} failed verification ({reason}); log in again"
+            )));
+        }
         self.bearer_credential(env, &token)
     }
 

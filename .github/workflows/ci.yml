@@ -37,17 +37,39 @@ jobs:
               - "rust-toolchain.toml"
               - ".github/workflows/ci.yml"
 
-  rust:
-    name: Rust
+  # One leg per feature profile a downstream CLI builds with, so a change that
+  # only breaks one profile (an import used by gated code leaking into always-on
+  # code, say) fails here and names the profile. Features are additive, so these
+  # are the profiles in use rather than every combination:
+  #   default         - what a CLI gets when it enables nothing
+  #   pkce-auth       - what gddy enables
+  #   id-token-verify - what gdx will enable (DEVEX-1446) once its Okta login
+  #                     moves onto PkceAuthProvider; it implies pkce-auth
+  rust-checks:
+    name: Rust (${{ matrix.profile }})
     needs: changes
     # `always()` overrides the implicit skip-on-upstream-failure default, so
     # a `changes` failure (e.g. paths-filter erroring) can't silently skip
-    # the one check branch protection requires — it fails safe into running
+    # the checks branch protection requires — it fails safe into running
     # Rust CI rather than trusting an output that was never produced.
     if: |
       always() &&
       (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: default
+            features: ""
+            # Checks that do not depend on features run in this leg only.
+            once: true
+          - profile: pkce-auth
+            features: "--features pkce-auth"
+            once: false
+          - profile: id-token-verify
+            features: "--features id-token-verify"
+            once: false
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
@@ -56,26 +78,31 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 #v1.16.1
         with:
           components: clippy, rustfmt
+          # Legs share a job id, so without this they would overwrite each
+          # other's build cache.
+          cache-key: ${{ matrix.profile }}
 
       - name: Format
+        if: matrix.once
         run: cargo fmt --all --check
 
       - name: Check
-        run: cargo check --all-targets && cargo check --all-targets --features pkce-auth
+        run: cargo check --all-targets ${{ matrix.features }}
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --features pkce-auth -- -D warnings
+        run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
 
       - name: Test
-        run: cargo test --all-targets && cargo test --all-targets --features pkce-auth
+        run: cargo test --all-targets ${{ matrix.features }}
 
       - name: Docs
-        run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps && RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --features pkce-auth
+        run: RUSTDOCFLAGS='-D warnings' cargo doc --no-deps ${{ matrix.features }}
 
       - name: Doc Tests
-        run: cargo test --doc && cargo test --doc --features pkce-auth
+        run: cargo test --doc ${{ matrix.features }}
 
       - name: Check module size limits
+        if: matrix.once
         run: ./cli-engine/scripts/check-module-size.sh
 
       # cli-engine depends on the new cli-engine-macros crate (path + version
@@ -84,6 +111,7 @@ jobs:
       # is expected and not a real publish problem. Tolerate specifically
       # that failure; anything else still fails the check.
       - name: Publish dry run
+        if: matrix.once
         run: |
           if ! output=$(cargo publish --dry-run -p cli-engine 2>&1); then
             echo "$output"
@@ -93,3 +121,28 @@ jobs:
               exit 1
             fi
           fi
+
+  # Keeps the single `Rust` check name that branch protection requires, whatever
+  # the matrix above looks like. Succeeds when the matrix passed, or was skipped
+  # because nothing Rust-related changed; fails on anything else.
+  rust:
+    name: Rust
+    needs: [changes, rust-checks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Rust profile to pass
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CHECKS: ${{ needs.rust-checks.result }}
+        run: |
+          echo "changes=$CHANGES rust-checks=$CHECKS"
+          if [ "$CHECKS" = "success" ]; then
+            exit 0
+          fi
+          # Skipped is only fine when the change detector ran and found nothing.
+          if [ "$CHECKS" = "skipped" ] && [ "$CHANGES" = "success" ]; then
+            exit 0
+          fi
+          echo "A Rust profile did not pass." >&2
+          exit 1
