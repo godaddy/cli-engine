@@ -28,6 +28,7 @@ pub(super) fn valid_token(access_token: &str) -> StoredToken {
         scopes: Vec::new(),
         id_token: None,
         verified_claims: None,
+        verified_audience: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn token_with_scopes(access_token: &str, scopes: &[&str]) -> StoredToken {
         scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
         id_token: None,
         verified_claims: None,
+        verified_audience: None,
     }
 }
 
@@ -53,6 +55,7 @@ fn expired_token() -> StoredToken {
         scopes: Vec::new(),
         id_token: None,
         verified_claims: None,
+        verified_audience: None,
     }
 }
 

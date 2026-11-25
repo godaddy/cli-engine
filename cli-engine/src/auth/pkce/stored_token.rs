@@ -101,6 +101,11 @@ pub(super) struct StoredToken {
     #[serde(skip)]
     #[zeroize(skip)]
     pub(super) verified_claims: Option<Map<String, Value>>,
+    /// The client id (audience) `verified_claims` were verified against. Memory
+    /// only, like the claims, and for the same reason.
+    #[serde(skip)]
+    #[zeroize(skip)]
+    pub(super) verified_audience: Option<String>,
 }
 
 impl std::fmt::Debug for StoredToken {
@@ -141,6 +146,18 @@ impl StoredToken {
             Bearer::AccessToken => self.is_valid(),
             Bearer::IdToken => self.id_token_is_fresh(),
         }
+    }
+
+    /// Whether this token's verified claims can be served for `audience`, the
+    /// client id configured now. `None` means no verifier is configured, so there
+    /// is nothing to match. Otherwise the claims must have been verified in this
+    /// process, and for that same client id: a configuration change since then
+    /// (the environments file is re-read on each resolution) must not let a token
+    /// verified for another client keep serving its identity.
+    pub(super) fn verified_for(&self, audience: Option<&str>) -> bool {
+        audience.is_none_or(|current| {
+            self.verified_claims.is_some() && self.verified_audience.as_deref() == Some(current)
+        })
     }
 
     /// Whether the id_token carries a usable `exp` that is not about to pass.

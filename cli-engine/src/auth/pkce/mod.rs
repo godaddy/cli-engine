@@ -613,12 +613,17 @@ impl PkceAuthProvider {
     }
 
     async fn cached_token(&self, env: &str) -> Option<StoredToken> {
+        // Under a verifier a hit must still match the client id configured now,
+        // exactly as a token read back from storage is checked against it. An
+        // unresolvable configuration is a miss; the storage path reports why.
+        let audience = match self.verifier {
+            Some(_) => Some(self.effective_oauth(env).ok()?.client_id),
+            None => None,
+        };
         let cache = self.cache.read().await;
         cache
             .get(env)
-            .filter(|t| self.is_reusable(t))
-            // Defence in depth: only a token verified in this process is served.
-            .filter(|t| self.verifier.is_none() || t.verified_claims.is_some())
+            .filter(|t| self.is_reusable(t) && t.verified_for(audience.as_deref()))
             .cloned()
     }
 

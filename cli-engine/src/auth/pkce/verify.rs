@@ -126,6 +126,7 @@ pub(super) async fn verify_token(
     match verifier.verify(id_token, audience).await {
         Ok(verified) => {
             token.verified_claims = Some(verified.claims);
+            token.verified_audience = Some(audience.to_owned());
             Ok(Verification::Verified)
         }
         Err(VerifyError::Invalid(reason)) => Ok(Verification::Rejected(reason)),

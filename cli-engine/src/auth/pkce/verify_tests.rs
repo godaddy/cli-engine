@@ -655,3 +655,53 @@ async fn replacing_the_verifier_drops_what_the_old_one_vouched_for() {
     assert!(reused.is_none(), "the new verifier rejected it");
     assert_eq!(strict.calls(), 1, "the new verifier was actually consulted");
 }
+
+/// A token verified for one client id, cached, then served after the configured
+/// client id has become another. Only the comparison is exercised here; the
+/// environments file being re-read is what makes the configured id able to change
+/// in a long-lived process.
+#[tokio::test]
+async fn a_cache_hit_must_match_the_client_id_configured_now() {
+    let verifier = ScriptedVerifier::new(vec![]);
+    let (provider, _storage) = provider_with(&verifier);
+    let verified_for = |audience: &str| {
+        let mut token = good_stored_token();
+        token.verified_claims = Some(verified_claims("real@example.com"));
+        token.verified_audience = Some(audience.to_owned());
+        token
+    };
+
+    // The provider's configured client id is "client-id".
+    provider
+        .store_cached_token("dev", verified_for("client-id"))
+        .await;
+    assert!(provider.cached_token("dev").await.is_some());
+
+    provider
+        .store_cached_token("dev", verified_for("the-previous-client"))
+        .await;
+    assert!(
+        provider.cached_token("dev").await.is_none(),
+        "claims verified for another client must not be served"
+    );
+}
+
+#[tokio::test]
+async fn a_cached_token_with_no_recorded_audience_is_not_served() {
+    let verifier = ScriptedVerifier::new(vec![]);
+    let (provider, _storage) = provider_with(&verifier);
+    let mut token = good_stored_token();
+    token.verified_claims = Some(verified_claims("real@example.com"));
+    provider.store_cached_token("dev", token).await;
+    assert!(provider.cached_token("dev").await.is_none());
+}
+
+#[tokio::test]
+async fn without_a_verifier_the_cache_ignores_audiences() {
+    let storage = Arc::new(MemoryStorage::default());
+    let provider = test_provider().with_app_id("app").with_storage(storage);
+    provider
+        .store_cached_token("dev", good_stored_token())
+        .await;
+    assert!(provider.cached_token("dev").await.is_some());
+}
