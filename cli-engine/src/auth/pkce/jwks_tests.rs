@@ -135,6 +135,8 @@ struct KeyServer {
     hits: Arc<AtomicUsize>,
     /// Body bytes the server managed to write, across all requests.
     sent: Arc<AtomicUsize>,
+    /// The request head (request line and headers) of the latest request.
+    last_head: Arc<Mutex<String>>,
     reply: Arc<Mutex<Reply>>,
     task: JoinHandle<()>,
 }
@@ -145,12 +147,15 @@ impl KeyServer {
         let url = format!("http://{}/keys", listener.local_addr().expect("addr"));
         let hits = Arc::new(AtomicUsize::new(0));
         let sent = Arc::new(AtomicUsize::new(0));
+        let last_head = Arc::new(Mutex::new(String::new()));
         let reply = Arc::new(Mutex::new(reply));
         let task = tokio::spawn({
             let (hits, reply, sent) = (hits.clone(), reply.clone(), sent.clone());
+            let last_head = last_head.clone();
             async move {
                 while let Ok((mut stream, _)) = listener.accept().await {
                     let (hits, reply, sent) = (hits.clone(), reply.clone(), sent.clone());
+                    let last_head = last_head.clone();
                     tokio::spawn(async move {
                         let mut head = Vec::new();
                         let mut buf = [0_u8; 1024];
@@ -161,6 +166,8 @@ impl KeyServer {
                             }
                         }
                         hits.fetch_add(1, Ordering::SeqCst);
+                        *last_head.lock().expect("head lock") =
+                            String::from_utf8_lossy(&head).into_owned();
                         let reply = reply.lock().expect("reply lock").clone();
                         let response = match reply {
                             Reply::Body(body) => format!(
@@ -201,9 +208,18 @@ impl KeyServer {
             url,
             hits,
             sent,
+            last_head,
             reply,
             task,
         }
+    }
+
+    /// The headers of the latest request, lowercased, one `name: value` per line.
+    fn last_request_headers(&self) -> String {
+        self.last_head
+            .lock()
+            .expect("head lock")
+            .to_ascii_lowercase()
     }
 
     fn hits(&self) -> usize {
@@ -727,6 +743,39 @@ async fn a_key_set_just_under_the_limit_is_still_accepted() {
         .verify(&rs256(&f.rsa_a, "key-a", &good_claims()), AUDIENCE)
         .await
         .expect("a large but legitimate key set is accepted");
+}
+
+/// The verifier is built first, as during registration, and the process identity
+/// is published afterwards, as when a command starts. The request must carry the
+/// identity current at request time, and not the attribution headers.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn the_key_request_carries_the_current_user_agent_and_no_attribution_headers() {
+    let _guard = crate::transport::client::UA_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = crate::transport::client::RestoreDefaultUserAgent;
+
+    let server = server_with_both_rsa_keys().await;
+    let verifier = server.verifier();
+
+    crate::transport::set_default_user_agent("published-later/9.9");
+    crate::transport::client::set_default_headers(
+        [("x-client-session-id".to_owned(), "abc123session".to_owned())].into(),
+    );
+
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    verifier.verify(&token, AUDIENCE).await.expect("valid");
+
+    let head = server.last_request_headers();
+    assert!(
+        head.contains("user-agent: published-later/9.9"),
+        "the identity published after construction must be used:\n{head}"
+    );
+    assert!(
+        !head.contains("x-client-session-id") && !head.contains("abc123session"),
+        "attribution headers must not go to the identity provider:\n{head}"
+    );
 }
 
 #[tokio::test]

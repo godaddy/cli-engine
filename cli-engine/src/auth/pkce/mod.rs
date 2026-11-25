@@ -759,7 +759,11 @@ impl PkceAuthProvider {
         // against is the client id it was requested with.
         let oauth = self.effective_oauth(env)?;
         let token = self.run_pkce_flow_with(&oauth, scopes).await?;
-        self.accept_login(env, token, &oauth.client_id).await
+        let token = self.accept_login(env, token, &oauth.client_id).await?;
+        // Announced only now: a token the verifier rejects, or that cannot be
+        // stored, is not a completed authentication.
+        emit_auth_complete_message();
+        Ok(token)
     }
 
     /// Stores and caches a token from a fresh login, after checking it.
@@ -841,7 +845,6 @@ impl PkceAuthProvider {
             .exchange_code_for_token(oauth, &code, &code_verifier, &redirect_uri, scopes)
             .await?;
         verify_id_token_nonce(&token, &nonce, self.require_nonce)?;
-        emit_auth_complete_message();
         Ok(token)
     }
 

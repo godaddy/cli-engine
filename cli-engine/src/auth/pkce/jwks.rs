@@ -19,6 +19,10 @@ use super::verify::{IdTokenVerifier, VerifiedIdToken, VerifyError};
 /// keeps an unresponsive key endpoint from consuming all of it.
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Bound on establishing the connection, so an unroutable key endpoint fails fast
+/// instead of using up the whole fetch budget.
+const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Largest key set accepted, so a hostile or broken endpoint cannot make the CLI
 /// buffer an unbounded response: the body is read incrementally and abandoned once
 /// it passes this. Real key sets are a few kilobytes.
@@ -137,8 +141,15 @@ impl JwksVerifier {
     }
 
     fn build(issuer: String, jwks_uri: String) -> crate::Result<Self> {
-        let client = crate::transport::reqwest_client_builder()
+        // A plain client: the user-agent is attached per request (see `fetch`), as
+        // the provider's token requests do. `reqwest_client_builder` would snapshot
+        // the process identity here, and a verifier is built during registration,
+        // before the identity is published, so it would hold a stale one. It would
+        // also carry attribution headers, including a session-correlation hash,
+        // to an identity provider that has no use for them.
+        let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(JWKS_CONNECT_TIMEOUT)
             .timeout(JWKS_FETCH_TIMEOUT)
             .build()
             .map_err(|err| {
@@ -174,6 +185,10 @@ impl JwksVerifier {
         let mut response = self
             .client
             .get(&self.jwks_uri)
+            .header(
+                reqwest::header::USER_AGENT,
+                crate::transport::client::default_user_agent(),
+            )
             .send()
             .await
             .map_err(|_| unavailable("the key endpoint could not be reached"))?;
