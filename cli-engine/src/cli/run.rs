@@ -21,7 +21,7 @@ use super::{
     },
     lookup::{
         auto_interactive_for, command_prefix_path, find_command_by_colon_path,
-        has_root_version_flag, normalize_optional_global_flags_before_command,
+        has_root_version_flag, normalize_optional_global_flags_before_command, prompt_options_for,
     },
     render::{
         render_bare_group_discovery, render_cli_error, render_completion_print, render_guide,
@@ -254,8 +254,10 @@ where
                 Some(prompter) => prompter.as_ref(),
                 None => &terminal,
             };
-            if let Some(recovery) = crate::prompt::try_recover_missing_args_with(
+            let options = prompt_options_for(cli, &target);
+            if let Some(recovery) = crate::prompt::try_recover_missing_args(
                 prompter,
+                &options,
                 &err,
                 &clap_args,
                 &cli.root,
@@ -703,10 +705,10 @@ fn prompt_for_optional_args(
     };
     let result = crate::prompt::prompt_optional_args(
         prompter,
+        &crate::prompt::PromptOptions::for_spec(&command.spec),
         &cli.root,
         leaf,
         leaf_matches(&matches),
-        &command.spec.prompted_args,
         &parsed_args,
         &cli.config.name,
     );

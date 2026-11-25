@@ -61,6 +61,15 @@ pub(super) fn auto_interactive_for(cli: &Cli, command_path: &str) -> bool {
         .auto_interactive(cli.config.auto_interactive)
 }
 
+/// How the engine words and frames its questions for the command at
+/// `command_path`. A path that is not a registered command gets the defaults.
+pub(super) fn prompt_options_for(cli: &Cli, command_path: &str) -> crate::prompt::PromptOptions {
+    cli.commands
+        .get(command_path)
+        .map(|command| crate::prompt::PromptOptions::for_spec(&command.spec))
+        .unwrap_or_default()
+}
+
 /// Canonical colon-separated path of the longest run of leading `tokens` that
 /// name nested subcommands. Stops at the first token that is not a
 /// subcommand, so trailing positional values (`domain available acme.com`) do

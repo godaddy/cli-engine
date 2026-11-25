@@ -226,6 +226,14 @@ pub(super) fn command_clap_command_with_schema_help(
         spec.name,
         spec.prompted_args
     );
+    debug_assert!(
+        spec.arg_prompts
+            .keys()
+            .all(|id| spec.args.iter().any(|arg| arg.get_id().as_str() == id)),
+        "command {:?} sets a prompt for an arg it does not have: {:?}",
+        spec.name,
+        spec.arg_prompts.keys().collect::<Vec<_>>()
+    );
     let mut command = spec.clap_command();
     command = apply_dry_run_visibility(command, spec);
     command = apply_pagination_args(command, spec);

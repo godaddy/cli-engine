@@ -1,9 +1,9 @@
 //! Interactive recovery from clap's missing-required-argument error, and the
 //! helpers that read a clap command's argument metadata to build prompts.
 
-use std::io::Write as _;
+use std::sync::Arc;
 
-use super::{CANCELLED_EXIT_CODE, Prompter, TerminalPrompter, TextValidator, prompt_confirm};
+use super::{CANCELLED_EXIT_CODE, PromptOptions, Prompter, TextValidator, prompt_confirm};
 use crate::error::CliCoreError;
 
 /// Attempt to interactively recover from a clap `MissingRequiredArgument` error.
@@ -13,43 +13,30 @@ use crate::error::CliCoreError;
 /// declaration order), appends them to the original args, and returns `Some`
 /// with the augmented arg list so the caller can re-parse.
 ///
+/// A text answer is checked against the argument's own value parser, so a
+/// value clap would reject is explained and asked again instead of failing the
+/// re-parse. A guided command ([`PromptOptions::guided`]) is greeted with a
+/// neutral line instead of a missing-argument warning, since being asked is the
+/// expected path for it. Each question uses the text set with
+/// [`CommandSpec::with_arg_prompt`](crate::CommandSpec::with_arg_prompt) when
+/// there is one, and the argument's `--help` sentence otherwise.
+///
 /// Returns `None` if recovery is not possible (non-interactive or not a
 /// missing-arg error). Returns `Some(RecoveryResult::Cancelled { .. })` if
 /// the user cancels mid-prompt.
 ///
 /// # Arguments
 ///
+/// * `prompter` — how to ask the questions
+/// * `options` — how the command words and frames them
 /// * `err` — the clap error from `try_get_matches_from`
 /// * `original_args` — the args that were passed to clap
 /// * `command` — the root `clap::Command` (for arg introspection)
 /// * `app_name` — the CLI binary name (first arg)
-/// * `auto_interactive` — whether the CLI opted into TTY auto-detection
-pub fn try_recover_missing_args(
-    err: &clap::error::Error,
-    original_args: &[String],
-    command: &clap::Command,
-    app_name: &str,
-    auto_interactive: bool,
-) -> Option<RecoveryResult> {
-    try_recover_missing_args_with(
-        &TerminalPrompter,
-        err,
-        original_args,
-        command,
-        app_name,
-        auto_interactive,
-    )
-}
-
-/// Like [`try_recover_missing_args`], asking through `prompter` instead of the
-/// terminal.
-///
-/// A text answer is checked against the argument's own value parser, so a
-/// value clap would reject is explained and asked again instead of failing
-/// the re-parse. The CLI passes the prompter set with
-/// [`CliConfig::with_prompter`](crate::CliConfig::with_prompter).
-pub fn try_recover_missing_args_with(
+/// * `auto_interactive` — whether the command auto-detects a TTY
+pub(crate) fn try_recover_missing_args(
     prompter: &dyn Prompter,
+    options: &PromptOptions,
     err: &clap::error::Error,
     original_args: &[String],
     command: &clap::Command,
@@ -77,22 +64,24 @@ pub fn try_recover_missing_args_with(
     // Resolve the leaf command from the args to get arg metadata.
     let leaf_command = resolve_leaf_command(command, original_args, app_name)?;
 
-    // Print a header so the user knows why they're being prompted.
-    let missing_list: Vec<String> = missing_names
-        .iter()
-        .map(|n| {
-            if n.contains('|') {
-                format_missing_group_label(n, leaf_command)
-            } else {
-                format_missing_arg_label(n, find_arg_def(leaf_command, n))
-            }
-        })
-        .collect();
-    drop(writeln!(
-        std::io::stderr(),
-        "\n  \u{26a0} missing required argument(s): {}",
-        missing_list.join(", ")
-    ));
+    // A command that is meant to ask goes straight to its first question. Any
+    // other command was probably typed incompletely, so say what is missing.
+    if !options.guided {
+        let missing_list: Vec<String> = missing_names
+            .iter()
+            .map(|n| {
+                if n.contains('|') {
+                    format_missing_group_label(n, leaf_command)
+                } else {
+                    format_missing_arg_label(n, find_arg_def(leaf_command, n))
+                }
+            })
+            .collect();
+        prompter.notice(&format!(
+            "\u{26a0} missing required argument(s): {}",
+            missing_list.join(", ")
+        ));
+    }
 
     // Collect prompted values, respecting arg declaration order.
     let mut prompted = PromptedTokens::after_leaf(command, original_args);
@@ -127,7 +116,7 @@ pub fn try_recover_missing_args_with(
             continue;
         }
 
-        let prompt_message = format_prompt_message(&selected_raw, arg_def);
+        let prompt_message = prompt_message_for(&selected_raw, arg_def, options);
         let value = match infer_and_prompt(
             prompter,
             &prompt_message,
@@ -237,7 +226,7 @@ pub enum CommandCorrection {
 }
 
 /// Offer to correct an unknown command spelling. Never prompts when non-interactive;
-/// interactivity follows the same raw-args rules as [`try_recover_missing_args`].
+/// interactivity follows the same raw-args rules as the engine's missing-argument recovery.
 pub fn confirm_command_correction(
     args: &[String],
     suggestion: &str,
@@ -255,7 +244,7 @@ pub fn confirm_command_correction(
 
 /// Result of attempting interactive recovery for missing args.
 #[derive(Debug)]
-pub enum RecoveryResult {
+pub(crate) enum RecoveryResult {
     /// Successfully prompted for all missing values; `args` has the augmented list.
     Recovered {
         /// The augmented argument list, with prompted values filled in.
@@ -403,7 +392,7 @@ pub(super) fn value_validator(
     supplied: Vec<String>,
     allow_blank: bool,
 ) -> TextValidator {
-    std::sync::Arc::new(move |input: &str| {
+    Arc::new(move |input: &str| {
         if input.is_empty() {
             return if allow_blank {
                 Ok(())
@@ -700,6 +689,19 @@ pub(super) fn normalize_prompt_base(text: &str) -> String {
         trimmed.to_owned()
     } else {
         format!("{trimmed}:")
+    }
+}
+
+/// The question for `arg_def`: the text its command set for it, if any, else
+/// the one built from its `--help` sentence.
+pub(super) fn prompt_message_for(
+    raw_name: &str,
+    arg_def: Option<&clap::Arg>,
+    options: &PromptOptions,
+) -> String {
+    match arg_def.and_then(|arg| options.prompt_for(arg.get_id().as_str())) {
+        Some(text) => normalize_prompt_base(text),
+        None => format_prompt_message(raw_name, arg_def),
     }
 }
 

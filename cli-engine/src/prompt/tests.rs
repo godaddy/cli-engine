@@ -1,4 +1,5 @@
 use super::recovery::*;
+use super::{PromptOptions, TerminalPrompter};
 
 #[test]
 fn is_interactive_from_raw_args_non_interactive_flag() {
@@ -147,7 +148,15 @@ fn try_recover_returns_none_for_non_missing_arg_error() {
         .try_get_matches_from(["test", "--name", "invalid"])
         .expect_err("should fail");
     let args: Vec<String> = vec!["test".into(), "--name".into(), "invalid".into()];
-    let result = try_recover_missing_args(&err, &args, &clap::Command::new("test"), "test", true);
+    let result = try_recover_missing_args(
+        &TerminalPrompter,
+        &PromptOptions::default(),
+        &err,
+        &args,
+        &clap::Command::new("test"),
+        "test",
+        true,
+    );
     assert!(result.is_none());
 }
 
@@ -174,7 +183,15 @@ fn try_recover_returns_none_when_non_interactive() {
                 .long("non-interactive")
                 .action(clap::ArgAction::SetTrue),
         );
-    let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test", true);
+    let result = try_recover_missing_args(
+        &TerminalPrompter,
+        &PromptOptions::default(),
+        &err,
+        &args,
+        &lookup_cmd,
+        "test",
+        true,
+    );
     assert!(result.is_none());
 }
 
@@ -189,7 +206,15 @@ fn try_recover_returns_none_when_auto_interactive_disabled() {
     let lookup_cmd =
         clap::Command::new("test").arg(clap::Arg::new("name").long("name").required(true));
     // auto_interactive = false, no explicit --interactive flag → no recovery
-    let result = try_recover_missing_args(&err, &args, &lookup_cmd, "test", false);
+    let result = try_recover_missing_args(
+        &TerminalPrompter,
+        &PromptOptions::default(),
+        &err,
+        &args,
+        &lookup_cmd,
+        "test",
+        false,
+    );
     assert!(result.is_none());
 }
 
@@ -378,12 +403,16 @@ fn only_options_are_prompted_never_positionals() {
     // No answers are scripted: a positional must not trigger a prompt.
     let prompter = ScriptedPrompter::new(Vec::<Answer>::new());
 
+    let options = PromptOptions {
+        prompted_args: vec!["target".to_owned()],
+        ..PromptOptions::default()
+    };
     let result = prompt_optional_args(
         &prompter,
+        &options,
         &root,
         leaf,
         matches.subcommand_matches("go").expect("leaf matches"),
-        &["target".to_owned()],
         &argv,
         "app",
     );

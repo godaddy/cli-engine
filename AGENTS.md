@@ -35,6 +35,7 @@ These instructions apply to the Rust `cli_engine` crate in this workspace.
 - Keep public names idiomatic Rust: snake_case functions and fields, PascalCase types, clear module names.
 - Avoid clever abstractions unless they clearly reduce repeated command-author work.
 - Public APIs should have useful rustdoc comments. Explain behavior, errors, and invariants where they matter.
+- Keep the public surface small. For items that need to be public only _within_ the crate, use `pub(crate)` or `pub(super)`.  Use `pub` only when code outside this crate needs to call it. Every `pub fn` in a `pub mod` is an exported API, and removing or changing them later is a breaking change. Don't add a wrapper that keeps an old signature alongside a new one (`foo` calling `foo_with` calling `foo_with_options`) unless the old signature was a crate export.
 
 ## Creating A Consumer CLI
 

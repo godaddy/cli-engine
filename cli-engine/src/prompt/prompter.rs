@@ -1,12 +1,15 @@
 //! The [`Prompter`] abstraction and its terminal implementation.
 
+use std::io::Write as _;
+use std::sync::Arc;
+
 use super::{
     prompt_confirm, prompt_multi_select, prompt_select, prompt_text, prompt_text_with_validation,
 };
 
 /// Checks one free-text answer; `Err` carries the message shown to the user,
 /// who is then asked again.
-pub type TextValidator = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+pub type TextValidator = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 /// How a command asks the user questions.
 ///
@@ -20,6 +23,16 @@ pub type TextValidator = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Sen
 /// Every method fails with a user-cancelled error (exit code
 /// [`CANCELLED_EXIT_CODE`](crate::prompt::CANCELLED_EXIT_CODE)) when the user gives up.
 pub trait Prompter: std::fmt::Debug + Send + Sync {
+    /// Shows a short heads-up before a run of questions.
+    ///
+    /// The default writes it to stderr, where the terminal prompts appear, after
+    /// a blank line. A prompter overrides this to capture or restyle it; a test
+    /// prompter such as [`ScriptedPrompter`](crate::prompt::ScriptedPrompter)
+    /// records it instead.
+    fn notice(&self, text: &str) {
+        drop(writeln!(std::io::stderr(), "\n  {text}"));
+    }
+
     /// Asks for free text. An empty answer returns an empty string unless a
     /// `validator` rejects it.
     ///
