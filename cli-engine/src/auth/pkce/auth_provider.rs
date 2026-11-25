@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 
 use super::{
-    PkceAuthProvider, StepUp, Verification, ensure_granted, granted_scopes, plan_step_up,
-    union_scopes,
+    PkceAuthProvider, StepUp, Verification, ensure_granted, enumerate, granted_scopes,
+    plan_step_up, union_scopes,
 };
 use crate::{Credential, Result, auth::AuthProvider, auth::CredentialRequest, error::CliCoreError};
 
@@ -85,10 +85,9 @@ impl AuthProvider for PkceAuthProvider {
     }
 
     async fn list_environments(&self) -> Result<Vec<String>> {
-        // Keyring and file-fallback storage do not support listing; return only
-        // the in-memory cache keys as a hint. Tokens that survived a restart via
-        // file fallback are not enumerated here.
-        let cache = self.cache.read().await;
-        Ok(cache.keys().cloned().collect())
+        // Storage backends cannot enumerate, so this reads the provider's own
+        // index (plus a probe of declared environments for credentials saved before
+        // there was one) and keeps only names the backend really holds.
+        Ok(enumerate::environments_with_credentials(self).await)
     }
 }

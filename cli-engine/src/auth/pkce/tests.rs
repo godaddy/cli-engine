@@ -481,24 +481,23 @@ async fn resolve_token_returns_cached_token_without_pkce_flow() {
     assert_eq!(resolved.access_token, "cached-token");
 }
 
-/// list_environments returns only in-memory cache keys; tokens written to
-/// disk via file fallback during a previous session are not enumerated.
+/// An environment is listed because a credential is stored for it, not because a
+/// token happens to be in the in-process cache.
 #[tokio::test]
-async fn list_environments_returns_only_cached_keys() {
-    let provider = test_provider();
+async fn a_cached_token_with_nothing_stored_is_not_listed() {
+    let provider = test_provider().with_storage(Arc::new(MemoryStorage::default()));
     provider.store_cached_token("dev", valid_token("t1")).await;
-    provider.store_cached_token("prod", valid_token("t2")).await;
 
-    let mut envs = provider.list_environments().await.expect("list");
-    envs.sort();
-    assert_eq!(envs, ["dev", "prod"]);
+    let envs = provider.list_environments().await.expect("list");
+    assert!(
+        envs.is_empty(),
+        "nothing is stored, so nothing is listed: {envs:?}"
+    );
 }
 
-/// A provider with no cache entries returns an empty list, regardless of
-/// what credential files may exist on disk from a previous session.
 #[tokio::test]
-async fn list_environments_returns_empty_without_cache() {
-    let provider = test_provider();
+async fn list_environments_is_empty_for_a_fresh_provider() {
+    let provider = test_provider().with_storage(Arc::new(MemoryStorage::default()));
     let envs = provider.list_environments().await.expect("list");
     assert!(envs.is_empty(), "expected empty list for a fresh provider");
 }
