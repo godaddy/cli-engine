@@ -8,10 +8,16 @@
 //! the document must name the issuer it was fetched for (OpenID Connect Discovery
 //! 1.0 section 4.3).
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use serde::Deserialize;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 use super::http_fetch;
 use crate::{Result, error::CliCoreError};
@@ -101,6 +107,14 @@ pub struct OidcDiscovery {
     allowed_hosts: BTreeSet<String>,
     client: reqwest::Client,
     endpoints: OnceCell<OidcEndpoints>,
+    /// Serializes fetch attempts, so only one runs at a time.
+    attempt_lock: Mutex<()>,
+    /// How many attempts have failed. A caller that was waiting for the lock while
+    /// this changed was waiting on an attempt that has since failed, and shares its
+    /// outcome (`last_failure`) instead of starting another.
+    failed_attempts: AtomicU64,
+    /// The message of the most recent failed attempt.
+    last_failure: StdMutex<String>,
     /// Lets tests serve the endpoints from a plain-HTTP loopback server. Not a
     /// field outside tests, so nothing can switch the scheme check off.
     #[cfg(test)]
@@ -150,6 +164,9 @@ impl OidcDiscovery {
             allowed_hosts: BTreeSet::from([host]),
             client,
             endpoints: OnceCell::new(),
+            attempt_lock: Mutex::new(()),
+            failed_attempts: AtomicU64::new(0),
+            last_failure: StdMutex::new(String::new()),
             #[cfg(test)]
             loopback_http,
         })
@@ -193,9 +210,44 @@ impl OidcDiscovery {
     /// described on [`OidcDiscovery`]. The message names the rule and never echoes
     /// the document.
     pub async fn endpoints(&self) -> Result<&OidcEndpoints> {
-        self.endpoints
-            .get_or_try_init(|| self.fetch_and_check())
-            .await
+        if let Some(endpoints) = self.endpoints.get() {
+            return Ok(endpoints);
+        }
+        // Read before waiting: if this changes while this caller queues for the
+        // lock, an attempt it was waiting behind has failed.
+        let seen = self.failed_attempts.load(Ordering::SeqCst);
+        let _attempt = self.attempt_lock.lock().await;
+        if let Some(endpoints) = self.endpoints.get() {
+            return Ok(endpoints);
+        }
+        if self.failed_attempts.load(Ordering::SeqCst) != seen {
+            // Share that attempt's failure. Retrying here would turn one outage
+            // into a request, and a timeout, per waiting caller, one after another.
+            // A caller arriving after the failure sees the new count and tries again.
+            let message = self
+                .last_failure
+                .lock()
+                .map(|failure| failure.clone())
+                .unwrap_or_default();
+            return Err(CliCoreError::message(message));
+        }
+        match self.fetch_and_check().await {
+            Ok(endpoints) => {
+                // Under the lock and checked empty above, so this cannot lose a race;
+                // `get_or_init` would only be needed if it could.
+                drop(self.endpoints.set(endpoints));
+                self.endpoints.get().ok_or_else(|| {
+                    CliCoreError::message("OIDC discovery: the endpoints were not retained")
+                })
+            }
+            Err(err) => {
+                if let Ok(mut failure) = self.last_failure.lock() {
+                    *failure = err.to_string();
+                }
+                self.failed_attempts.fetch_add(1, Ordering::SeqCst);
+                Err(err)
+            }
+        }
     }
 
     /// The URL of the discovery document: the issuer with

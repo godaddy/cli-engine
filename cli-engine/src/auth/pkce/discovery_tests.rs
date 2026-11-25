@@ -74,6 +74,88 @@ async fn concurrent_callers_share_a_single_fetch() {
     assert_eq!(server.hits_for(WELL_KNOWN), 1);
 }
 
+/// During an outage every concurrent caller used to run its own attempt, one after
+/// another once the previous failed, so N callers cost N requests and N timeouts.
+#[tokio::test]
+async fn concurrent_callers_during_an_outage_share_one_failed_attempt() {
+    let server = LoopbackServer::routes([(WELL_KNOWN, Reply::Status(503))]).await;
+    let discovery = Arc::new(OidcDiscovery::new_loopback(server.url("")).expect("discovery"));
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let discovery = discovery.clone();
+            tokio::spawn(async move {
+                discovery
+                    .endpoints()
+                    .await
+                    .map(|_| ())
+                    .expect_err("an outage")
+                    .to_string()
+            })
+        })
+        .collect();
+    for task in tasks {
+        let message = task.await.expect("task");
+        assert!(message.contains("HTTP 503"), "{message}");
+    }
+    assert_eq!(
+        server.hits_for(WELL_KNOWN),
+        1,
+        "callers waiting on one attempt must share its failure"
+    );
+
+    // The failure is not kept past those callers: a later call tries again.
+    discovery.endpoints().await.expect_err("still down");
+    assert_eq!(server.hits_for(WELL_KNOWN), 2);
+}
+
+/// The engine's `--timeout` can drop a caller in the middle of the fetch. The lock
+/// it held is released with it, so the next caller is not left waiting forever.
+#[tokio::test]
+async fn a_caller_dropped_mid_fetch_does_not_block_the_next() {
+    // A server that accepts the connection and never answers, so the first caller
+    // is mid-fetch, holding the lock, when it is dropped.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream); // keep it open, send nothing
+        }
+    });
+    let discovery = Arc::new(OidcDiscovery::new_loopback(&base).expect("discovery"));
+
+    let first =
+        tokio::time::timeout(std::time::Duration::from_millis(200), discovery.endpoints()).await;
+    assert!(first.is_err(), "the first caller is cut off mid-fetch");
+    silent.abort();
+
+    // A healthy server at the same address is not possible, so check the lock
+    // directly: the next caller must get past it and make its own attempt, which
+    // fails fast here because nothing is listening any more.
+    let next = tokio::time::timeout(std::time::Duration::from_secs(10), discovery.endpoints())
+        .await
+        .expect("a caller dropped mid-fetch must not wedge the lock");
+    assert!(next.is_err(), "nothing is serving a document any more");
+}
+
+/// An attempt that fails is not counted against callers that arrive afterwards.
+#[tokio::test]
+async fn a_later_caller_after_a_failure_gets_a_fresh_attempt() {
+    let server = LoopbackServer::routes([(WELL_KNOWN, Reply::Status(503))]).await;
+    let base = server.url("");
+    let discovery = OidcDiscovery::new_loopback(&base).expect("discovery");
+
+    discovery.endpoints().await.expect_err("down");
+    discovery.endpoints().await.expect_err("still down");
+    assert_eq!(server.hits_for(WELL_KNOWN), 2, "each later call retries");
+
+    server.set(WELL_KNOWN, document(&base, |_| {}));
+    discovery.endpoints().await.expect("recovered");
+    assert_eq!(server.hits_for(WELL_KNOWN), 3);
+}
+
 #[tokio::test]
 async fn a_failed_fetch_is_not_remembered() {
     let server = LoopbackServer::routes([(WELL_KNOWN, Reply::Status(503))]).await;
