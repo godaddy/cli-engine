@@ -597,3 +597,137 @@ async fn a_refresh_whose_discovery_fails_falls_back_to_a_login_without_leaking_t
         "the refresh token must not be sent anywhere"
     );
 }
+
+/// An allowed token endpoint that answers a refresh with a 307 pointing at a host
+/// that never passed discovery. A client that follows it re-sends the POST, body
+/// and all, so the refresh token would go to the redirect target.
+#[tokio::test]
+async fn a_refresh_is_never_forwarded_by_a_redirect_from_the_token_endpoint() {
+    let elsewhere = LoopbackServer::routes([("/token", Reply::Status(500))]).await;
+    let server = LoopbackServer::routes([
+        (WELL_KNOWN, Reply::Status(500)),
+        ("/token", Reply::Redirect(elsewhere.url("/token"))),
+    ])
+    .await;
+    let base = server.url("");
+    server.set(WELL_KNOWN, document(&base, |_| {}));
+    let (provider, _storage) = discovery_provider(OidcDiscovery::new_loopback(&base).expect("d"));
+
+    let mut stale = valid_token("old");
+    stale.expires_at = chrono::Utc::now().timestamp() - 3600;
+    stale.refresh_token = Some("secret-refresh-token".to_owned());
+    provider.save_stored("dev", &stale).await.expect("seed");
+
+    // The refresh cannot complete, so the provider falls back to a login, which
+    // cannot start here (the redirect port is held); either way it must fail.
+    let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let provider = provider.with_redirect_port(held.local_addr().expect("addr").port());
+    provider
+        .get_credential("dev", "", "")
+        .await
+        .expect_err("a redirected refresh must not succeed");
+
+    assert_eq!(
+        server.hits_for("/token"),
+        1,
+        "the allowed endpoint was asked"
+    );
+    assert_eq!(
+        elsewhere.hits(),
+        0,
+        "the redirect target must never receive the refresh token"
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn a_code_exchange_is_never_forwarded_by_a_redirect_from_the_token_endpoint() {
+    let elsewhere = LoopbackServer::routes([("/token", Reply::Status(500))]).await;
+    let server =
+        LoopbackServer::routes([("/token", Reply::Redirect(elsewhere.url("/token")))]).await;
+    let provider = PkceAuthProvider::new(
+        "test",
+        "https://example.com/auth",
+        server.url("/token"),
+        "client-id",
+        &["openid"],
+    );
+    let oauth = provider.effective_oauth("dev").expect("oauth");
+
+    provider
+        .exchange_code_for_token(
+            &oauth,
+            "the-code",
+            "the-verifier",
+            "http://127.0.0.1/cb",
+            &[],
+        )
+        .await
+        .expect_err("a redirected exchange must not succeed");
+
+    assert_eq!(server.hits_for("/token"), 1);
+    assert_eq!(
+        elsewhere.hits(),
+        0,
+        "the redirect target must never receive the code or verifier"
+    );
+}
+
+/// With only the token endpoint overridden for the environment, a refresh needs
+/// nothing from discovery, so a discovery outage must not stop it.
+#[tokio::test]
+async fn a_token_only_override_refreshes_without_consulting_discovery() {
+    let token_server = LoopbackServer::routes([(
+        "/token",
+        Reply::Body(json!({"access_token": "refreshed", "expires_in": 3600}).to_string()),
+    )])
+    .await;
+    let discovery_server = LoopbackServer::routes([(WELL_KNOWN, Reply::Status(503))]).await;
+    let environments = Arc::new(Environments::new("dev").with_environment(
+        "dev",
+        EnvTable::new().with("token_url", token_server.url("/token")),
+    ));
+    let storage = Arc::new(MemoryStorage::default());
+    let provider = PkceAuthProvider::new("test", "", "", "client-id", &["openid"])
+        .with_app_id("app")
+        .with_storage(storage)
+        .with_environments(environments)
+        .with_oidc_discovery(Arc::new(
+            OidcDiscovery::new_loopback(discovery_server.url("")).expect("discovery"),
+        ));
+
+    let mut stale = valid_token("old");
+    stale.expires_at = chrono::Utc::now().timestamp() - 3600;
+    stale.refresh_token = Some("refresh-1".to_owned());
+    provider.save_stored("dev", &stale).await.expect("seed");
+
+    let credential = provider
+        .get_credential("dev", "", "")
+        .await
+        .expect("refreshed without discovery");
+    assert_eq!(credential.token, "refreshed");
+    assert_eq!(
+        discovery_server.hits(),
+        0,
+        "a refresh does not need the document"
+    );
+    assert_eq!(token_server.hits_for("/token"), 1);
+}
+
+/// Login does need the authorization endpoint, so the same override still consults
+/// discovery for it.
+#[tokio::test]
+async fn a_token_only_override_still_discovers_the_authorization_endpoint_for_login() {
+    let (server, discovery) = setup(|_| {}).await;
+    let environments = Arc::new(Environments::new("dev").with_environment(
+        "dev",
+        EnvTable::new().with("token_url", "https://override.example.com/token"),
+    ));
+    let provider = PkceAuthProvider::new("test", "", "", "client-id", &["openid"])
+        .with_environments(environments)
+        .with_oidc_discovery(Arc::new(discovery));
+
+    let oauth = provider.resolved_oauth("dev").await.expect("resolved");
+    assert_eq!(oauth.auth_url, server.url("/authorize"));
+    assert_eq!(oauth.token_url, "https://override.example.com/token");
+}

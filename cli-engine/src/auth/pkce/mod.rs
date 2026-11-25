@@ -88,6 +88,7 @@ mod stored_token;
 #[cfg(test)]
 mod tests;
 mod token_endpoint;
+use token_endpoint::Needs;
 mod verify;
 #[cfg(test)]
 mod verify_tests;
@@ -210,7 +211,7 @@ impl PkceAuthProvider {
             redirect_port: RedirectPort::Fixed(REDIRECT_PORT_DEFAULT),
             redirect_uri: None,
             token_timeout: TOKEN_REQUEST_TIMEOUT_DEFAULT,
-            client: reqwest::Client::new(),
+            client: token_endpoint::client(),
             app_id: String::new(),
             storage_override: None,
             store_mode: None,
@@ -568,18 +569,28 @@ impl PkceAuthProvider {
     /// See [`effective_oauth`](Self::effective_oauth), plus any failure of
     /// discovery, which is never answered with a guessed endpoint.
     async fn resolved_oauth(&self, env: &str) -> Result<OAuthSection> {
+        self.resolve_endpoints(env, Needs::Login).await
+    }
+
+    /// Like [`resolved_oauth`](Self::resolved_oauth), but resolves only the
+    /// endpoints `needs` names. A refresh needs the token endpoint alone, so an
+    /// environment that overrides just that one must not depend on discovery being
+    /// reachable, or a working refresh would be abandoned for an interactive login.
+    async fn resolve_endpoints(&self, env: &str, needs: Needs) -> Result<OAuthSection> {
         let mut oauth = self.effective_oauth(env)?;
         let Some(discovery) = &self.discovery else {
             return Ok(oauth);
         };
-        if oauth.auth_url.is_empty() || oauth.token_url.is_empty() {
+        let wants_auth = needs == Needs::Login && oauth.auth_url.is_empty();
+        let wants_token = oauth.token_url.is_empty();
+        if wants_auth || wants_token {
             let endpoints = discovery.endpoints().await?;
-            if oauth.auth_url.is_empty() {
+            if wants_auth {
                 endpoints
                     .authorization_endpoint()
                     .clone_into(&mut oauth.auth_url);
             }
-            if oauth.token_url.is_empty() {
+            if wants_token {
                 endpoints.token_endpoint().clone_into(&mut oauth.token_url);
             }
         }
@@ -743,7 +754,7 @@ impl PkceAuthProvider {
             return Ok(None);
         };
         // One resolution serves both the request and the check of its result.
-        let Ok(oauth) = self.resolved_oauth(env).await else {
+        let Ok(oauth) = self.resolve_endpoints(env, Needs::Refresh).await else {
             return Ok(None);
         };
         let Ok(mut refreshed) = self
