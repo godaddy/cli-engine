@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
     errors::ErrorKind,
-    jwk::{Jwk, JwkSet, PublicKeyUse},
+    jwk::{Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse},
 };
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
@@ -242,11 +242,7 @@ impl IdTokenVerifier for JwksVerifier {
             .kid
             .ok_or_else(|| VerifyError::Invalid("the token names no signing key".to_owned()))?;
         let jwk = self.key_for(&kid).await?;
-        if matches!(&jwk.common.public_key_use, Some(usage) if *usage != PublicKeyUse::Signature) {
-            return Err(VerifyError::Invalid(
-                "the published key is not a signature key".to_owned(),
-            ));
-        }
+        check_key_restrictions(&jwk, header.alg)?;
         let key = DecodingKey::from_jwk(&jwk)
             .map_err(|_| VerifyError::Invalid("the published key is not usable".to_owned()))?;
 
@@ -260,6 +256,31 @@ impl IdTokenVerifier for JwksVerifier {
         check_oidc_claims(&verified.claims, audience)?;
         Ok(VerifiedIdToken::new(verified.claims))
     }
+}
+
+/// Refuses a published key whose own declarations rule out this use, so the
+/// issuer's restrictions bind us as well as its signing.
+///
+/// - `use`, when present, must be `sig`.
+/// - `key_ops`, when present, must include `verify`. An empty list permits nothing.
+/// - `alg`, when present, must be the algorithm the token used: a key published
+///   for RS384 is not one an RS256 token may be checked with.
+///
+/// A key that declares none of these is unrestricted, which is how several
+/// providers publish theirs.
+fn check_key_restrictions(jwk: &Jwk, token_alg: Algorithm) -> Result<(), VerifyError> {
+    let not_for_signatures = |reason: &str| Err(VerifyError::Invalid(reason.to_owned()));
+    if matches!(&jwk.common.public_key_use, Some(usage) if *usage != PublicKeyUse::Signature) {
+        return not_for_signatures("the published key is not a signature key");
+    }
+    if matches!(&jwk.common.key_operations, Some(ops) if !ops.contains(&KeyOperations::Verify)) {
+        return not_for_signatures("the published key is not a signature key");
+    }
+    if matches!(jwk.common.key_algorithm, Some(declared) if declared != KeyAlgorithm::from(token_alg))
+    {
+        return not_for_signatures("the signature algorithm is not accepted");
+    }
+    Ok(())
 }
 
 /// The OpenID Connect Core 3.1.3.7 checks that a generic JWT validator does not

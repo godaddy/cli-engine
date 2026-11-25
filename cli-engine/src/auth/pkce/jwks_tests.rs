@@ -501,6 +501,72 @@ async fn a_key_that_is_not_for_signatures_is_rejected() {
     assert!(reason.contains("not a signature key"), "{reason}");
 }
 
+/// A key set whose only key is key A with `tweak` applied to its JWK.
+async fn server_with_tweaked_key(tweak: impl FnOnce(&mut Value)) -> KeyServer {
+    let mut jwk = rsa_jwk(&fixture().rsa_a, "key-a");
+    tweak(&mut jwk);
+    KeyServer::start(Reply::Body(key_set(vec![jwk]))).await
+}
+
+#[tokio::test]
+async fn a_key_declaring_a_different_algorithm_is_not_used() {
+    // The key says RS384; the token is RS256, signed with the right key.
+    let server = server_with_tweaked_key(|jwk| jwk["alg"] = json!("RS384")).await;
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    let reason = expect_invalid(server.verifier().verify(&token, AUDIENCE).await);
+    assert!(reason.contains("algorithm"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_key_declaring_the_matching_algorithm_or_none_is_used() {
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    let declared = server_with_tweaked_key(|jwk| jwk["alg"] = json!("RS256")).await;
+    declared
+        .verifier()
+        .verify(&token, AUDIENCE)
+        .await
+        .expect("alg matches");
+    // Some providers publish no `alg` at all.
+    let silent = server_with_tweaked_key(|jwk| {
+        jwk.as_object_mut().expect("object").remove("alg");
+    })
+    .await;
+    silent
+        .verifier()
+        .verify(&token, AUDIENCE)
+        .await
+        .expect("no alg is not a restriction");
+}
+
+#[tokio::test]
+async fn a_key_whose_operations_exclude_verify_is_not_used() {
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    for ops in [json!(["sign"]), json!(["encrypt", "wrapKey"]), json!([])] {
+        let server = server_with_tweaked_key(|jwk| {
+            jwk.as_object_mut().expect("object").remove("use");
+            jwk["key_ops"] = ops.clone();
+        })
+        .await;
+        let reason = expect_invalid(server.verifier().verify(&token, AUDIENCE).await);
+        assert!(reason.contains("not a signature key"), "{ops}: {reason}");
+    }
+}
+
+#[tokio::test]
+async fn a_key_whose_operations_include_verify_is_used() {
+    let token = rs256(&fixture().rsa_a, "key-a", &good_claims());
+    let server = server_with_tweaked_key(|jwk| {
+        jwk.as_object_mut().expect("object").remove("use");
+        jwk["key_ops"] = json!(["sign", "verify"]);
+    })
+    .await;
+    server
+        .verifier()
+        .verify(&token, AUDIENCE)
+        .await
+        .expect("verify is permitted");
+}
+
 #[tokio::test]
 async fn keys_are_fetched_once_and_kept_across_verifications() {
     let server = server_with_both_rsa_keys().await;
