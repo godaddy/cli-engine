@@ -2,6 +2,7 @@
 //! of its tokens becomes the bearer credential.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::{TOKEN_EXPIRY_BUFFER_SECS, scopes::decode_jwt_claims};
@@ -89,6 +90,17 @@ pub(super) struct StoredToken {
     /// `access_token`/`refresh_token`, it can carry sensitive claims.
     #[serde(default)]
     pub(super) id_token: Option<String>,
+    /// The id_token's claims as authenticated by the provider's
+    /// [`IdTokenVerifier`](super::IdTokenVerifier), when one is configured.
+    ///
+    /// Held in memory only. `#[serde(skip)]` keeps it out of what is written to
+    /// storage and, just as important, out of what is read back: the stored copy
+    /// is writable by anything running as the user, so a value found there must
+    /// never count as verified. Only a verifier in this process can set it. Not
+    /// secret, so excluded from zeroization.
+    #[serde(skip)]
+    #[zeroize(skip)]
+    pub(super) verified_claims: Option<Map<String, Value>>,
 }
 
 impl std::fmt::Debug for StoredToken {
@@ -113,6 +125,7 @@ impl std::fmt::Debug for StoredToken {
                 },
             )
             .field("scopes", &self.scopes)
+            .field("verified", &self.verified_claims.is_some())
             .finish()
     }
 }

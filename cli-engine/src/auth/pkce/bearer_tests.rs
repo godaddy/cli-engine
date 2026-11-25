@@ -21,7 +21,7 @@ use crate::middleware::CommandMeta;
 /// 2100-01-01T00:00:00Z.
 const FAR_FUTURE_EXP: i64 = 4_102_444_800;
 
-fn id_token_expiring_at(exp: i64) -> String {
+pub(super) fn id_token_expiring_at(exp: i64) -> String {
     make_jwt(&json!({"exp": exp, "email": "id@example.com", "sub": "subject-1"}))
 }
 
@@ -35,14 +35,17 @@ fn id_token_expired() -> String {
 
 /// A stored token whose access token is fine for an hour and whose id_token is
 /// `id_token`.
-fn token_with_id_token(id_token: Option<String>) -> StoredToken {
+pub(super) fn token_with_id_token(id_token: Option<String>) -> StoredToken {
     let mut token = valid_token("access-token");
     token.id_token = id_token;
     token
 }
 
 /// A stored token whose access token has already expired.
-fn token_with_expired_access(id_token: Option<String>, refresh_token: Option<&str>) -> StoredToken {
+pub(super) fn token_with_expired_access(
+    id_token: Option<String>,
+    refresh_token: Option<&str>,
+) -> StoredToken {
     let mut token = token_with_id_token(id_token);
     token.expires_at = Utc::now().timestamp() - 3600;
     token.refresh_token = refresh_token.map(str::to_owned);
@@ -54,7 +57,7 @@ fn id_token_provider() -> PkceAuthProvider {
 }
 
 /// Answers the next request with `body` as JSON and returns the server's base URL.
-fn serve_token_json(body: &Value) -> String {
+pub(super) fn serve_token_json(body: &Value) -> String {
     const HEAD_END: &[u8] = b"\r\n\r\n";
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let base = format!("http://{}/", listener.local_addr().expect("local addr"));

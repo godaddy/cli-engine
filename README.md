@@ -107,6 +107,7 @@ of the resolved format.
 | Feature | Description |
 | --- | --- |
 | `pkce-auth` | Enables `auth::pkce::PkceAuthProvider`, a built-in browser-based OAuth 2.0 PKCE flow with system keychain storage via the `keyring` crate. Adds optional dependencies: `keyring`, `open`, `rand`, `sha2`, `url`. |
+| `id-token-verify` | Implies `pkce-auth`. Adds `auth::pkce::JwksVerifier`, which verifies OIDC id_tokens against the issuer's JSON Web Key Set, and needs the program to enable exactly one `jsonwebtoken` signature backend (`rust_crypto` or `aws_lc_rs`) itself. See [Verifying The id_token](cli-engine/docs/auth.md#verifying-the-id_token). |
 
 ## Verification
 
