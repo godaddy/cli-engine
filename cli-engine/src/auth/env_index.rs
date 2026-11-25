@@ -65,9 +65,11 @@ struct IndexDocument {
 /// `<app>.index`, rather than a file beside the credentials, where a name like
 /// `b.index-index` would reach it. The one way to collide with it is another app, or
 /// provider, whose own name is this one plus `.index`; do not name them that way.
-/// Updates within one process are serialized; two processes updating at the same
-/// moment can lose one of the two additions, which a later [`record`](Self::record)
-/// of that environment repairs.
+/// Updates through one `EnvironmentIndex` are serialized, so share one (in an
+/// [`Arc`](std::sync::Arc)) among everything that records for the same app and
+/// provider: separate instances each have their own lock, and two of them updating at
+/// the same moment can lose one of the two additions, as can two processes. A later
+/// [`record`](Self::record) of that environment repairs it.
 ///
 /// # Examples
 ///

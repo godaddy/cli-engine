@@ -551,3 +551,56 @@ async fn a_login_that_lands_between_the_probe_and_the_prune_is_kept() {
     );
     assert_eq!(listed(&provider_on(&backend)).await, ["dev"]);
 }
+
+/// Regression: a logout deletes the credential and then updates the index. A login
+/// that saves and records the credential in between must not be undone by it.
+#[tokio::test]
+async fn a_login_that_lands_between_the_logout_delete_and_the_index_update_is_kept() {
+    /// Completes a login right after the credential delete, before the logout gets to
+    /// the index.
+    #[derive(Debug)]
+    struct LoginAfterDelete {
+        inner: Arc<dyn CredentialStorage>,
+    }
+    #[async_trait::async_trait]
+    impl CredentialStorage for LoginAfterDelete {
+        async fn load(&self, key: &CredentialKey<'_>) -> Option<String> {
+            self.inner.load(key).await
+        }
+        async fn save(&self, key: &CredentialKey<'_>, value: &str) -> crate::Result<()> {
+            self.inner.save(key, value).await
+        }
+        async fn delete(&self, key: &CredentialKey<'_>) {
+            self.inner.delete(key).await;
+            if key.provider == "test" && key.env == "dev" {
+                let json = serde_json::to_string(&valid_token("relogin")).expect("serialize");
+                self.inner.save(key, &json).await.expect("late save");
+                EnvironmentIndex::new(self.inner.clone(), "app", "test")
+                    .record("dev")
+                    .await
+                    .expect("late record");
+            }
+        }
+    }
+
+    let backend = memory();
+    let racing: Arc<dyn CredentialStorage> = Arc::new(LoginAfterDelete {
+        inner: backend.clone(),
+    });
+    let provider = provider_on(&racing);
+    provider
+        .save_stored("dev", &valid_token("first"))
+        .await
+        .expect("save");
+
+    provider.logout("dev").await.expect("logout");
+
+    assert_eq!(
+        EnvironmentIndex::new(backend.clone(), "app", "test")
+            .list()
+            .await,
+        ["dev"],
+        "the login that landed meanwhile is still indexed"
+    );
+    assert_eq!(listed(&provider_on(&backend)).await, ["dev"]);
+}

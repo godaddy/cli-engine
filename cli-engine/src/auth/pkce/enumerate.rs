@@ -18,18 +18,12 @@ pub(super) async fn record(provider: &PkceAuthProvider, env: &str) {
     }
 }
 
-/// Records that `env` no longer has a stored credential, ignoring a write failure
-/// for the same reason as [`record`]. A stale name is harmless: listing checks it.
+/// Records that `env` no longer has a stored credential, unless one is stored after
+/// all. The check is made under the index's lock, so a login that saved the credential
+/// after the caller deleted it, or last probed it, is not undone. A write failure is
+/// logged and ignored for the same reason as [`record`]; a stale name is harmless,
+/// since listing checks it.
 pub(super) async fn forget(provider: &PkceAuthProvider, env: &str) {
-    if let Err(err) = provider.env_index().await.forget(env).await {
-        tracing::warn!(env, error = %err, "could not remove the environment from the credential index");
-    }
-}
-
-/// Drops `env` from the index unless a credential for it is stored. The check is made
-/// under the index's lock, so a login that saved the credential after the caller
-/// last looked is not undone.
-async fn forget_if_still_absent(provider: &PkceAuthProvider, env: &str) {
     let result = provider
         .env_index()
         .await
@@ -76,7 +70,7 @@ pub(super) async fn environments_with_credentials(provider: &PkceAuthProvider) -
         } else if indexed.contains(&env) {
             // Named by the index but gone: drop the stale name, unless a login
             // has saved it again since the probe above.
-            forget_if_still_absent(provider, &env).await;
+            forget(provider, &env).await;
         }
     }
     present

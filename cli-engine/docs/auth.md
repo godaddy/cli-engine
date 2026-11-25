@@ -395,7 +395,7 @@ So `PkceAuthProvider` keeps the list itself, as one small entry in the same back
 
 A credential saved before there was an index is found when its environment is declared to the provider (`with_environments`), which is probed and, if present, indexed; with no declared environment there is nothing to probe, and a fresh login or any save records it. The index is also available directly, as `EnvironmentIndex`, for a custom `AuthProvider` built on `CredentialStorage`.
 
-Two processes saving at the same moment can lose one of the two additions; the next save of that environment repairs it. When `auto` storage's keychain is unavailable the index falls back to the file along with the credentials, so what is listed always matches what can actually be loaded.
+Two processes saving at the same moment can lose one of the two additions; the next save of that environment repairs it. The same holds for two `EnvironmentIndex` values over the same app and provider in one process, since each has its own lock: share one. (A `PkceAuthProvider` already does.) When `auto` storage's keychain is unavailable the index falls back to the file along with the credentials, so what is listed always matches what can actually be loaded. One consequence is worth knowing: credentials saved to the file while the keychain was unavailable stay in the file when the keychain returns, and are not loadable (or listed) while it is up. If the index entry in the file is then replaced by a keychain save, a later outage lists those credentials only if their environments are declared with `with_environments`, which probes and re-indexes them.
 
 ### Selecting a mode
 
