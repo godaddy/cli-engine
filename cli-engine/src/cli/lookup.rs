@@ -70,23 +70,6 @@ pub(super) fn prompt_options_for(cli: &Cli, command_path: &str) -> crate::prompt
         .unwrap_or_default()
 }
 
-/// Canonical colon-separated path of the longest run of leading `tokens` that
-/// name nested subcommands. Stops at the first token that is not a
-/// subcommand, so trailing positional values (`domain available acme.com`) do
-/// not hide the command.
-pub(super) fn command_prefix_path(root: &Command, tokens: &[String]) -> String {
-    let mut current = root;
-    let mut canonical = Vec::new();
-    for token in tokens {
-        let Some(next) = current.find_subcommand(token) else {
-            break;
-        };
-        canonical.push(next.get_name().to_owned());
-        current = next;
-    }
-    canonical.join(":")
-}
-
 fn canonical_path_from_parts(root: &Command, parts: &[String]) -> Option<String> {
     if parts.is_empty() {
         return Some(String::new());

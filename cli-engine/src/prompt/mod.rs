@@ -20,7 +20,7 @@ pub(crate) use optional::{OptionalPromptResult, prompt_optional_args};
 pub(crate) use options::PromptOptions;
 pub use prompter::{Prompter, TerminalPrompter, TextValidator};
 pub use recovery::{CommandCorrection, build_resume_command, confirm_command_correction};
-pub(crate) use recovery::{RecoveryResult, try_recover_missing_args};
+pub(crate) use recovery::{RecoveryResult, leaf_command_path, try_recover_missing_args};
 pub use scripted::{Answer, ScriptedPrompter};
 
 use crate::error::CliCoreError;

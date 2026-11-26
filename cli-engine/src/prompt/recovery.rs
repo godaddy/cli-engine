@@ -211,7 +211,7 @@ impl PromptedTokens {
 
 /// Index just past the leaf command's name in `args`, if one is named.
 fn leaf_end_index(root: &clap::Command, args: &[String]) -> Option<usize> {
-    walk_to_leaf(root, args, root.get_name()).1
+    walk_to_leaf(root, args, root.get_name()).end
 }
 
 /// Outcome of a "did you mean X?" correction prompt.
@@ -284,7 +284,27 @@ pub(super) fn resolve_leaf_command<'cmd>(
     args: &[String],
     app_name: &str,
 ) -> Option<&'cmd clap::Command> {
-    Some(walk_to_leaf(root, args, app_name).0)
+    Some(walk_to_leaf(root, args, app_name).command)
+}
+
+/// Canonical colon-separated path of the command `args` names, such as
+/// `domain:make`, or an empty string when none is named.
+///
+/// Uses the same argument-aware walk as recovery itself, so the settings found
+/// for a command always belong to the command whose arguments are being asked
+/// for. Aliases resolve to the command's own name.
+pub(crate) fn leaf_command_path(root: &clap::Command, args: &[String], app_name: &str) -> String {
+    walk_to_leaf(root, args, app_name).path.join(":")
+}
+
+/// What [`walk_to_leaf`] found.
+struct LeafWalk<'cmd> {
+    /// The deepest command named.
+    command: &'cmd clap::Command,
+    /// The index just past that command's name, if a subcommand is named.
+    end: Option<usize>,
+    /// The canonical names from the root down to `command`.
+    path: Vec<String>,
 }
 
 /// Walks `args` down the command tree the way the parser does, returning the
@@ -299,10 +319,11 @@ fn walk_to_leaf<'cmd>(
     root: &'cmd clap::Command,
     args: &[String],
     app_name: &str,
-) -> (&'cmd clap::Command, Option<usize>) {
+) -> LeafWalk<'cmd> {
     let value_flags = crate::flags::derive_value_flags(root);
     let mut current = root;
     let mut end = None;
+    let mut path = Vec::new();
     let mut index = 1;
     while index < args.len() {
         let arg = &args[index];
@@ -323,11 +344,16 @@ fn walk_to_leaf<'cmd>(
             Some(sub) => {
                 current = sub;
                 end = Some(index);
+                path.push(sub.get_name().to_owned());
             }
             None => break,
         }
     }
-    (current, end)
+    LeafWalk {
+        command: current,
+        end,
+        path,
+    }
 }
 
 /// Infer the prompt type from clap arg metadata and prompt accordingly.

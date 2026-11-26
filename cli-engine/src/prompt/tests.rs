@@ -487,3 +487,34 @@ fn an_argument_the_matched_command_lacks_is_not_populated_in_any_profile() {
     // absent; both must read as not populated.
     assert!(!populated(&matches, &stranger));
 }
+
+#[test]
+fn the_command_path_is_found_past_clustered_flags_option_values_and_aliases() {
+    let root = clap::Command::new("app")
+        .arg(
+            clap::Arg::new("loud")
+                .short('v')
+                .global(true)
+                .action(clap::ArgAction::Count),
+        )
+        .arg(clap::Arg::new("region").long("region").global(true))
+        .subcommand(
+            clap::Command::new("tool")
+                .alias("t")
+                .subcommand(clap::Command::new("init")),
+        );
+    let path = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        leaf_command_path(&root, &args, "app")
+    };
+
+    // `-vv` is two counted flags and takes no value, so it hides nothing.
+    assert_eq!(path(&["app", "-vv", "tool", "init"]), "tool:init");
+    // `--region tool` consumes `tool`; an alias resolves to the canonical name.
+    assert_eq!(path(&["app", "--region", "tool", "t", "init"]), "tool:init");
+    // Flags and values after the command don't change which command it is.
+    assert_eq!(path(&["app", "tool", "init", "--region", "x"]), "tool:init");
+    // The walk stops at the first word that is not a subcommand.
+    assert_eq!(path(&["app", "tool", "nope"]), "tool");
+    assert_eq!(path(&["app"]), "");
+}
