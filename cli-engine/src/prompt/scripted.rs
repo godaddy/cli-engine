@@ -1,5 +1,8 @@
 //! A [`Prompter`] that replays canned answers, for tests.
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use super::{Prompter, TextValidator, inquire_error_to_cli};
 use crate::error::CliCoreError;
 
@@ -35,8 +38,9 @@ impl Answer {
 /// prompt it did not plan for.
 #[derive(Debug, Default)]
 pub struct ScriptedPrompter {
-    answers: std::sync::Mutex<std::collections::VecDeque<Answer>>,
-    transcript: std::sync::Mutex<Vec<String>>,
+    answers: Mutex<VecDeque<Answer>>,
+    transcript: Mutex<Vec<String>>,
+    notices: Mutex<Vec<String>>,
 }
 
 impl ScriptedPrompter {
@@ -44,8 +48,9 @@ impl ScriptedPrompter {
     #[must_use]
     pub fn new(answers: impl IntoIterator<Item = Answer>) -> Self {
         Self {
-            answers: std::sync::Mutex::new(answers.into_iter().collect()),
-            transcript: std::sync::Mutex::default(),
+            answers: Mutex::new(answers.into_iter().collect()),
+            transcript: Mutex::default(),
+            notices: Mutex::default(),
         }
     }
 
@@ -54,6 +59,16 @@ impl ScriptedPrompter {
     #[must_use]
     pub fn transcript(&self) -> Vec<String> {
         self.transcript
+            .lock()
+            .map(|lines| lines.clone())
+            .unwrap_or_default()
+    }
+
+    /// Every [`notice`](Prompter::notice) shown so far, in order. Notices are
+    /// kept apart from [`transcript`](Self::transcript), which holds questions.
+    #[must_use]
+    pub fn notices(&self) -> Vec<String> {
+        self.notices
             .lock()
             .map(|lines| lines.clone())
             .unwrap_or_default()
@@ -97,6 +112,12 @@ impl ScriptedPrompter {
 }
 
 impl Prompter for ScriptedPrompter {
+    fn notice(&self, text: &str) {
+        if let Ok(mut lines) = self.notices.lock() {
+            lines.push(text.to_owned());
+        }
+    }
+
     fn text(
         &self,
         message: &str,

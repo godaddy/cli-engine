@@ -83,6 +83,11 @@ pub struct CommandSpec {
     /// Empty by default: the engine only prompts for *required* args unless a
     /// command names optional ones here.
     pub prompted_args: Vec<String>,
+    /// Question text for args the engine prompts for, keyed by arg id.
+    ///
+    /// Set with [`with_arg_prompt`](CommandSpec::with_arg_prompt). An arg
+    /// without an entry is asked with its `--help` sentence.
+    pub arg_prompts: BTreeMap<String, String>,
     /// Whether this command runs interactively by default on a terminal.
     ///
     /// Set with [`with_interactivity`](CommandSpec::with_interactivity).
@@ -607,6 +612,29 @@ impl CommandSpec {
         S: Into<String>,
     {
         self.prompted_args = ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the question the engine asks when it prompts for an arg.
+    ///
+    /// By default a question is the arg's `--help` sentence. That sentence
+    /// describes the flag, so it can read oddly as a question, for example
+    /// `Your domain name, which identifies you as the provider, e.g. acme.com`.
+    /// Pass the id of one of this command's args and the text to ask instead,
+    /// for example `Provider ID (your domain name)`. That text replaces the
+    /// help sentence in the question for that arg only.
+    ///
+    /// It applies whether the engine asks for a missing required arg or for an
+    /// optional arg named in
+    /// [`with_prompted_args`](CommandSpec::with_prompted_args). `--help` and
+    /// schema output keep the original help text. The engine drops a trailing
+    /// `:` or `.` from the text and adds its own colon, and it appends
+    /// `(optional)` for an optional arg. Calling this again for the same id
+    /// replaces the text. Registration debug-asserts that every id names an arg
+    /// of this command.
+    #[must_use]
+    pub fn with_arg_prompt(mut self, id: impl Into<String>, text: impl Into<String>) -> Self {
+        self.arg_prompts.insert(id.into(), text.into());
         self
     }
 

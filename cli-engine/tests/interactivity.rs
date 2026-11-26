@@ -1407,4 +1407,174 @@ mod prompting {
             prompter.transcript()
         );
     }
+
+    /// A command with two required options, to see how the engine frames and
+    /// words the questions it asks for them.
+    fn framing_cli(
+        prompter: Arc<ScriptedPrompter>,
+        policy: cli_engine::InteractivityPolicy,
+        with_prompts: bool,
+    ) -> Cli {
+        let mut spec = CommandSpec::new("init", "Create a thing")
+            .no_auth(true)
+            .with_interactivity(policy)
+            .with_arg(
+                Arg::new("provider-id")
+                    .long("provider-id")
+                    .help("Your domain name, which identifies you as the provider, e.g. acme.com")
+                    .required(true),
+            )
+            .with_arg(
+                Arg::new("note")
+                    .long("note")
+                    .help("A free-form note, e.g. a reminder")
+                    .value_name("TEXT"),
+            )
+            .with_prompted_args(["note"]);
+        if with_prompts {
+            spec = spec
+                .with_arg_prompt("provider-id", "Provider ID (your domain name).")
+                .with_arg_prompt("note", "Note");
+        }
+        let shared: Arc<dyn Prompter> = prompter;
+        Cli::new(
+            CliConfig::new("test-cli", "Test CLI", "test-cli")
+                .with_prompter(shared)
+                .with_modules(vec![Module::new("Test", move |_ctx| {
+                    RuntimeGroupSpec::new(GroupSpec::new("tool", "Tools")).with_command(
+                        RuntimeCommandSpec::new(spec.clone(), async |_credential, args| {
+                            Ok(CommandResult::new(json!({
+                                "provider": args.get("provider-id"),
+                                "note": args.get("note"),
+                            })))
+                        }),
+                    )
+                })]),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_guided_command_goes_straight_to_its_first_question() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("acme.com"),
+            Answer::text(""),
+        ]));
+        let output = framing_cli(
+            Arc::clone(&prompter),
+            cli_engine::InteractivityPolicy::DefaultOnTty,
+            false,
+        )
+        .run(["test-cli", "tool", "init", "--interactive", "--json"])
+        .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        // No greeting and no warning: nothing is shown before the first question.
+        assert!(prompter.notices().is_empty(), "{:?}", prompter.notices());
+        assert!(
+            prompter.transcript()[0].starts_with("Your domain name"),
+            "{:?}",
+            prompter.transcript()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_command_keeps_the_missing_argument_warning() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("acme.com"),
+            Answer::text(""),
+        ]));
+        let output = framing_cli(
+            Arc::clone(&prompter),
+            cli_engine::InteractivityPolicy::Inherit,
+            false,
+        )
+        .run(["test-cli", "tool", "init", "--interactive", "--json"])
+        .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let notices = prompter.notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("missing required argument(s): --provider-id"),
+            "{notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_can_word_its_own_questions() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("acme.com"),
+            Answer::text("hello"),
+        ]));
+        let output = framing_cli(
+            Arc::clone(&prompter),
+            cli_engine::InteractivityPolicy::DefaultOnTty,
+            true,
+        )
+        .run(["test-cli", "tool", "init", "--interactive", "--json"])
+        .await;
+
+        assert_eq!(output.exit_code, 0, "{}", output.rendered);
+        let value: serde_json::Value = serde_json::from_str(&output.rendered).expect("json");
+        assert_eq!(value["data"]["provider"], json!("acme.com"));
+        assert_eq!(value["data"]["note"], json!("hello"));
+        // A trailing dot is dropped and the engine adds its own colon; an
+        // optional arg gets the "(optional)" marker.
+        assert_eq!(
+            prompter.transcript(),
+            ["Provider ID (your domain name):", "Note (optional):"]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_custom_question_the_help_sentence_is_used() {
+        let prompter = Arc::new(ScriptedPrompter::new([
+            Answer::text("acme.com"),
+            Answer::text(""),
+        ]));
+        framing_cli(
+            Arc::clone(&prompter),
+            cli_engine::InteractivityPolicy::DefaultOnTty,
+            false,
+        )
+        .run(["test-cli", "tool", "init", "--interactive", "--json"])
+        .await;
+
+        assert_eq!(
+            prompter.transcript()[0],
+            "Your domain name, which identifies you as the provider, e.g. acme.com:"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_question_does_not_change_help_output() {
+        let help = async |with_prompts: bool| {
+            let prompter = Arc::new(ScriptedPrompter::new([]));
+            framing_cli(
+                prompter,
+                cli_engine::InteractivityPolicy::DefaultOnTty,
+                with_prompts,
+            )
+            .run(["test-cli", "tool", "init", "--help"])
+            .await
+            .rendered
+        };
+        assert_eq!(help(false).await, help(true).await);
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "sets a prompt for an arg it does not have")
+    )]
+    fn a_prompt_for_an_unknown_arg_panics_on_registration() {
+        let mut cli = Cli::new(CliConfig::new("test-cli", "Test CLI", "test-cli"));
+        cli.add_command(RuntimeCommandSpec::new(
+            CommandSpec::new("bad", "Bad")
+                .no_auth(true)
+                .with_arg(Arg::new("real").long("real"))
+                .with_arg_prompt("missing", "Question"),
+            async |_credential, _args| Ok(CommandResult::new(json!({}))),
+        ));
+    }
 }

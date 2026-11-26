@@ -1,15 +1,15 @@
 //! Prompting for optional arguments a command asked to be prompted for.
 
-use super::Prompter;
 use super::recovery::{
-    PromptedTokens, answer_problem, build_resume_command, format_prompt_message, is_cancelled,
+    PromptedTokens, answer_problem, build_resume_command, is_cancelled, prompt_message_for,
     value_validator,
 };
+use super::{PromptOptions, Prompter};
 use crate::error::CliCoreError;
 
 /// Result of asking for optional args.
 #[derive(Debug)]
-pub enum OptionalPromptResult {
+pub(crate) enum OptionalPromptResult {
     /// Prompting finished; `args` is the full argument list with the answers
     /// added, equal to the input when the user skipped everything.
     Done {
@@ -29,20 +29,21 @@ pub enum OptionalPromptResult {
     },
 }
 
-/// Asks for the optional args a command named with
-/// [`CommandSpec::with_prompted_args`](crate::CommandSpec::with_prompted_args)
-/// that the user has not supplied.
+/// Asks for the optional args named in [`PromptOptions::prompted_args`] (set
+/// with [`CommandSpec::with_prompted_args`](crate::CommandSpec::with_prompted_args))
+/// that the user has not supplied, wording each question with
+/// [`PromptOptions::arg_prompts`] when the command set one.
 ///
 /// `matches` are the leaf matches from a successful parse of `supplied`, used
 /// to tell which args were given (on the command line or by environment
 /// variable). `leaf` is the command's `clap` definition. A blank answer skips
 /// the arg. Answers are validated against the arg's own value parser.
-pub fn prompt_optional_args(
+pub(crate) fn prompt_optional_args(
     prompter: &dyn Prompter,
+    options: &PromptOptions,
     root: &clap::Command,
     leaf: &clap::Command,
     matches: &clap::ArgMatches,
-    prompted_ids: &[String],
     supplied: &[String],
     app_name: &str,
 ) -> OptionalPromptResult {
@@ -50,7 +51,7 @@ pub fn prompt_optional_args(
 
     let mut prompted = PromptedTokens::after_leaf(root, supplied);
 
-    for id in prompted_ids {
+    for id in &options.prompted_args {
         let Some(arg) = leaf.get_arguments().find(|a| a.get_id().as_str() == id) else {
             continue;
         };
@@ -66,7 +67,7 @@ pub fn prompt_optional_args(
             continue;
         }
 
-        let message = optional_prompt_message(id, arg);
+        let message = optional_prompt_message(id, arg, options);
         let so_far = prompted.applied(supplied);
         match ask_optional(prompter, &message, arg, root, &so_far) {
             Ok(Some(value)) => prompted.push(Some(arg), &value),
@@ -83,9 +84,9 @@ pub fn prompt_optional_args(
     }
 }
 
-/// The prompt text for an optional arg: its help, marked optional.
-fn optional_prompt_message(id: &str, arg: &clap::Arg) -> String {
-    let base = format_prompt_message(id, Some(arg));
+/// The prompt text for an optional arg: its question, marked optional.
+fn optional_prompt_message(id: &str, arg: &clap::Arg, options: &PromptOptions) -> String {
+    let base = prompt_message_for(id, Some(arg), options);
     format!("{} (optional):", base.trim_end_matches(':'))
 }
 

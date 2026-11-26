@@ -20,8 +20,8 @@ use super::{
         install_debug_transport_logger, parse_command_timeout,
     },
     lookup::{
-        auto_interactive_for, command_prefix_path, find_command_by_colon_path,
-        has_root_version_flag, normalize_optional_global_flags_before_command,
+        auto_interactive_for, find_command_by_colon_path, has_root_version_flag,
+        normalize_optional_global_flags_before_command, prompt_options_for,
     },
     render::{
         render_bare_group_discovery, render_cli_error, render_completion_print, render_guide,
@@ -245,17 +245,16 @@ where
         Ok(matches) => (matches, clap_args.clone()),
         Err(err) => {
             // Attempt interactive recovery for missing required arguments.
-            let target = command_prefix_path(
-                &cli.root,
-                &positional_command_tokens(&clap_args, &cli.config.name, &bool_flags, &value_flags),
-            );
+            let target = crate::prompt::leaf_command_path(&cli.root, &clap_args, &cli.config.name);
             let terminal = crate::prompt::TerminalPrompter;
             let prompter: &dyn crate::prompt::Prompter = match &cli.middleware.prompter {
                 Some(prompter) => prompter.as_ref(),
                 None => &terminal,
             };
-            if let Some(recovery) = crate::prompt::try_recover_missing_args_with(
+            let options = prompt_options_for(cli, &target);
+            if let Some(recovery) = crate::prompt::try_recover_missing_args(
                 prompter,
+                &options,
                 &err,
                 &clap_args,
                 &cli.root,
@@ -703,10 +702,10 @@ fn prompt_for_optional_args(
     };
     let result = crate::prompt::prompt_optional_args(
         prompter,
+        &crate::prompt::PromptOptions::for_spec(&command.spec),
         &cli.root,
         leaf,
         leaf_matches(&matches),
-        &command.spec.prompted_args,
         &parsed_args,
         &cli.config.name,
     );

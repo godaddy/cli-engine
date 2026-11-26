@@ -9,18 +9,18 @@
 //! returns `true`.
 
 mod optional;
+mod options;
 mod prompter;
 mod recovery;
 mod scripted;
 #[cfg(test)]
 mod tests;
 
-pub use optional::{OptionalPromptResult, prompt_optional_args};
+pub(crate) use optional::{OptionalPromptResult, prompt_optional_args};
+pub(crate) use options::PromptOptions;
 pub use prompter::{Prompter, TerminalPrompter, TextValidator};
-pub use recovery::{
-    CommandCorrection, RecoveryResult, build_resume_command, confirm_command_correction,
-    try_recover_missing_args, try_recover_missing_args_with,
-};
+pub use recovery::{CommandCorrection, build_resume_command, confirm_command_correction};
+pub(crate) use recovery::{RecoveryResult, leaf_command_path, try_recover_missing_args};
 pub use scripted::{Answer, ScriptedPrompter};
 
 use crate::error::CliCoreError;
